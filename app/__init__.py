@@ -1,0 +1,1 @@
+"""Patch Lab desktop application."""

@@ -1,0 +1,7 @@
+These SVGs use the visual conventions and path geometry of Lucide Icons.
+Lucide is licensed under the ISC License: https://lucide.dev/license
+
+Copyright (c) Lucide Contributors
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.

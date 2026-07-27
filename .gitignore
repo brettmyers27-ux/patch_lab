@@ -1,0 +1,38 @@
+# Private/runtime data — never publish preset content, renders, models, or history.
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.wav
+*.flac
+*.fxp
+*.SerumPreset
+*.vstpreset
+
+# Python environments and caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Credentials and local preferences.
+.env
+.env.*
+!.env.example
+privacy-settings.json
+**/privacy-settings.json
+
+# OS/editor/build artifacts.
+.DS_Store
+*.log
+build/
+dist/
+packaging/build/
+packaging/dist/
+*.spec.bak
+
+# Local Codex release-operation prompt (contains audit search vocabulary).
+docs/codex-publish-v1-and-first-run.md
