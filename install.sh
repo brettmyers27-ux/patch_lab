@@ -125,6 +125,8 @@ else
 fi
 
 .venv/bin/python scripts/install_support.py clap --install-root "$INSTALL_ROOT" || exit 1
+say "Preparing CLAP runtime files for offline first use..."
+.venv/bin/python scripts/cache_clap.py || fail "CLAP runtime preparation failed. Check the network connection and rerun; completed downloads will be reused."
 .venv/bin/python scripts/install_support.py artifacts --relay-url "$RELAY_URL" --install-root "$INSTALL_ROOT" || exit 1
 
 say "Installing the Finder launcher..."
@@ -151,10 +153,12 @@ printf -v RELAY_URL_Q '%q' "$RELAY_URL"
 printf -v INSTALL_ROOT_Q '%q' "$INSTALL_ROOT"
 printf -v PYTHON_PATH_Q '%q' "$INSTALL_ROOT/.venv/bin/python"
 printf -v APP_MAIN_Q '%q' "$INSTALL_ROOT/app/main.py"
+printf -v MODEL_CACHE_Q '%q' "$INSTALL_ROOT/data/models/huggingface"
 cat > "$LAUNCHER_TMP/Contents/MacOS/PatchLab" <<EOF
 #!/bin/bash
 export PATCHLAB_DISTRIBUTION_MODE=1
 export PATCHLAB_RELAY_URL=$RELAY_URL_Q
+export PATCHLAB_MODEL_CACHE=$MODEL_CACHE_Q
 cd $INSTALL_ROOT_Q
 exec $PYTHON_PATH_Q $APP_MAIN_Q
 EOF

@@ -200,11 +200,14 @@ def detect_platform_env() -> PlatformEnv:
             f"Unsupported operating system {system_name!r}; Patch Lab supports Windows and macOS."
         )
 
-    model_cache = (
+    default_model_cache = (
         app_data_dir / "models" / "huggingface"
         if os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1"
         else Path(__file__).resolve().parents[1] / "data" / "models" / "huggingface"
     )
+    model_cache = Path(
+        os.environ.get("PATCHLAB_MODEL_CACHE", str(default_model_cache))
+    ).expanduser().resolve()
     model_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(model_cache))
     os.environ.setdefault("TRANSFORMERS_CACHE", str(model_cache / "transformers"))

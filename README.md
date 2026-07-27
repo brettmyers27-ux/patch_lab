@@ -25,9 +25,10 @@ The first install downloads roughly 2–3 GB of Python packages from PyPI, the
 2.35 GB public LAION-CLAP music checkpoint from Hugging Face, and 240 MB of
 passcode-gated PatchLab models, index, and factory fingerprints. Expect roughly
 5 GB of network transfer and 15–45 minutes on typical broadband. Downloads are
-checksum-verified and resumable. The result is a small `PatchLab.app` launcher
-in `~/Applications`; subsequent installer runs update safely and skip completed
-work.
+checksum-verified and resumable. The installer also caches CLAP's small runtime
+metadata/tokenizer files so the first match does not need another network
+request. The result is a small `PatchLab.app` launcher in `~/Applications`;
+subsequent installer runs update safely and skip completed work.
 
 Patch Lab is a cross-platform desktop application for cataloging, rendering,
 learning, and matching Serum presets. Development is deliberately gate-driven:
