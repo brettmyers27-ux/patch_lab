@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -84,6 +85,12 @@ class AccessGateTest(unittest.TestCase):
             self.assertTrue(offline)
             local.continue_locally()
             self.assertFalse(local.needs_prompt())
+            self.assertEqual(os.environ.get("PATCHLAB_DISABLE_RELAY"), "1")
+            os.environ.pop("PATCHLAB_DISABLE_RELAY", None)
+            restarted = AccessManager(local_store, relay_url="http://relay.invalid")
+            self.assertFalse(restarted.needs_prompt())
+            self.assertEqual(os.environ.get("PATCHLAB_DISABLE_RELAY"), "1")
+            os.environ.pop("PATCHLAB_DISABLE_RELAY", None)
 
 
 if __name__ == "__main__":

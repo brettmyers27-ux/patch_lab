@@ -116,6 +116,8 @@ class AccessManager:
 
     def needs_prompt(self) -> bool:
         state = self.store.load()
+        if state.local_only:
+            os.environ["PATCHLAB_DISABLE_RELAY"] = "1"
         return not state.authenticated_once and not state.local_only
 
     def authenticate(self, passcode: str) -> tuple[bool, str, bool]:
