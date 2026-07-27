@@ -125,8 +125,14 @@ else
 fi
 
 .venv/bin/python scripts/install_support.py clap --install-root "$INSTALL_ROOT" || exit 1
-say "Preparing CLAP runtime files for offline first use..."
-.venv/bin/python scripts/cache_clap.py || fail "CLAP runtime preparation failed. Check the network connection and rerun; completed downloads will be reused."
+CLAP_RUNTIME_MARKER="$INSTALL_ROOT/data/models/huggingface/.patchlab-clap-runtime-v1"
+if [ ! -f "$CLAP_RUNTIME_MARKER" ]; then
+    say "Preparing CLAP runtime files for offline first use..."
+    .venv/bin/python scripts/cache_clap.py || fail "CLAP runtime preparation failed. Check the network connection and rerun; completed downloads will be reused."
+    : > "$CLAP_RUNTIME_MARKER"
+else
+    say "CLAP runtime files already prepared; skipping model initialization."
+fi
 .venv/bin/python scripts/install_support.py artifacts --relay-url "$RELAY_URL" --install-root "$INSTALL_ROOT" || exit 1
 
 say "Installing the Finder launcher..."
