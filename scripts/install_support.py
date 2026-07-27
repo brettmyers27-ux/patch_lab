@@ -128,7 +128,7 @@ def _download(
 
 
 def _auth(args: argparse.Namespace) -> None:
-    passcode = sys.stdin.read()
+    passcode = sys.stdin.read().rstrip("\r\n")
     if not passcode:
         raise InstallError("no group passcode was supplied")
     manager = AccessManager(relay_url=args.relay_url)
