@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import secrets
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,14 +41,29 @@ class RelayClient:
         headers = {"Content-Type": "application/json"}
         if authenticated:
             headers["Authorization"] = f"Bearer {self.token()}"
-        request = urllib.request.Request(
-            self.base_url + endpoint,
-            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        for attempt in range(2):
+            if authenticated:
+                headers["Authorization"] = f"Bearer {self.token()}"
+            request = urllib.request.Request(
+                self.base_url + endpoint,
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if (
+                    exc.code != 401
+                    or not authenticated
+                    or not self.password
+                    or attempt
+                ):
+                    raise
+                self._token = None
+        raise AssertionError("unreachable relay retry state")
 
     def token(self) -> str:
         if self._token is None:
@@ -110,17 +126,24 @@ class RelayClient:
         # the relay request body. Preset internals are not interpreted here.
         if preset_path.suffix.casefold() not in {".fxp", ".serumpreset"}:
             raise AssertionError("non-preset upload payload")
-        request = urllib.request.Request(
-            self.base_url + "/upload",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.token()}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        for attempt in range(2):
+            request = urllib.request.Request(
+                self.base_url + "/upload",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self.token()}",
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 401 or not self.password or attempt:
+                    raise
+                self._token = None
         return UploadReceipt(
             content_hash=content_hash,
             stored=bool(result.get("stored", True)),

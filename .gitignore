@@ -33,6 +33,8 @@ dist/
 packaging/build/
 packaging/dist/
 *.spec.bak
+*.part
 
 # Local Codex release-operation prompt (contains audit search vocabulary).
 docs/codex-publish-v1-and-first-run.md
+docs/codex-one-command-install.md

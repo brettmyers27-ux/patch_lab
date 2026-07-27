@@ -1,5 +1,34 @@
 # PatchLab
 
+## Quick Start — trusted group install
+
+Prerequisites: an Apple Silicon Mac running macOS 12.3 or newer, Python 3.11,
+git, at least 8 GB free, a licensed Serum or Serum 2 installation, and the
+private-group passcode.
+
+The recommended installation is to download and inspect the installer before
+running it:
+
+```bash
+curl -O https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.sh
+less install.sh
+bash install.sh
+```
+
+For a trusted member who wants the one-command form:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.sh | bash
+```
+
+The first install downloads roughly 2–3 GB of Python packages from PyPI, the
+2.35 GB public LAION-CLAP music checkpoint from Hugging Face, and 240 MB of
+passcode-gated PatchLab models, index, and factory fingerprints. Expect roughly
+5 GB of network transfer and 15–45 minutes on typical broadband. Downloads are
+checksum-verified and resumable. The result is a small `PatchLab.app` launcher
+in `~/Applications`; subsequent installer runs update safely and skip completed
+work.
+
 Patch Lab is a cross-platform desktop application for cataloging, rendering,
 learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
@@ -387,10 +416,12 @@ Developer and automated environments may still supply
 `PATCHLAB_RELAY_PASSWORD`, but a normal packaged user enters it once in the
 first-run dialog and the app retrieves it from the OS keychain thereafter.
 
-The upload-only backend lives in the separate private `patchlab-relay`
-repository next to this project. It exposes only `/auth`, `/check-hash`, and
-`/upload`; its OAuth credentials stay server-side. There are no download,
-audio, listing, or cache-serving endpoints.
+The backend lives in the separate private `patchlab-relay` repository next to
+this project. Contribution routes are `/auth`, `/check-hash`, and `/upload`;
+its delegated OAuth credentials stay server-side. The same bearer
+authentication protects `/artifacts` and ranged `/artifacts/{name}` downloads
+for the licensing-controlled installer files. No artifact metadata or bytes
+are available without a valid group token, and audio is never uploaded.
 
 Match candidate waveforms remain in memory while optimization runs. Once a
 match completes, its source, winning render, candidate state, result metadata,
@@ -411,6 +442,10 @@ PYTHONPATH=. ../soundmatch/.venv/bin/python tests/test_relay.py
 
 ### Building the macOS app
 
+The supported trusted-group delivery is now `install.sh` plus its lightweight
+Finder launcher. The monolithic PyInstaller bundle is not distributed; its
+spec remains available for a future signed and notarized release.
+
 Packaging tools are intentionally separate from runtime dependencies:
 
 ```bash
@@ -424,12 +459,11 @@ The build embeds the factory fingerprint bundle and pinned CLAP checkpoint when
 those private/local artifacts are present at their documented `data/` paths,
 but neither artifact is committed to Git.
 
-For a tester, the intended installation path is: download the packaged archive,
-unzip it, drag `PatchLab.app` to `/Applications`, and double-click it. This
-v1.0.0 build is not Apple-notarized. On first launch, macOS may show an
-“unidentified developer” warning; right-click the app, choose **Open**, and
-confirm once. Code-signing and notarization require an Apple Developer identity
-and are separate release work.
+The build remains useful for package engineering, but it is currently 3.3 GB
+and is not the tester delivery path. `install.sh` creates a few-kilobyte
+launcher around the source venv instead. Neither launcher is Apple-notarized.
+On first launch, macOS may show an “unidentified developer” warning;
+right-click the app, choose **Open**, and confirm once.
 
 ### Fresh clone versus packaged app
 
@@ -443,12 +477,23 @@ development use needs:
 - either a newly scanned and rendered local preset library, or the separately
   distributed `data/dist/factory_bundle.sqlite` fingerprint bundle.
 
-The shortest non-technical path is therefore a packaged release that includes
-the licensed-to-distribute factory fingerprint bundle and model artifacts:
-download, unzip, drag to Applications, and open. Cloning the repository is the
-developer path and requires rebuilding or separately supplying all of the
-artifacts above. The 75 MiB factory bundle is suitable as a separate release
-asset; it is not uploaded automatically and is never placed in source control.
+The shortest non-technical path is `install.sh`: it gets public dependencies
+from PyPI and Hugging Face, then downloads the four private artifacts through
+the authenticated relay and creates the Finder launcher. Cloning the repository
+without running the installer remains the developer path and requires rebuilding
+or separately supplying all artifacts above. The factory bundle and trained
+models are never public Release assets or source-controlled files.
+
+## Installer troubleshooting
+
+| Problem | What to do |
+|---|---|
+| Wrong passcode | Rerun and enter the trusted-group passcode again. Input is hidden and is never logged. |
+| Relay unreachable | Check the internet connection and rerun. Installation stops at authentication before large downloads or launcher creation. |
+| Insufficient disk | Free enough space for the 8 GB preflight requirement, then rerun; verified and partial downloads are preserved. |
+| Python 3.11 missing | Install Python 3.11 so `python3.11` is available. Other minor versions are intentionally refused. |
+| Serum not found | Install a licensed Serum or Serum 2 AU/VST/VST3 build in a standard system or user `Audio/Plug-Ins` folder. |
+| Gatekeeper warning | Right-click `PatchLab.app`, choose **Open**, and confirm once. The lightweight launcher is unsigned. |
 
 ## Requirements
 
