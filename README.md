@@ -17,8 +17,8 @@ PatchLab requires Python 3.11, a licensed local Serum installation, and enough
 disk space to render your own preset library.
 
 ```bash
-git clone <your-fork-or-repository-url>
-cd soundmatch
+git clone https://github.com/brettmyers27-ux/patch_lab.git
+cd patch_lab
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
