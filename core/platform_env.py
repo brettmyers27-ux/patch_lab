@@ -108,10 +108,6 @@ def _torch_backend(branch: str) -> tuple[str, str | None]:
 
 def detect_platform_env() -> PlatformEnv:
     """Resolve all OS-dependent facts once for the rest of the application."""
-    model_cache = Path(__file__).resolve().parents[1] / "data" / "models" / "huggingface"
-    model_cache.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(model_cache))
-    os.environ.setdefault("TRANSFORMERS_CACHE", str(model_cache / "transformers"))
     system_name = platform.system()
     machine = platform.machine()
 
@@ -137,8 +133,18 @@ def detect_platform_env() -> PlatformEnv:
             FactoryPresetRoot("serum2", preset_roots[1]),
         )
         app_data_dir = Path(
-            os.environ.get("LOCALAPPDATA", str(user_home / "AppData" / "Local"))
-        ) / "Patch Lab"
+            os.environ.get(
+                "PATCHLAB_APP_DATA",
+                str(
+                    Path(
+                        os.environ.get(
+                            "LOCALAPPDATA", str(user_home / "AppData" / "Local")
+                        )
+                    )
+                    / "Patch Lab"
+                ),
+            )
+        )
         torch_command = (
             "pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128"
         )
@@ -179,7 +185,12 @@ def detect_platform_env() -> PlatformEnv:
             FactoryPresetRoot("serum2", preset_roots[4]),
             FactoryPresetRoot("serum2", preset_roots[5]),
         )
-        app_data_dir = user_home / "Library" / "Application Support" / "Patch Lab"
+        app_data_dir = Path(
+            os.environ.get(
+                "PATCHLAB_APP_DATA",
+                str(user_home / "Library" / "Application Support" / "Patch Lab"),
+            )
+        )
         torch_command = "pip install torch torchaudio"
         ascii_safe_paths = True
         legacy_max_path = None
@@ -189,6 +200,14 @@ def detect_platform_env() -> PlatformEnv:
             f"Unsupported operating system {system_name!r}; Patch Lab supports Windows and macOS."
         )
 
+    model_cache = (
+        app_data_dir / "models" / "huggingface"
+        if os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1"
+        else Path(__file__).resolve().parents[1] / "data" / "models" / "huggingface"
+    )
+    model_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(model_cache))
+    os.environ.setdefault("TRANSFORMERS_CACHE", str(model_cache / "transformers"))
     backend, warning = _torch_backend(branch)
     return PlatformEnv(
         branch=branch,

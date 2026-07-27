@@ -2715,6 +2715,10 @@ class MainWindow(LegacyMainWindow):
             toggle.setChecked(self.share_toggle.isChecked())
             toggle.toggled.connect(self.share_toggle.setChecked)
             layout.addWidget(toggle)
+            forget = QPushButton("Sign out / forget passcode")
+            forget.setObjectName("compactActionButton")
+            forget.clicked.connect(self._forget_passcode)
+            layout.addWidget(forget)
             detail = QLabel(
                 "When enabled, linked presets are processed locally and preset "
                 "files plus fingerprints may be contributed. Audio is never uploaded."
@@ -2731,6 +2735,17 @@ class MainWindow(LegacyMainWindow):
         close.clicked.connect(dialog.accept)
         layout.addWidget(close)
         dialog.exec()
+
+    def _forget_passcode(self) -> None:
+        from core.access_gate import AccessStore
+
+        AccessStore().clear()
+        QMessageBox.information(
+            self,
+            "Signed out",
+            "The saved PatchLab passcode was removed. Your terms choice was not changed. "
+            "The passcode will be requested the next time PatchLab starts.",
+        )
 
     def open_help(self) -> None:
         QMessageBox.about(

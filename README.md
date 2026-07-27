@@ -370,8 +370,22 @@ second run.
 
 Set `PATCHLAB_DISTRIBUTION_MODE=1` only in packaged trusted-group builds.
 The normal developer checkout retains the existing four-step development
-workflow. The optional relay client also reads `PATCHLAB_RELAY_URL` and
-`PATCHLAB_RELAY_PASSWORD` from the packaged app's secure configuration.
+workflow. The packaged macOS app enables distribution mode automatically.
+
+On a clean distribution profile, PatchLab asks for the private-group passcode
+before showing the main window. It validates that passcode through the relay's
+existing `/auth` endpoint and stores it in macOS Keychain or Windows Credential
+Manager through `keyring`. If no system keychain is available, PatchLab stores
+only a non-secret success marker and the short-lived relay token—never the
+passcode in a JSON file. A previously authenticated user can always launch
+offline. A first-time user whose relay is unavailable can explicitly continue
+locally without sharing. Settings includes **Sign out / forget passcode**; this
+does not reset the separate consent choice.
+
+The relay URL is supplied to the packaged app as `PATCHLAB_RELAY_URL`.
+Developer and automated environments may still supply
+`PATCHLAB_RELAY_PASSWORD`, but a normal packaged user enters it once in the
+first-run dialog and the app retrieves it from the OS keychain thereafter.
 
 The upload-only backend lives in the separate private `patchlab-relay`
 repository next to this project. It exposes only `/auth`, `/check-hash`, and
@@ -394,6 +408,47 @@ python scripts/audit_audio_lifecycle.py --run-cma
 cd ../patchlab-relay
 PYTHONPATH=. ../soundmatch/.venv/bin/python tests/test_relay.py
 ```
+
+### Building the macOS app
+
+Packaging tools are intentionally separate from runtime dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+pyinstaller --clean --noconfirm packaging/patchlab.spec
+```
+
+This creates the one-folder bundle `dist/PatchLab.app`. The runtime hook
+enables distribution mode without requiring a terminal or environment toggle.
+The build embeds the factory fingerprint bundle and pinned CLAP checkpoint when
+those private/local artifacts are present at their documented `data/` paths,
+but neither artifact is committed to Git.
+
+For a tester, the intended installation path is: download the packaged archive,
+unzip it, drag `PatchLab.app` to `/Applications`, and double-click it. This
+v1.0.0 build is not Apple-notarized. On first launch, macOS may show an
+“unidentified developer” warning; right-click the app, choose **Open**, and
+confirm once. Code-signing and notarization require an Apple Developer identity
+and are separate release work.
+
+### Fresh clone versus packaged app
+
+A fresh source clone is deliberately small and is not a ready-to-use learned
+matcher. In addition to Python dependencies and licensed local Serum plugins,
+development use needs:
+
+- `data/models/param_model.pt` and the generated parameter/schema mappings;
+- the per-note and per-preset numpy similarity indexes and manifests;
+- the pinned LAION-CLAP checkpoint/cache;
+- either a newly scanned and rendered local preset library, or the separately
+  distributed `data/dist/factory_bundle.sqlite` fingerprint bundle.
+
+The shortest non-technical path is therefore a packaged release that includes
+the licensed-to-distribute factory fingerprint bundle and model artifacts:
+download, unzip, drag to Applications, and open. Cloning the repository is the
+developer path and requires rebuilding or separately supplying all of the
+artifacts above. The 75 MiB factory bundle is suitable as a separate release
+asset; it is not uploaded automatically and is never placed in source control.
 
 ## Requirements
 

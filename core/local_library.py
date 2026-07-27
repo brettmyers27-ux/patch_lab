@@ -373,10 +373,18 @@ def process_linked_folder(
 
 
 def relay_from_environment() -> RelayProtocol | None:
+    if os.environ.get("PATCHLAB_DISABLE_RELAY", "").strip() == "1":
+        return None
     url = os.environ.get("PATCHLAB_RELAY_URL", "").strip()
     password = os.environ.get("PATCHLAB_RELAY_PASSWORD", "")
-    if not url or not password:
+    token = None
+    if url and not password:
+        from core.access_gate import stored_relay_credential
+
+        password, token = stored_relay_credential()
+        password = password or ""
+    if not url or (not password and not token):
         return None
     from core.relay_client import RelayClient
 
-    return RelayClient(url, password)
+    return RelayClient(url, password, token=token)

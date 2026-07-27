@@ -21,11 +21,18 @@ class UploadReceipt:
 class RelayClient:
     """Only exposes auth, hash existence, and preset upload operations."""
 
-    def __init__(self, base_url: str, password: str, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        password: str,
+        *,
+        timeout: float = 30.0,
+        token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.password = password
         self.timeout = timeout
-        self._token: str | None = None
+        self._token: str | None = token
 
     def _json(
         self, endpoint: str, payload: dict[str, Any], *, authenticated: bool = True
