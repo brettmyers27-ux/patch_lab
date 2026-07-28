@@ -124,6 +124,7 @@ else
     fi
 fi
 
+.venv/bin/python scripts/install_support.py artifacts-preflight --relay-url "$RELAY_URL" || exit 1
 .venv/bin/python scripts/install_support.py clap --install-root "$INSTALL_ROOT" || exit 1
 CLAP_RUNTIME_MARKER="$INSTALL_ROOT/data/models/huggingface/.patchlab-clap-runtime-v1"
 if [ ! -f "$CLAP_RUNTIME_MARKER" ]; then

@@ -30,6 +30,12 @@ metadata/tokenizer files so the first match does not need another network
 request. The result is a small `PatchLab.app` launcher in `~/Applications`;
 subsequent installer runs update safely and skip completed work.
 
+Immediately after authentication, the installer probes one byte from every
+private artifact. An unavailable model or factory bundle therefore stops the
+install before the 2.35 GB CLAP download begins. Transient relay/network
+failures are retried with bounded exponential backoff; completed and partial
+downloads are preserved so rerunning resumes rather than restarts.
+
 Patch Lab is a cross-platform desktop application for cataloging, rendering,
 learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
@@ -491,6 +497,7 @@ models are never public Release assets or source-controlled files.
 |---|---|
 | Wrong passcode | Rerun and enter the trusted-group passcode again. Input is hidden and is never logged. |
 | Relay unreachable | Check the internet connection and rerun. Installation stops at authentication before large downloads or launcher creation. |
+| Private artifact unavailable | The installer names the failing artifact before downloading CLAP. Retry later or contact the PatchLab operator; existing `.part` files and verified downloads are preserved. |
 | Insufficient disk | Free enough space for the 8 GB preflight requirement, then rerun; verified and partial downloads are preserved. |
 | Python 3.11 missing | Install Python 3.11 so `python3.11` is available. Other minor versions are intentionally refused. |
 | Serum not found | Install a licensed Serum or Serum 2 AU/VST/VST3 build in a standard system or user `Audio/Plug-Ins` folder. |
