@@ -12,7 +12,7 @@ import numpy as np
 import soundfile as sf
 
 from core.audio_input import DecodedAudio, decode_audio_file
-from core.branding import generated_preset_name, public_match_name
+from core.branding import display_match_name, generated_preset_name
 from core.db import DEFAULT_DB_PATH
 from core.matcher import AnalysisBySynthesisMatcher, Candidate, SearchConfig
 from core.serum2_preset_writer import vector_was_modified
@@ -352,10 +352,13 @@ def run_match_file(
                 "note_hypotheses": list(result.note_hypotheses),
                 "comparison_duration_s": result.comparison_duration_s,
             },
-        "existing_matches": [
-            {**item, "name": public_match_name(index)}
-            for index, item in enumerate(existing, start=1)
-        ],
+            "existing_matches": [
+                {
+                    **item,
+                    "name": display_match_name(item.get("name"), index),
+                }
+                for index, item in enumerate(existing, start=1)
+            ],
             "recommendation": {
                 "synth": result.best.synth,
                 "base_preset_id": result.best.base_preset_id,

@@ -12,7 +12,7 @@ import librosa
 import numpy as np
 
 from core.audio_input import decode_audio_file
-from core.branding import generated_preset_name, public_match_name
+from core.branding import display_match_name, generated_preset_name
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.features import CLAP_SAMPLE_RATE, ClapEmbedder
 from core.match import cosine_topk
@@ -256,7 +256,7 @@ def run_factory_match_file(
             {
                 "preset_id": preset_id,
                 "content_hash": content_hash,
-                "name": public_match_name(len(existing) + 1),
+                "name": display_match_name(name, len(existing) + 1),
                 "synth": synth,
                 "source_path": source_path,
                 "local_source_available": bool(path),

@@ -71,7 +71,7 @@ from app.workers import (
     ScanProcessRunner,
 )
 from core.audio_input import SUPPORTED_AUDIO_SUFFIXES
-from core.branding import generated_preset_name, public_match_name
+from core.branding import display_match_name, generated_preset_name
 from core.db import DEFAULT_DB_PATH, Database
 from core.factory_verify import FactoryVerification
 from core.local_library import default_local_paths
@@ -904,7 +904,11 @@ class LegacyMainWindow(QMainWindow):
         self.existing_table.setRowCount(len(existing))
         for row_index, item in enumerate(existing):
             self.existing_table.setItem(
-                row_index, 0, QTableWidgetItem(public_match_name(row_index + 1))
+                row_index,
+                0,
+                QTableWidgetItem(
+                    display_match_name(item.get("name"), row_index + 1)
+                ),
             )
             self.existing_table.setItem(
                 row_index,
@@ -3063,7 +3067,8 @@ class MainWindow(LegacyMainWindow):
         rank_label.setObjectName("muted")
         rank_label.setFixedWidth(20)
         rank_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label = QLabel(public_match_name(rank))
+        name_label = QLabel(display_match_name(item.get("name"), rank))
+        name_label.setTextFormat(Qt.TextFormat.PlainText)
         name_label.setStyleSheet("font-weight: 650;")
         name_label.setToolTip(
             "PatchLab library result · "

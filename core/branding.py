@@ -19,10 +19,17 @@ def generated_preset_name(synth: str | None = None) -> str:
 
 
 def public_match_name(rank: int | None = None) -> str:
-    """Return a source-name-free label for a library retrieval result."""
+    """Return a fallback label when a retrieval result has no stored name."""
 
     return (
         f"PatchLab Library Match {int(rank)}"
         if rank is not None
         else "PatchLab Library Match"
     )
+
+
+def display_match_name(name: object, rank: int | None = None) -> str:
+    """Preserve an owned preset's real name, with a branded empty-name fallback."""
+
+    value = str(name).strip() if name is not None else ""
+    return value or public_match_name(rank)
