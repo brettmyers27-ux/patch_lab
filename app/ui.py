@@ -907,7 +907,11 @@ class LegacyMainWindow(QMainWindow):
                 row_index,
                 0,
                 QTableWidgetItem(
-                    display_match_name(item.get("name"), row_index + 1)
+                    display_match_name(
+                        item.get("name"),
+                        row_index + 1,
+                        source_path=item.get("source_path"),
+                    )
                 ),
             )
             self.existing_table.setItem(
@@ -3067,7 +3071,13 @@ class MainWindow(LegacyMainWindow):
         rank_label.setObjectName("muted")
         rank_label.setFixedWidth(20)
         rank_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label = QLabel(display_match_name(item.get("name"), rank))
+        name_label = QLabel(
+            display_match_name(
+                item.get("name"),
+                rank,
+                source_path=item.get("source_path"),
+            )
+        )
         name_label.setTextFormat(Qt.TextFormat.PlainText)
         name_label.setStyleSheet("font-weight: 650;")
         name_label.setToolTip(

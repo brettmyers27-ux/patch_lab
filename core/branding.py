@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 APP_NAME = "PatchLab"
 GENERATED_PRESET_TAGS = (APP_NAME, "Generated")
@@ -28,8 +30,19 @@ def public_match_name(rank: int | None = None) -> str:
     )
 
 
-def display_match_name(name: object, rank: int | None = None) -> str:
-    """Preserve an owned preset's real name, with a branded empty-name fallback."""
+def display_match_name(
+    name: object,
+    rank: int | None = None,
+    *,
+    source_path: object = None,
+) -> str:
+    """Preserve a real name and recover legacy masked results from their path."""
 
     value = str(name).strip() if name is not None else ""
+    if not value or value.startswith("PatchLab Library Match"):
+        source = str(source_path).strip() if source_path is not None else ""
+        if source:
+            recovered = Path(source).stem.strip()
+            if recovered:
+                return recovered
     return value or public_match_name(rank)
