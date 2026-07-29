@@ -34,6 +34,9 @@ class MatchBatchHelpersTest(unittest.TestCase):
             self.assertEqual(skipped, 1)
             self.assertEqual(len(pending), 2)
             self.assertEqual(sanitize_folder_name('  My:/Batch*  '), "My-Batch")
+            self.assertEqual(sanitize_folder_name("CON"), "PatchLab-CON")
+            self.assertEqual(sanitize_folder_name("con.txt"), "PatchLab-con.txt")
+            self.assertEqual(sanitize_folder_name("LPT1"), "PatchLab-LPT1")
             existing = root / "PatchLab Generated Serum 2.SerumPreset"
             existing.write_bytes(b"x")
             self.assertEqual(

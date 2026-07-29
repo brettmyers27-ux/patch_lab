@@ -85,7 +85,11 @@ def _bundled_ffmpeg(
             str(output),
         ]
         completed = subprocess.run(
-            command, capture_output=True, text=True, check=False
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if completed.returncode:
             raise RuntimeError(

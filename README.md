@@ -2,9 +2,11 @@
 
 ## Quick Start — trusted group install
 
-Prerequisites: an Apple Silicon Mac running macOS 12.3 or newer, Python 3.11,
-git, at least 8 GB free, a licensed Serum or Serum 2 installation, and the
-private-group passcode.
+Prerequisites: either an Apple Silicon Mac running macOS 12.3 or newer or a
+64-bit Windows 11 PC, Python 3.11, git, at least 8 GB free, licensed Serum 1
+VST2 and Serum 2 VST3 installations, and the private-group passcode.
+
+### macOS
 
 The recommended installation is to download and inspect the installer before
 running it:
@@ -21,6 +23,37 @@ For a trusted member who wants the one-command form:
 curl -fsSL https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.sh | bash
 ```
 
+### Windows 11
+
+The recommended Windows form also downloads the installer for inspection
+before it runs:
+
+```powershell
+irm https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.ps1 -OutFile install.ps1
+notepad .\install.ps1
+.\install.ps1
+```
+
+For a trusted member who wants the one-command form:
+
+```powershell
+irm https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.ps1 | iex
+```
+
+If local execution policy blocks the inspected script, change policy for this
+PowerShell process only, then rerun it:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+```
+
+The Windows installer creates a console-free Desktop shortcut and a Start Menu
+shortcut. Both target the venv's `pythonw.exe` through the small
+`app\windows_launcher.pyw` bootstrap, which sets distribution mode, the relay
+URL, and the model cache without setting a permanent system environment
+variable.
+
 The first install downloads roughly 2–3 GB of Python packages from PyPI, the
 2.35 GB public LAION-CLAP music checkpoint from Hugging Face, and 240 MB of
 passcode-gated PatchLab models, index, and factory fingerprints. Expect roughly
@@ -28,7 +61,9 @@ passcode-gated PatchLab models, index, and factory fingerprints. Expect roughly
 checksum-verified and resumable. The installer also caches CLAP's small runtime
 metadata/tokenizer files so the first match does not need another network
 request. The result is a small `PatchLab.app` launcher in `~/Applications`;
-subsequent installer runs update safely and skip completed work.
+subsequent installer runs update safely and skip completed work. Windows uses
+the same resumable files and installs to
+`%USERPROFILE%\Documents\PatchLab\soundmatch`.
 
 Immediately after authentication, the installer probes one byte from every
 private artifact. An unavailable model or factory bundle therefore stops the
@@ -64,19 +99,28 @@ python scripts/verify_env.py
 python app/main.py
 ```
 
-On Windows, activate with `.venv\Scripts\Activate.ps1` and install the required
-RTX 5070 build with:
+On Windows, activate with `.venv\Scripts\Activate.ps1`. Use CUDA 12.8 wheels
+when an NVIDIA adapter is present:
 
 ```powershell
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
+
+On a Windows PC without an NVIDIA adapter, use the CPU wheels instead:
+
+```powershell
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+`install.ps1` makes this selection automatically and prints the detected
+adapter and reason before downloading anything.
 
 The detailed macOS and Windows setup, plugin locations, and verification gates
 appear below.
 
 ## What this repository does not include
 
-This public source repository intentionally excludes all runtime and
+This proprietary source repository intentionally excludes all runtime and
 user-derived data. It does **not** distribute:
 
 - the rendered audio library or match-history audio;
@@ -90,6 +134,18 @@ A source checkout must build its own database, renders, features, and models
 from presets the user owns. The packaged-app distribution path may later ship
 separately licensed, non-source artifacts as release downloads, but none are
 committed to Git.
+
+## License
+
+Copyright © 2026 Brett Myers. All rights reserved. PatchLab is proprietary
+software distributed for limited personal use by authorized private-group
+members, subject to the repository `LICENSE` and the agreement presented at
+first launch. Third-party components retain their respective licenses.
+
+Copies obtained while earlier versions were offered under the MIT License
+remain governed by the rights granted with those copies. The current
+proprietary terms apply going forward and do not purport to withdraw previously
+granted rights.
 
 ## Current build status
 
@@ -384,8 +440,23 @@ different local factory file only disables that preset's audition/export; the
 shipped fingerprint remains searchable. With no Serum factory folders at all,
 the app still launches and clearly reports that local loading is unavailable.
 
-The first distribution launch asks one neutral consent question. Agreeing
-enables “Link My Preset Folder” and means both:
+The first distribution launch keeps three distinct decisions in order:
+
+1. the required proprietary License Agreement, which must be accepted before
+   the application can be used;
+2. private-group authentication, when the installer has not already stored a
+   valid credential;
+3. a separate, optional preset-sharing consent choice after the main window
+   opens.
+
+License acceptance is stored with a UTC timestamp in PatchLab's existing access
+state. It appears before authentication because the terms govern whether the
+software may be used at all. Declining exits without reaching authentication or
+the main window. Settings includes **View License Agreement** for later
+read-only review; reviewing it does not reset or replace the acceptance record.
+
+Agreeing to the separate preset-sharing choice enables “Link My Preset Folder”
+and means both:
 
 - every linked preset is processed locally and added to the user's searchable
   index; retained local WAVs support audition;
@@ -406,17 +477,19 @@ second run.
 
 Set `PATCHLAB_DISTRIBUTION_MODE=1` only in packaged trusted-group builds.
 The normal developer checkout retains the existing four-step development
-workflow. The packaged macOS app enables distribution mode automatically.
+workflow. The packaged macOS app and Windows shortcuts enable distribution mode
+automatically.
 
-On a clean distribution profile, PatchLab asks for the private-group passcode
-before showing the main window. It validates that passcode through the relay's
-existing `/auth` endpoint and stores it in macOS Keychain or Windows Credential
-Manager through `keyring`. If no system keychain is available, PatchLab stores
-only a non-secret success marker and the short-lived relay token—never the
-passcode in a JSON file. A previously authenticated user can always launch
-offline. A first-time user whose relay is unavailable can explicitly continue
-locally without sharing. Settings includes **Sign out / forget passcode**; this
-does not reset the separate consent choice.
+After license acceptance, a clean distribution profile asks for the
+private-group passcode before showing the main window. It validates that
+passcode through the relay's existing `/auth` endpoint and stores it in macOS
+Keychain or Windows Credential Manager through `keyring`. If no system keychain
+is available, PatchLab stores only a non-secret success marker and the
+short-lived relay token—never the passcode in a JSON file. A previously
+authenticated user can always launch offline. A first-time user whose relay is
+unavailable can explicitly continue locally without sharing. Settings includes
+**Sign out / forget passcode**; signing out preserves both the license
+acceptance record and the separate preset-sharing choice.
 
 The relay URL is supplied to the packaged app as `PATCHLAB_RELAY_URL`.
 Developer and automated environments may still supply
@@ -484,12 +557,13 @@ development use needs:
 - either a newly scanned and rendered local preset library, or the separately
   distributed `data/dist/factory_bundle.sqlite` fingerprint bundle.
 
-The shortest non-technical path is `install.sh`: it gets public dependencies
-from PyPI and Hugging Face, then downloads the four private artifacts through
-the authenticated relay and creates the Finder launcher. Cloning the repository
-without running the installer remains the developer path and requires rebuilding
-or separately supplying all artifacts above. The factory bundle and trained
-models are never public Release assets or source-controlled files.
+The shortest non-technical path is `install.sh` on macOS or `install.ps1` on
+Windows. Each gets public dependencies from PyPI and Hugging Face, downloads
+the four private artifacts through the authenticated relay, and creates the
+native launcher/shortcuts. Cloning the repository without running the installer
+remains the developer path and requires rebuilding or separately supplying all
+artifacts above. The factory bundle and trained models are never public Release
+assets or source-controlled files.
 
 ## Installer troubleshooting
 
@@ -500,12 +574,16 @@ models are never public Release assets or source-controlled files.
 | Private artifact unavailable | The installer names the failing artifact before downloading CLAP. Retry later or contact the PatchLab operator; existing `.part` files and verified downloads are preserved. |
 | Insufficient disk | Free enough space for the 8 GB preflight requirement, then rerun; verified and partial downloads are preserved. |
 | Python 3.11 missing | Install Python 3.11 so `python3.11` is available. Other minor versions are intentionally refused. |
-| Serum not found | Install a licensed Serum or Serum 2 AU/VST/VST3 build in a standard system or user `Audio/Plug-Ins` folder. |
+| Microsoft Store Python opens instead of Python | Install 64-bit Python 3.11 from python.org with “Add python.exe to PATH,” then disable the `python.exe`/`python3.exe` App execution aliases in Windows Settings. |
+| Serum not found on macOS | Install licensed Serum 1 VST2 and Serum 2 VST3 builds in a standard system or user `Audio/Plug-Ins` folder. |
+| Serum 1 VST2 not found on Windows | Install `Serum_x64.dll`, or correct `VSTPluginsPath` under `HKLM`/`HKCU\SOFTWARE\VST`. The installer prints every registry and common-folder location searched. |
+| PowerShell blocks `install.ps1` | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then rerun `.\install.ps1`. This does not change machine-wide policy. |
 | Gatekeeper warning | Right-click `PatchLab.app`, choose **Open**, and confirm once. The lightweight launcher is unsigned. |
+| Windows SmartScreen warning | Choose **More info**, confirm the script/source is PatchLab, then choose **Run anyway**. |
 
 ## Requirements
 
-- Windows 11 with an NVIDIA RTX 5070, or Apple Silicon macOS 12.3+
+- 64-bit Windows 11 (CPU or supported NVIDIA GPU), or Apple Silicon macOS 12.3+
 - Python 3.11 in a `.venv` at this project root
 - Licensed local Serum plugin installations
 - Three real Serum 1 presets and three real Serum 2 presets for the spike
@@ -528,7 +606,7 @@ python scripts/spike_preset_load.py /path/to/preset/root
 The standard PyPI torch wheel includes MPS support. Patch Lab sets
 `PYTORCH_ENABLE_MPS_FALLBACK=1`; if MPS is unavailable it warns and uses CPU.
 
-## Setup — Windows 11 / RTX 5070
+## Setup — Windows 11
 
 ```powershell
 py -3.11 -m venv .venv
@@ -540,7 +618,41 @@ python scripts\verify_env.py
 python scripts\spike_preset_load.py C:\path\to\preset\root
 ```
 
-The CUDA 12.8 index is mandatory for the RTX 5070 (Blackwell, sm_120).
+The CUDA 12.8 index is mandatory for an RTX 5070 (Blackwell, sm_120). On a PC
+without an NVIDIA adapter, replace `cu128` with `cpu`. `platform_env.py` and
+`install.ps1` detect this rather than assuming every Windows member owns an
+NVIDIA GPU.
+
+### Windows parity gate
+
+The Windows installer runs the critical plug-in/audio parity subset before it
+creates shortcuts. After installation, rerun the complete copy-pasteable
+diagnostic with:
+
+```powershell
+& "$env:USERPROFILE\Documents\PatchLab\soundmatch\.venv\Scripts\python.exe" "$env:USERPROFILE\Documents\PatchLab\soundmatch\scripts\verify_windows_install.py"
+```
+
+It checks real Windows 11/x64 identity, Serum 1 VST2 and Serum 2 VST3 parameter
+count/index/name/current-value equivalence against the committed macOS
+reference, four known factory C4 renders against macOS CLAP embeddings,
+Credential Manager persistence, once-only passcode/consent state, a real
+factory match and native preset export, source/preview playback, both
+`pythonw.exe` shortcuts, and a real Windows UI render. It writes
+`windows-ui.png`, the full live parameter dumps, and a JSON report under the
+Windows Patch Lab application-data `diagnostics` folder.
+
+The source and macOS baseline are ready for this test, but Windows parity is
+**unproven until this diagnostic passes on a licensed Windows 11 machine**.
+Do not distribute the Windows installer to the group based only on macOS/static
+checks: a plug-in parameter-index mismatch can produce valid-looking presets
+that sound wrong.
+
+Maintainers can recheck every direct Python pin against official PyPI metadata
+with `python scripts/verify_windows_wheels.py`. The current gate includes
+CPython 3.11 Windows x64 or platform-independent wheels for every pin; in
+particular, the deliberate `dawdreamer==0.8.3` and `pedalboard==0.9.24` pins
+both have `cp311-win_amd64` wheels.
 
 ## Milestone 0 gates
 

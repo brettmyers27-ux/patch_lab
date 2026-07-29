@@ -1,10 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 
 ROOT = Path(SPECPATH).parent
+sys.path.insert(0, str(ROOT))
 VERSION = {}
 exec((ROOT / "app" / "__version__.py").read_text(), VERSION)
 
@@ -29,7 +31,16 @@ for package in ("dawdreamer", "laion_clap"):
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
-datas += collect_data_files("librosa")
+# Numba's cached librosa kernels require a real source-file locator. Keeping
+# the .py files beside the frozen modules avoids "no locator available" at
+# first match while preserving JIT performance.
+datas += collect_data_files("librosa", include_py_files=True)
+hiddenimports += [
+    entry.module
+    for entry in __import__(
+        "core.worker_runtime", fromlist=["WORKER_ENTRY_POINTS"]
+    ).WORKER_ENTRY_POINTS.values()
+]
 
 analysis = Analysis(
     [str(ROOT / "app" / "main.py")],

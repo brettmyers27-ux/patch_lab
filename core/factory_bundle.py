@@ -162,6 +162,22 @@ class FactoryBundle:
             raise RuntimeError("Factory bundle preset/index row count mismatch")
         return matrix, presets
 
+    def note_embedding(self, preset_id: int, midi_note: int) -> np.ndarray:
+        """Return one normalized macOS reference embedding for parity checks."""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT embedding_f16 FROM note_embeddings "
+                "WHERE preset_id=? AND midi_note=?",
+                (preset_id, midi_note),
+            ).fetchone()
+        if row is None:
+            raise KeyError((preset_id, midi_note))
+        value = np.frombuffer(row["embedding_f16"], dtype=np.float16).astype(
+            np.float32
+        )
+        return value / max(float(np.linalg.norm(value)), 1e-12)
+
     def schema(self, synth: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(

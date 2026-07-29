@@ -13,13 +13,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# A frozen PatchLab executable is also the worker bootloader. Dispatch before
+# importing Qt or the main window so a worker can never become a hidden GUI.
+if __name__ == "__main__":
+    mp.freeze_support()
+    from app.worker_dispatch import frozen_worker_request, run_worker
+
+    _worker_request = frozen_worker_request(sys.argv[1:])
+    if _worker_request is not None:
+        raise SystemExit(run_worker(*_worker_request))
+
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.access_dialog import PasscodeDialog  # noqa: E402
+from app.license_dialog import LicenseAgreementDialog  # noqa: E402
 from app.ui import MainWindow  # noqa: E402
 from core.access_gate import AccessManager  # noqa: E402
 from core.audio_lifecycle import cleanup_stale_match_scratch  # noqa: E402
 from core.factory_verify import verify_local_factory_install  # noqa: E402
+from core.launch_gates import run_distribution_gates  # noqa: E402
 from core.platform_env import ENV  # noqa: E402,F401
 from core.privacy import distribution_mode  # noqa: E402
 
@@ -74,10 +86,19 @@ def main() -> int:
     factory_verification = None
     if distribution_mode():
         access = AccessManager()
-        if access.needs_prompt():
-            dialog = PasscodeDialog(access)
-            if dialog.exec() != dialog.DialogCode.Accepted:
-                return 0
+        allowed = run_distribution_gates(
+            access,
+            license_prompt=lambda store: (
+                LicenseAgreementDialog(store).exec()
+                == LicenseAgreementDialog.DialogCode.Accepted
+            ),
+            passcode_prompt=lambda manager: (
+                PasscodeDialog(manager).exec()
+                == PasscodeDialog.DialogCode.Accepted
+            ),
+        )
+        if not allowed:
+            return 0
         cleanup_stale_match_scratch()
         factory_verification = verify_local_factory_install(
             mapping_path=ENV.app_data_dir / "factory-paths.json"

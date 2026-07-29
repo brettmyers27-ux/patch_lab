@@ -77,9 +77,9 @@ if [ -e "$INSTALL_ROOT" ]; then
     say "Updating existing PatchLab checkout (fast-forward only)..."
     git -C "$INSTALL_ROOT" pull --ff-only || fail "The checkout has local/divergent changes. Resolve them before rerunning."
 else
-    say "Cloning the public PatchLab source..."
+    say "Cloning the PatchLab source..."
     mkdir -p "$(dirname "$INSTALL_ROOT")"
-    git clone "$REPO_URL" "$INSTALL_ROOT" || fail "Could not clone the public repository."
+    git clone "$REPO_URL" "$INSTALL_ROOT" || fail "Could not clone the PatchLab repository."
 fi
 
 cd "$INSTALL_ROOT"

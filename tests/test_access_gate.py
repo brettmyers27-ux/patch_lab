@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 
 from core.access_gate import ACCOUNT, SERVICE, AccessManager, AccessStore
@@ -47,6 +48,11 @@ class AccessGateTest(unittest.TestCase):
                 ),
             )
             privacy = PrivacyStore(root / "privacy.json")
+            self.assertTrue(store.needs_license_agreement())
+            accepted = store.accept_license()
+            self.assertTrue(accepted.agreed_to_license)
+            self.assertIsNotNone(accepted.license_accepted_at)
+            datetime.fromisoformat(str(accepted.license_accepted_at))
             self.assertTrue(manager.needs_prompt())
             self.assertIsNone(privacy.load().use_and_share_own_presets)
             ok, _message, _offline = manager.authenticate("correct")
@@ -56,6 +62,8 @@ class AccessGateTest(unittest.TestCase):
             self.assertEqual(keyring.get_password(SERVICE, ACCOUNT), "correct")
             store.clear()
             self.assertTrue(manager.needs_prompt())
+            self.assertFalse(store.needs_license_agreement())
+            self.assertIsNotNone(store.load().license_accepted_at)
             self.assertTrue(privacy.load().use_and_share_own_presets)
 
     def test_wrong_unreachable_local_and_keychain_fallback(self) -> None:

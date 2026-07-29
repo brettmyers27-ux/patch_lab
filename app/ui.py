@@ -1929,7 +1929,13 @@ class MainWindow(LegacyMainWindow):
         root.setFixedSize(self.DESIGN_WIDTH, self.DESIGN_HEIGHT)
         self._scene = QGraphicsScene(self)
         self._scene.setSceneRect(0, 0, self.DESIGN_WIDTH, self.DESIGN_HEIGHT)
-        self._scene.addWidget(root)
+        root_proxy = self._scene.addWidget(root)
+        # QGraphicsItem.acceptDrops defaults to False and is entirely separate
+        # from QWidget.setAcceptDrops (already set on AudioDropLabel and the
+        # view) — without this, the scene silently discards every drag event
+        # before it reaches the embedded widget tree, so drag-and-drop onto
+        # AudioDropLabel never fires even though its handlers are correct.
+        root_proxy.setAcceptDrops(True)
         self._scene.setBackgroundBrush(QColor(theme.BASE))
         self._graphics_view = ScaledGraphicsView(self._scene, self)
         self._graphics_view.setObjectName("scaledCanvas")
@@ -2711,6 +2717,8 @@ class MainWindow(LegacyMainWindow):
             )
 
     def open_settings(self) -> None:
+        from app.license_dialog import LicenseAgreementDialog
+
         dialog = QDialog(self)
         dialog.setWindowTitle("PatchLab Settings")
         dialog.setMinimumWidth(430)
@@ -2727,6 +2735,14 @@ class MainWindow(LegacyMainWindow):
             forget.setObjectName("compactActionButton")
             forget.clicked.connect(self._forget_passcode)
             layout.addWidget(forget)
+            view_license = QPushButton("View License Agreement")
+            view_license.setObjectName("compactActionButton")
+            view_license.clicked.connect(
+                lambda: LicenseAgreementDialog(
+                    parent=dialog, read_only_view=True
+                ).exec()
+            )
+            layout.addWidget(view_license)
             detail = QLabel(
                 "When enabled, linked presets are processed locally and preset "
                 "files plus fingerprints may be contributed. Audio is never uploaded."
@@ -2751,8 +2767,9 @@ class MainWindow(LegacyMainWindow):
         QMessageBox.information(
             self,
             "Signed out",
-            "The saved PatchLab passcode was removed. Your terms choice was not changed. "
-            "The passcode will be requested the next time PatchLab starts.",
+            "The saved PatchLab passcode was removed. Your license acceptance and "
+            "preset-sharing choice were not changed. The passcode will be requested "
+            "the next time PatchLab starts.",
         )
 
     def open_help(self) -> None:

@@ -45,10 +45,14 @@ def main() -> int:
     try:
         from core.plugin_host import SILENCE_DBFS, verify_default_render
 
-        for synth in ("serum1", "serum2"):
+        for synth, required_format in (("serum1", "VST2"), ("serum2", "VST3")):
             errors: list[str] = []
             passed = False
-            for candidate in env.plugins_for(synth):
+            for candidate in (
+                item
+                for item in env.plugins_for(synth)
+                if item.format == required_format and item.hostable
+            ):
                 try:
                     peak, rms, methods = verify_default_render(candidate)
                     status = "PASS" if rms > SILENCE_DBFS else "FAIL"
@@ -74,6 +78,7 @@ def main() -> int:
     print(f"\nDetected compute backend: {env.compute_backend}")
     if env.compute_warning:
         print(f"WARNING: {env.compute_warning}")
+    print(f"Torch selection reason: {env.torch_install_reason}")
     print(f"Torch install command for this machine:\n{env.torch_install_command}")
 
     failed = [item for item in results if item.failed]

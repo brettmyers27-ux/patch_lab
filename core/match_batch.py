@@ -19,6 +19,16 @@ class BatchDiscovery:
 def sanitize_folder_name(value: str) -> str:
     cleaned = re.sub(r"[\x00-\x1f<>:\"/\\\\|?*]+", "-", value.strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-")
+    reserved = {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+    if cleaned.split(".", 1)[0].casefold() in reserved:
+        cleaned = f"PatchLab-{cleaned}"
     return cleaned[:80]
 
 

@@ -111,20 +111,41 @@ def _build_preset_level(
 
 
 def main() -> int:
+    global FEATURE_DIR, NOTE_EMBEDDINGS, NOTE_FEATURES, NOTE_COMPLETE
+    global NOTE_MANIFEST, PRESET_EMBEDDINGS, PRESET_FEATURES, PRESET_MANIFEST
+    global REPORT
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--feature-workers", type=int, default=8)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--expected-count", type=int, default=39_053)
+    parser.add_argument("--feature-dir", type=Path)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
     if args.feature_workers <= 0:
         raise ValueError("--feature-workers must be positive")
 
+    if args.feature_dir is not None:
+        FEATURE_DIR = args.feature_dir.expanduser().resolve()
+        NOTE_EMBEDDINGS = FEATURE_DIR / "note_embeddings.npy"
+        NOTE_FEATURES = FEATURE_DIR / "note_handcrafted.npy"
+        NOTE_COMPLETE = FEATURE_DIR / "note_complete.npy"
+        NOTE_MANIFEST = FEATURE_DIR / "note_manifest.npz"
+        PRESET_EMBEDDINGS = FEATURE_DIR / "preset_embeddings.npy"
+        PRESET_FEATURES = FEATURE_DIR / "preset_handcrafted.npy"
+        PRESET_MANIFEST = FEATURE_DIR / "preset_manifest.npz"
+    if args.report is not None:
+        REPORT = args.report.expanduser().resolve()
+
     rows = _rows(args.db)
-    if len(rows) != 39_053:
-        raise RuntimeError(f"Expected 39,053 render rows, found {len(rows)}")
+    if len(rows) != args.expected_count:
+        raise RuntimeError(
+            f"Expected {args.expected_count:,} render rows, found {len(rows):,}"
+        )
     FEATURE_DIR.mkdir(parents=True, exist_ok=True)
     _write_manifest(rows)
     embeddings = _open_array(NOTE_EMBEDDINGS, (len(rows), CLAP_DIMENSIONS), "float32")
@@ -211,7 +232,11 @@ def main() -> int:
             {
                 "preset_count": preset_count,
                 "preset_embedding_max_norm_error": norm_error,
-                "gate_pass": preset_count == 5_579,
+                "gate_pass": (
+                    preset_count == 5_579
+                    if args.expected_count == 39_053
+                    else preset_count > 0
+                ),
             }
         )
     else:

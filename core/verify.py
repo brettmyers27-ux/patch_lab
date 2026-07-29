@@ -73,15 +73,25 @@ def compute_check(env: PlatformEnv) -> CheckResult:
         return CheckResult("compute backend", "FAIL", repr(exc))
 
     if env.branch == "windows":
-        if not torch.cuda.is_available():
-            return CheckResult("CUDA / RTX 5070", "FAIL", "torch.cuda.is_available() is false")
-        name = torch.cuda.get_device_name(0)
-        capability = torch.cuda.get_device_capability(0)
-        valid = "5070" in name or capability == (12, 0)
+        cuda_selected = "/whl/cu128" in env.torch_install_command
+        if cuda_selected:
+            if not torch.cuda.is_available():
+                return CheckResult(
+                    "Windows CUDA",
+                    "FAIL",
+                    "NVIDIA hardware selected cu128, but torch.cuda.is_available() is false",
+                )
+            name = torch.cuda.get_device_name(0)
+            capability = torch.cuda.get_device_capability(0)
+            return CheckResult(
+                "Windows CUDA",
+                "PASS",
+                f"{name}; capability sm_{capability[0]}{capability[1]}",
+            )
         return CheckResult(
-            "CUDA / RTX 5070",
-            "PASS" if valid else "FAIL",
-            f"{name}; capability sm_{capability[0]}{capability[1]}",
+            "Windows CPU compute",
+            "PASS",
+            "No NVIDIA adapter was selected; CPU-only PyTorch is active",
         )
 
     if torch.backends.mps.is_available():
@@ -95,14 +105,26 @@ def compute_check(env: PlatformEnv) -> CheckResult:
 
 def plugin_path_checks(env: PlatformEnv) -> list[CheckResult]:
     results: list[CheckResult] = []
-    for synth in ("serum1", "serum2"):
-        found = env.plugins_for(synth)
+    for synth, required_format in (("serum1", "VST2"), ("serum2", "VST3")):
+        searched = tuple(
+            item
+            for item in env.plugin_candidates
+            if item.synth == synth and item.format == required_format and item.hostable
+        )
+        found = tuple(item for item in searched if item.exists)
         detail = ", ".join(f"{item.format}: {item.path}" for item in found)
+        if not found:
+            locations = "\n  - ".join(str(item.path) for item in searched)
+            detail = (
+                f"Required {required_format} binary was not found. Searched:\n  - {locations}"
+                if locations
+                else f"No {required_format} search locations were resolved"
+            )
         results.append(
             CheckResult(
-                f"{synth} plugin binary",
+                f"{synth} {required_format} render binary",
                 "PASS" if found else "FAIL",
-                detail or "No hostable VST2/VST3/AU candidate exists",
+                detail,
             )
         )
     return results

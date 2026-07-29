@@ -17,7 +17,9 @@ from core.platform_env import PlatformEnv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "data" / "models"
-HF_DIR = MODEL_DIR / "huggingface"
+HF_DIR = Path(
+    os.environ.get("PATCHLAB_MODEL_CACHE", str(MODEL_DIR / "huggingface"))
+).expanduser()
 CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
 CLAP_CHECKPOINT = MODEL_DIR / CLAP_CHECKPOINT_NAME
 CLAP_SAMPLE_RATE = 48_000
@@ -126,6 +128,49 @@ class ClapEmbedder:
                 f"Missing {checkpoint}; run scripts/cache_clap.py before analysis"
             )
         import laion_clap
+
+        if bool(getattr(__import__("sys"), "frozen", False)):
+            # LAION-CLAP wraps every HTSAT construction error in one generic
+            # RuntimeError, which makes a missing frozen dependency impossible
+            # to diagnose. Use its pinned constructor directly in the bundle.
+            import importlib
+
+            # laion_clap.hook imports ``clap_module`` as a top-level package,
+            # while normal callers can also import ``laion_clap.clap_module``.
+            # Patch both module identities because each owns a separate CLAP
+            # class and constructor global in a frozen process.
+            for prefix in ("clap_module", "laion_clap.clap_module"):
+                clap_model = importlib.import_module(f"{prefix}.model")
+                htsat = importlib.import_module(f"{prefix}.htsat")
+
+                def create_frozen_htsat(
+                    audio_cfg,  # type: ignore[no-untyped-def]
+                    enable_fusion: bool = False,
+                    fusion_type: str = "None",
+                    *,
+                    _transformer=htsat.HTSAT_Swin_Transformer,
+                ):
+                    model_shapes = {
+                        "tiny": (96, [2, 2, 6, 2]),
+                        "base": (128, [2, 2, 12, 2]),
+                        "large": (256, [2, 2, 12, 2]),
+                    }
+                    embed_dim, depths = model_shapes[audio_cfg.model_name]
+                    return _transformer(
+                        spec_size=256,
+                        patch_size=4,
+                        patch_stride=(4, 4),
+                        num_classes=audio_cfg.class_num,
+                        embed_dim=embed_dim,
+                        depths=depths,
+                        num_heads=[4, 8, 16, 32],
+                        window_size=8,
+                        config=audio_cfg,
+                        enable_fusion=enable_fusion,
+                        fusion_type=fusion_type,
+                    )
+
+                clap_model.create_htsat_model = create_frozen_htsat
 
         self.device = platform_env.compute_backend
         self.model = laion_clap.CLAP_Module(

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 
 PluginFormat = Literal["VST2", "VST3", "AU", "CLAP"]
@@ -39,6 +41,7 @@ class PlatformEnv:
     compute_backend: Literal["cuda", "mps", "cpu"]
     compute_warning: str | None
     torch_install_command: str
+    torch_install_reason: str
     plugin_candidates: tuple[PluginCandidate, ...]
     preset_roots: tuple[Path, ...]
     factory_preset_roots: tuple[FactoryPresetRoot, ...]
@@ -90,6 +93,111 @@ class PlatformEnv:
         return False
 
 
+def _dedupe_paths(paths: list[Path]) -> tuple[Path, ...]:
+    """Preserve probe order while treating Windows paths case-insensitively."""
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path).replace("/", "\\").casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return tuple(unique)
+
+
+def windows_vst2_roots(
+    *,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+    winreg_module: Any | None = None,
+) -> tuple[Path, ...]:
+    """Resolve 64-bit VST2 roots from the registry and common conventions.
+
+    ``winreg_module`` is injectable so the complete lookup can be exercised on
+    macOS without pretending that Windows itself was tested.
+    """
+
+    values = os.environ if environ is None else environ
+    roots: list[Path] = []
+    if winreg_module is None:
+        try:
+            import winreg as winreg_module  # type: ignore[no-redef]
+        except ImportError:
+            winreg_module = None
+
+    if winreg_module is not None:
+        registry_keys = (
+            (winreg_module.HKEY_LOCAL_MACHINE, r"SOFTWARE\VST"),
+            (winreg_module.HKEY_CURRENT_USER, r"SOFTWARE\VST"),
+            (winreg_module.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\VST"),
+            (winreg_module.HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\VST"),
+        )
+        for hive, key_name in registry_keys:
+            try:
+                with winreg_module.OpenKey(hive, key_name) as key:
+                    value, _kind = winreg_module.QueryValueEx(key, "VSTPluginsPath")
+            except (FileNotFoundError, OSError):
+                continue
+            if isinstance(value, str) and value.strip():
+                roots.append(Path(os.path.expandvars(value.strip().strip('"'))))
+
+    program_files = Path(
+        values.get("ProgramW6432") or values.get("ProgramFiles") or r"C:\Program Files"
+    )
+    roots.extend(
+        (
+            program_files / "Common Files" / "VST2",
+            program_files / "VSTPlugins",
+            program_files / "Steinberg" / "VSTPlugins",
+        )
+    )
+    return _dedupe_paths(roots)
+
+
+def windows_nvidia_hardware_present(
+    *, environ: dict[str, str] | os._Environ[str] | None = None
+) -> tuple[bool, str]:
+    """Detect physical NVIDIA hardware without depending on an installed torch."""
+
+    values = os.environ if environ is None else environ
+    forced = values.get("PATCHLAB_WINDOWS_TORCH", "").strip().casefold()
+    if forced in {"cuda", "cpu"}:
+        return forced == "cuda", f"PATCHLAB_WINDOWS_TORCH={forced} override"
+
+    commands: list[list[str]] = []
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        commands.append([nvidia_smi, "--query-gpu=name", "--format=csv,noheader"])
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if powershell:
+        commands.append(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join \"`n\"",
+            ]
+        )
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode == 0 and "nvidia" in output.casefold():
+            first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+            return True, f"NVIDIA adapter detected: {first_line}"
+    return False, "No NVIDIA display adapter was detected; using CPU-only PyTorch wheels"
+
+
 def _torch_backend(branch: str) -> tuple[str, str | None]:
     try:
         import torch
@@ -99,7 +207,7 @@ def _torch_backend(branch: str) -> tuple[str, str | None]:
     if branch == "windows":
         if torch.cuda.is_available():
             return "cuda", None
-        return "cpu", "CUDA is unavailable; the RTX 5070 requires the cu128 wheel."
+        return "cpu", "CUDA is unavailable; compute will use the CPU."
 
     if torch.backends.mps.is_available():
         return "mps", None
@@ -114,14 +222,18 @@ def detect_platform_env() -> PlatformEnv:
     if system_name == "Windows":
         branch = "windows"
         user_home = Path(os.environ.get("USERPROFILE", str(Path.home())))
-        common = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Common Files"
+        program_files = Path(
+            os.environ.get("ProgramW6432")
+            or os.environ.get("ProgramFiles", r"C:\Program Files")
+        )
+        common = program_files / "Common Files"
+        vst2_paths: list[Path] = []
+        for root in windows_vst2_roots():
+            vst2_paths.extend((root / "Serum_x64.dll", root / "Serum.dll"))
         candidates = (
             PluginCandidate("serum1", "VST3", common / "VST3" / "Serum.vst3"),
             PluginCandidate("serum2", "VST3", common / "VST3" / "Serum2.vst3"),
-            PluginCandidate(
-                "serum1", "VST2", Path(r"C:\Program Files\Steinberg\VstPlugins\Serum_x64.dll")
-            ),
-            PluginCandidate("serum1", "VST2", Path(r"C:\Program Files\VstPlugins\Serum_x64.dll")),
+            *(PluginCandidate("serum1", "VST2", path) for path in _dedupe_paths(vst2_paths)),
             PluginCandidate("serum2", "CLAP", common / "CLAP" / "Serum2.clap", hostable=False),
         )
         preset_roots = (
@@ -145,8 +257,11 @@ def detect_platform_env() -> PlatformEnv:
                 ),
             )
         )
+        has_nvidia, torch_reason = windows_nvidia_hardware_present()
+        torch_index = "cu128" if has_nvidia else "cpu"
         torch_command = (
-            "pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128"
+            "pip install torch torchaudio "
+            f"--index-url https://download.pytorch.org/whl/{torch_index}"
         )
         ascii_safe_paths = True
         legacy_max_path = 260
@@ -192,6 +307,7 @@ def detect_platform_env() -> PlatformEnv:
             )
         )
         torch_command = "pip install torch torchaudio"
+        torch_reason = "Standard PyPI wheels include Apple MPS support"
         ascii_safe_paths = True
         legacy_max_path = None
         os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -219,6 +335,7 @@ def detect_platform_env() -> PlatformEnv:
         compute_backend=backend,  # type: ignore[arg-type]
         compute_warning=warning,
         torch_install_command=torch_command,
+        torch_install_reason=torch_reason,
         plugin_candidates=candidates,
         preset_roots=preset_roots,
         factory_preset_roots=factory_roots,

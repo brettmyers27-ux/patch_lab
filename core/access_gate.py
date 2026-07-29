@@ -6,6 +6,7 @@ import json
 import os
 import urllib.error
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +23,8 @@ class AccessState:
     authenticated_once: bool = False
     token: str | None = None
     local_only: bool = False
+    agreed_to_license: bool = False
+    license_accepted_at: str | None = None
 
 
 class AccessStore:
@@ -50,7 +53,30 @@ class AccessStore:
             bool(raw.get("authenticated_once")),
             str(raw["token"]) if raw.get("token") else None,
             bool(raw.get("local_only")),
+            bool(raw.get("agreed_to_license")),
+            (
+                str(raw["license_accepted_at"])
+                if raw.get("license_accepted_at")
+                else None
+            ),
         )
+
+    def needs_license_agreement(self) -> bool:
+        state = self.load()
+        return not state.agreed_to_license or not state.license_accepted_at
+
+    def accept_license(self, *, accepted_at: str | None = None) -> AccessState:
+        current = self.load()
+        timestamp = accepted_at or datetime.now(timezone.utc).isoformat()
+        state = AccessState(
+            current.authenticated_once,
+            current.token,
+            current.local_only,
+            True,
+            timestamp,
+        )
+        self._write(state)
+        return state
 
     def passcode(self) -> str | None:
         if self.keyring is None:
@@ -68,11 +94,29 @@ class AccessStore:
                 keychain_saved = True
             except Exception:
                 pass
-        self._write(AccessState(True, token, False))
+        current = self.load()
+        self._write(
+            AccessState(
+                True,
+                token,
+                False,
+                current.agreed_to_license,
+                current.license_accepted_at,
+            )
+        )
         return keychain_saved
 
     def save_local_only(self) -> None:
-        self._write(AccessState(False, None, True))
+        current = self.load()
+        self._write(
+            AccessState(
+                False,
+                None,
+                True,
+                current.agreed_to_license,
+                current.license_accepted_at,
+            )
+        )
 
     def clear(self) -> None:
         if self.keyring is not None:
@@ -80,7 +124,19 @@ class AccessStore:
                 self.keyring.delete_password(SERVICE, ACCOUNT)
             except Exception:
                 pass
-        self.marker_path.unlink(missing_ok=True)
+        current = self.load()
+        if current.agreed_to_license and current.license_accepted_at:
+            self._write(
+                AccessState(
+                    False,
+                    None,
+                    False,
+                    True,
+                    current.license_accepted_at,
+                )
+            )
+        else:
+            self.marker_path.unlink(missing_ok=True)
 
     def _write(self, state: AccessState) -> None:
         self.marker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +146,8 @@ class AccessStore:
                     "authenticated_once": state.authenticated_once,
                     "token": state.token,
                     "local_only": state.local_only,
+                    "agreed_to_license": state.agreed_to_license,
+                    "license_accepted_at": state.license_accepted_at,
                 },
                 indent=2,
                 sort_keys=True,
