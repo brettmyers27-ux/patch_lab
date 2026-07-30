@@ -91,7 +91,11 @@ from core.match_library import (
 )
 from core.platform_env import ENV
 from core.privacy import PrivacyStore, distribution_mode
-from core.verify import library_scan_checks
+from core.workflow_state import (
+    WorkflowActivity,
+    WorkflowCardState,
+    resolve_workflow_state,
+)
 
 
 class AudioDropLabel(QFrame):
@@ -231,6 +235,7 @@ class LegacyMainWindow(QMainWindow):
         self.runner = ScanProcessRunner(self)
         self.runner.log.connect(self.append_log)
         self.runner.progress.connect(self._progress)
+        self.runner.stage_progress.connect(self._local_library_progress_changed)
         self.runner.completed.connect(self._scan_completed)
         self.runner.failed.connect(self._scan_failed)
         self.render_runner = RenderProcessRunner(self)
@@ -270,6 +275,8 @@ class LegacyMainWindow(QMainWindow):
         self._library_preview_uid: str | None = None
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
+        self._workflow_activities: dict[str, WorkflowActivity] = {}
+        self._workflow_last_match_complete = False
         self._match_session = tempfile.TemporaryDirectory(
             prefix="patchlab-match-app-"
         )
@@ -319,7 +326,7 @@ class LegacyMainWindow(QMainWindow):
         privacy_layout.addWidget(self.share_toggle)
         self.privacy_settings.setVisible(self.distribution_mode)
         layout.addWidget(self.privacy_settings)
-        render_ready = not any(result.failed for result in library_scan_checks(DEFAULT_DB_PATH))
+        render_ready = self._render_library_complete()
         self.render_button, self.render_progress = self._section(
             layout,
             "2. Render Sound Library",
@@ -566,19 +573,114 @@ class LegacyMainWindow(QMainWindow):
 
     def _apply_privacy_choice(self) -> None:
         enabled = bool(self.privacy_choice.use_and_share_own_presets)
-        self.scan_box.setEnabled(enabled)
+        self.scan_box.setEnabled(True)
         self.scan_box.setToolTip(
             "" if enabled else "Turn on “Use & share my own presets” in Privacy to link a folder."
         )
+        self._refresh_workflow_cards()
 
-    @staticmethod
-    def _render_library_complete() -> bool:
-        if not DEFAULT_DB_PATH.is_file():
+    def _set_workflow_activity(
+        self,
+        card: str,
+        current: int,
+        total: int,
+        text: str,
+    ) -> None:
+        self._workflow_activities[card] = WorkflowActivity(
+            current=max(int(current), 0),
+            total=max(int(total), 0),
+            text=text,
+        )
+        self._refresh_workflow_cards()
+
+    def _clear_workflow_activity(self, *cards: str) -> None:
+        for card in cards:
+            self._workflow_activities.pop(card, None)
+        self._refresh_workflow_cards()
+
+    def _refresh_workflow_cards(self) -> None:
+        """Refresh all four cards together from persisted and live state."""
+
+        if not hasattr(self, "hero_cards"):
+            return
+        state = resolve_workflow_state(
+            privacy=self.privacy_choice,
+            local_database_path=self.local_paths["db"],
+            audio_selected=self._match_audio_path is not None,
+            match_completed=self._workflow_last_match_complete,
+            activities=self._workflow_activities,
+            match_prerequisite_error=self._model_asset_error or "",
+        )
+        resolved_cards = state.as_dict()
+        for key, card in zip(
+            ("link", "render", "analyze", "match"),
+            self.hero_cards,
+            strict=True,
+        ):
+            resolved: WorkflowCardState = resolved_cards[key]
+            card.setWorkflowState(
+                resolved.phase,
+                resolved.text,
+                resolved.current,
+                resolved.total,
+                detail=resolved.detail,
+            )
+
+        self.scan_button.setEnabled("link" not in self._workflow_activities)
+        self.render_button.setEnabled(
+            "render" not in self._workflow_activities
+            and state.render.phase == "needs-action"
+        )
+        # In distribution mode this is an informational, optional action. It
+        # explains how linked presets join retrieval without replacing the
+        # shipped training set.
+        self.learn_button.setEnabled("analyze" not in self._workflow_activities)
+        self.match_button.setEnabled(
+            "match" not in self._workflow_activities and not state.match.detail
+        )
+        self._workflow_match_error = state.match.detail
+        if hasattr(self, "match_start_button"):
+            self.match_start_button.setEnabled(
+                self._match_audio_path is not None
+                and "match" not in self._workflow_activities
+                and not self._workflow_match_error
+                and self._model_asset_error is None
+            )
+
+    def _local_library_progress_changed(self, detail: dict) -> None:
+        stage = str(detail.get("stage", "scan"))
+        current = int(detail.get("current", 0))
+        total = int(detail.get("total", 0))
+        text = str(detail.get("text", stage.replace("-", " ").title()))
+        if stage == "render":
+            self._workflow_activities.pop("link", None)
+            self._workflow_activities.pop("analyze", None)
+            self._set_workflow_activity("render", current, total, text)
+        elif stage == "analyze":
+            self._workflow_activities.pop("link", None)
+            self._workflow_activities.pop("render", None)
+            self._set_workflow_activity("analyze", current, total, text)
+        else:
+            self._workflow_activities.pop("render", None)
+            self._workflow_activities.pop("analyze", None)
+            self._set_workflow_activity("link", current, total, text)
+
+    def _render_library_complete(self) -> bool:
+        database_path = self.local_paths["db"]
+        if not database_path.is_file():
             return False
         import sqlite3
 
-        connection = sqlite3.connect(DEFAULT_DB_PATH)
-        return int(connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0]) == 39_053
+        connection = sqlite3.connect(database_path)
+        presets = int(connection.execute("SELECT COUNT(*) FROM presets").fetchone()[0])
+        rendered = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM (SELECT preset_id FROM renders "
+                "GROUP BY preset_id HAVING COUNT(DISTINCT midi_note)>=7)"
+            ).fetchone()[0]
+        )
+        connection.close()
+        return presets > 0 and rendered >= presets
 
     def _section(
         self, layout: QVBoxLayout, title: str, description: str, *, enabled: bool
@@ -602,6 +704,12 @@ class LegacyMainWindow(QMainWindow):
 
     def choose_folder(self) -> None:
         if self.distribution_mode and not self.privacy_choice.use_and_share_own_presets:
+            QMessageBox.information(
+                self,
+                "Turn on personal presets",
+                "Turn on “Use & share my own presets” in Settings → Privacy, "
+                "then click this card again to link a folder.",
+            )
             return
         defaults = ENV.existing_preset_roots
         initial = str(defaults[0] if defaults else Path.home())
@@ -624,8 +732,11 @@ class LegacyMainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 self.append_log("Local preset-library processing was not started")
                 return
-        self.scan_button.setEnabled(False)
-        self.scan_progress.setValue(0)
+        if self.distribution_mode:
+            self.privacy_choice = self.privacy_store.save(
+                True, linked_folder=Path(selected)
+            )
+        self._set_workflow_activity("link", 0, 0, "Starting preset scan…")
         self.append_log(
             f"Starting local-first preset processing for {selected}"
             if self.distribution_mode
@@ -637,10 +748,6 @@ class LegacyMainWindow(QMainWindow):
             else "Scanning and dumping parameters…"
         )
         self.runner.start(Path(selected), local_library=self.distribution_mode)
-        if self.distribution_mode:
-            self.privacy_choice = self.privacy_store.save(
-                True, linked_folder=Path(selected)
-            )
 
     def append_log(self, message: str) -> None:
         self.log_pane.appendPlainText(message)
@@ -648,10 +755,14 @@ class LegacyMainWindow(QMainWindow):
         bar.setValue(bar.maximum())
 
     def _progress(self, current: int, total: int) -> None:
-        self.scan_progress.setMaximum(max(total, 1))
-        self.scan_progress.setValue(current)
+        self._set_workflow_activity(
+            "link", current, total, f"Scanning {current:,} of {total:,} presets"
+        )
 
     def _scan_completed(self, summary: dict) -> None:
+        self._workflow_activities.pop("link", None)
+        self._workflow_activities.pop("render", None)
+        self._workflow_activities.pop("analyze", None)
         self.scan_button.setEnabled(
             not self.distribution_mode
             or bool(self.privacy_choice.use_and_share_own_presets)
@@ -679,14 +790,18 @@ class LegacyMainWindow(QMainWindow):
         self.statusBar().showMessage(text)
         if not self.distribution_mode:
             self.render_button.setEnabled(True)
+        self._refresh_workflow_cards()
 
     def _scan_failed(self, error: str) -> None:
-        self.scan_button.setEnabled(True)
+        self._workflow_activities.pop("link", None)
+        self._workflow_activities.pop("render", None)
+        self._workflow_activities.pop("analyze", None)
         self.append_log(f"Scan failed: {error}")
         self.statusBar().showMessage(error)
+        self._refresh_workflow_cards()
 
     def start_render(self) -> None:
-        self.render_button.setEnabled(False)
+        self._set_workflow_activity("render", 0, 0, "Starting render workers…")
         self.render_pause_button.setEnabled(True)
         self.render_cancel_button.setEnabled(True)
         self.render_progress.setValue(0)
@@ -695,7 +810,14 @@ class LegacyMainWindow(QMainWindow):
         self.render_stats.setText("Starting four render workers…")
         self.append_log("Starting resumable four-process library render")
         self.statusBar().showMessage("Rendering sound library…")
-        self.render_runner.start()
+        if self.distribution_mode:
+            self.render_runner.start(
+                db_path=self.local_paths["db"],
+                audio_root=self.local_paths["audio"],
+                state_dir=self.local_paths["states"],
+            )
+        else:
+            self.render_runner.start()
 
     def toggle_render_pause(self) -> None:
         if self._render_paused:
@@ -721,6 +843,12 @@ class LegacyMainWindow(QMainWindow):
             minutes, seconds = divmod(remainder, 60)
             eta_text = f"{hours:d}:{minutes:02d}:{seconds:02d}"
         self.render_stats.setText(f"{rate:.2f} renders/s — ETA {eta_text}")
+        self._set_workflow_activity(
+            "render",
+            current,
+            total,
+            f"Rendering {current:,} of {total:,} notes · ETA {eta_text}",
+        )
 
     def _render_control_changed(self, state: str) -> None:
         if state == "paused":
@@ -732,6 +860,7 @@ class LegacyMainWindow(QMainWindow):
             self.render_pause_button.setText("Pause")
 
     def _render_completed(self, summary: dict) -> None:
+        self._workflow_activities.pop("render", None)
         self.render_button.setEnabled(True)
         self.render_pause_button.setEnabled(False)
         self.render_cancel_button.setEnabled(False)
@@ -749,16 +878,38 @@ class LegacyMainWindow(QMainWindow):
         self.statusBar().showMessage(text)
         if not cancelled and self._render_library_complete():
             self.learn_button.setEnabled(True)
+        self._refresh_workflow_cards()
 
     def _render_failed(self, error: str) -> None:
+        self._workflow_activities.pop("render", None)
         self.render_button.setEnabled(True)
         self.render_pause_button.setEnabled(False)
         self.render_cancel_button.setEnabled(False)
         self.render_stats.setText(error)
         self.append_log(error)
         self.statusBar().showMessage(error)
+        self._refresh_workflow_cards()
 
     def start_analyze(self) -> None:
+        if self.distribution_mode:
+            QMessageBox.information(
+                self,
+                "Personal learning is automatic",
+                "PatchLab already uses its shipped trained model and factory "
+                "fingerprints. When you link presets, PatchLab renders and "
+                "fingerprints them locally, then adds them to search alongside "
+                "the shipped library.\n\n"
+                "Full parameter-model retraining is not incremental in this "
+                "release, so the installed app does not run a local-only retrain "
+                "that would replace prior learning.",
+            )
+            self.append_log(
+                "Analyze & Learn: shipped training retained; linked presets are "
+                "added to retrieval during the linked-folder job."
+            )
+            self._refresh_workflow_cards()
+            return
+        self._set_workflow_activity("analyze", 0, 0, "Starting analysis…")
         self.learn_button.setEnabled(False)
         self.analyze_cancel_button.setEnabled(True)
         self.learn_progress.setRange(0, 100)
@@ -786,8 +937,30 @@ class LegacyMainWindow(QMainWindow):
         else:
             self.learn_progress.setRange(0, 0)
             self.analyze_stats.setText(phase.replace("-", " ").title())
+        current = int(
+            detail.get(
+                "completed_total",
+                detail.get("complete", detail.get("epoch", 0)),
+            )
+        )
+        total = (
+            39_053
+            if phase == "embeddings"
+            else 20_000
+            if phase == "synthetic-serum1"
+            else 200
+            if phase == "training"
+            else 0
+        )
+        self._set_workflow_activity(
+            "analyze",
+            current,
+            total,
+            self.analyze_stats.text(),
+        )
 
     def _analyze_completed(self, summary: dict) -> None:
+        self._workflow_activities.pop("analyze", None)
         self.learn_progress.setRange(0, 100)
         self.learn_progress.setValue(100)
         self.learn_button.setEnabled(True)
@@ -795,14 +968,17 @@ class LegacyMainWindow(QMainWindow):
         self.analyze_stats.setText("Analyze & Learn complete")
         self.append_log(f"Analyze & Learn complete: {summary}")
         self.statusBar().showMessage("Analyze & Learn complete")
+        self._refresh_workflow_cards()
 
     def _analyze_failed(self, error: str) -> None:
+        self._workflow_activities.pop("analyze", None)
         self.learn_progress.setRange(0, 100)
         self.learn_button.setEnabled(True)
         self.analyze_cancel_button.setEnabled(False)
         self.analyze_stats.setText(error)
         self.append_log(error)
         self.statusBar().showMessage(error)
+        self._refresh_workflow_cards()
 
     def choose_match_file(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
@@ -824,6 +1000,7 @@ class LegacyMainWindow(QMainWindow):
             )
             return
         self._match_audio_path = path
+        self._workflow_last_match_complete = False
         self._match_result = None
         self._match_result_path = None
         self.match_drop.setText(path.name)
@@ -838,10 +1015,14 @@ class LegacyMainWindow(QMainWindow):
         self.recommendation_details.setVisible(False)
         self.recommendation_placeholder.setVisible(True)
         self.save_preset_button.setEnabled(False)
+        self._refresh_workflow_cards()
 
     def start_match(self) -> None:
-        if self._model_asset_error:
-            self.report_model_asset_error(self._model_asset_error, show_dialog=True)
+        workflow_error = getattr(self, "_workflow_match_error", "")
+        if self._model_asset_error or workflow_error:
+            self.report_model_asset_error(
+                self._model_asset_error or workflow_error, show_dialog=True
+            )
             return
         if self._match_audio_path is None:
             return
@@ -852,6 +1033,8 @@ class LegacyMainWindow(QMainWindow):
         self.match_budget.setEnabled(False)
         self.match_offset.setEnabled(False)
         self.match_progress.setRange(0, 0)
+        self._workflow_last_match_complete = False
+        self._set_workflow_activity("match", 0, 0, "Loading audio and models…")
         self.match_stats.setText("Loading audio and models…")
         self.recommendation_details.setVisible(False)
         self.recommendation_placeholder.setVisible(True)
@@ -894,6 +1077,17 @@ class LegacyMainWindow(QMainWindow):
             )
         else:
             self.match_stats.setText(phase.replace("-", " ").title() + "…")
+        self._set_workflow_activity(
+            "match",
+            evaluations,
+            budget,
+            (
+                f"{phase.replace('-', ' ').title()} · "
+                f"{evaluations:,} of {budget:,} evaluations"
+                if budget
+                else phase.replace("-", " ").title() + "…"
+            ),
+        )
 
     @staticmethod
     def _play_audio(path: Path) -> None:
@@ -905,6 +1099,8 @@ class LegacyMainWindow(QMainWindow):
         sd.play(audio, rate, blocking=False)
 
     def _match_completed(self, result_path: str) -> None:
+        self._workflow_activities.pop("match", None)
+        self._workflow_last_match_complete = True
         import json
 
         self._match_result_path = Path(result_path)
@@ -920,6 +1116,7 @@ class LegacyMainWindow(QMainWindow):
         self.match_budget.setEnabled(True)
         self.match_offset.setEnabled(True)
         self._show_match_result(self._match_result)
+        self._refresh_workflow_cards()
 
     def _show_match_result(self, result: dict) -> None:
         self.match_results.setVisible(True)
@@ -1027,6 +1224,8 @@ class LegacyMainWindow(QMainWindow):
         self.statusBar().showMessage("Match complete")
 
     def _match_failed(self, error: str) -> None:
+        self._workflow_activities.pop("match", None)
+        self._workflow_last_match_complete = False
         self.match_progress.setRange(0, 100)
         self.match_progress.setValue(0)
         self.match_start_button.setEnabled(
@@ -1042,8 +1241,7 @@ class LegacyMainWindow(QMainWindow):
         self.append_log(f"Match failed: {error}")
         self.statusBar().showMessage(error)
         if hasattr(self, "match_card_status"):
-            self.match_card_status.setText("Match failed — see the message below")
-            self.match_card_status.setStyleSheet("color: #ff5f67;")
+            self._refresh_workflow_cards()
 
     def report_model_asset_error(
         self,
@@ -1059,8 +1257,7 @@ class LegacyMainWindow(QMainWindow):
         self.match_stats.setText(error)
         self.match_stats.setStyleSheet("color: #ff5f67; font-weight: 700;")
         if hasattr(self, "match_card_status"):
-            self.match_card_status.setText("Model files need attention")
-            self.match_card_status.setStyleSheet("color: #ff5f67;")
+            self._refresh_workflow_cards()
         self.append_log(f"Match unavailable: {error}")
         self.statusBar().showMessage("Matching unavailable — model files need attention")
         if show_dialog:
@@ -1294,6 +1491,7 @@ class MainWindow(LegacyMainWindow):
         self.runner = ScanProcessRunner(self)
         self.runner.log.connect(self.append_log)
         self.runner.progress.connect(self._progress)
+        self.runner.stage_progress.connect(self._local_library_progress_changed)
         self.runner.completed.connect(self._scan_completed)
         self.runner.failed.connect(self._scan_failed)
         self.render_runner = RenderProcessRunner(self)
@@ -1333,6 +1531,8 @@ class MainWindow(LegacyMainWindow):
         self._library_preview_uid: str | None = None
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
+        self._workflow_activities: dict[str, WorkflowActivity] = {}
+        self._workflow_last_match_complete = False
         self._match_session = tempfile.TemporaryDirectory(
             prefix="patchlab-match-app-"
         )
@@ -1458,22 +1658,6 @@ class MainWindow(LegacyMainWindow):
         self.privacy_settings.setParent(root)
         self.privacy_settings.setVisible(False)
 
-        scan_ready = not any(
-            result.failed for result in library_scan_checks(DEFAULT_DB_PATH)
-        )
-        render_complete = self._render_library_complete()
-        model_ready = (
-            Path(__file__).resolve().parents[1]
-            / "data"
-            / "models"
-            / "param_model.pt"
-        ).is_file() and (
-            Path(__file__).resolve().parents[1]
-            / "data"
-            / "features"
-            / "preset_index.npy"
-        ).is_file()
-        match_ready = self.distribution_mode or model_ready
         cards = (
             HeroCard(
                 "Link My Preset Folder"
@@ -1488,21 +1672,21 @@ class MainWindow(LegacyMainWindow):
                 "Render Sound Library",
                 "waveform",
                 "violet",
-                enabled=scan_ready,
+                enabled=True,
                 step=2,
             ),
             HeroCard(
                 "Analyze & Learn",
                 "brain",
                 "amber",
-                enabled=render_complete,
+                enabled=True,
                 step=3,
             ),
             HeroCard(
                 "Match a Sound",
                 "search-wave",
                 "blue",
-                enabled=match_ready,
+                enabled=True,
                 step=4,
             ),
         )
@@ -1529,18 +1713,7 @@ class MainWindow(LegacyMainWindow):
         self.render_button.clicked.connect(self.start_render)
         self.learn_button.clicked.connect(self.start_analyze)
         self.match_button.clicked.connect(self.choose_match_file)
-        if scan_ready:
-            self.scan_progress.setValue(100)
-            self.scan_card_status.setText("Library indexed ✓")
-        if render_complete:
-            self.render_progress.setValue(100)
-            self.render_card_status.setText("Sound library ready ✓")
-        if model_ready:
-            self.learn_progress.setValue(100)
-            self.learn_card_status.setText("Model trained ✓")
-        if match_ready:
-            self.match_progress.setValue(100)
-            self.match_card_status.setText("Match ready ✓")
+        self._refresh_workflow_cards()
 
         control_row = QHBoxLayout()
         control_row.setSpacing(11)
@@ -1695,7 +1868,9 @@ class MainWindow(LegacyMainWindow):
         training_layout = QVBoxLayout(training_card)
         training_layout.setContentsMargins(*card_margins)
         training_layout.setSpacing(card_spacing)
-        training_title = QLabel("DEEP TRAINING")
+        training_title = QLabel(
+            "PERSONAL LEARNING" if self.distribution_mode else "DEEP TRAINING"
+        )
         training_title.setObjectName("controlTitle")
         training_layout.addWidget(training_title)
         training_group = QVBoxLayout()
@@ -1705,7 +1880,14 @@ class MainWindow(LegacyMainWindow):
         training_group.addWidget(training_options_label)
         training_controls = QHBoxLayout()
         training_controls.setSpacing(18)
-        self.deep_training.setText("Deep training")
+        if self.distribution_mode:
+            self.deep_training.setText("Automatic with linked folder")
+            self.deep_training.setChecked(True)
+            self.deep_training.setEnabled(False)
+            self.analyze_cancel_button.setVisible(False)
+            self.analyze_stats.setText("Shipped model active")
+        else:
+            self.deep_training.setText("Deep training")
         self.analyze_stats.setObjectName("controlStat")
         training_controls.addWidget(
             self.deep_training,
@@ -3330,44 +3512,25 @@ class MainWindow(LegacyMainWindow):
         self._octave_changed(self.octave_selector.currentIndex())
         self.match_stats.setText(str(result.get("message", "Match complete")))
         self.statusBar().showMessage("Match complete")
-        self.match_card_status.setText(f"{similarity:.1f}% · ready")
+        self._refresh_workflow_cards()
         if self._batch_state is not None:
             self.save_preset_button.setEnabled(False)
             self.load_in_serum_button.setEnabled(False)
 
     def _scan_completed(self, summary: dict) -> None:
         super()._scan_completed(summary)
-        self.scan_card_status.setText(
-            f"{summary.get('found', 0):,} found · {summary.get('failed', 0):,} failed"
-        )
 
     def _render_progress_changed(self, detail: dict) -> None:
         super()._render_progress_changed(detail)
-        current = int(detail.get("completed_note_pairs", 0))
-        total = max(int(detail.get("total_note_pairs", 1)), 1)
-        self.render_card_status.setText(f"{current:,} / {total:,} rendered")
 
     def _render_completed(self, summary: dict) -> None:
         super()._render_completed(summary)
-        self.render_card_status.setText("Library rendered ✓")
 
     def _analyze_progress_changed(self, detail: dict) -> None:
         super()._analyze_progress_changed(detail)
-        self.learn_card_status.setText(
-            str(detail.get("phase", "analyzing")).replace("-", " ").title()
-        )
 
     def _analyze_completed(self, summary: dict) -> None:
         super()._analyze_completed(summary)
-        self.learn_card_status.setText("Model trained ✓")
 
     def _match_progress_changed(self, detail: dict) -> None:
         super()._match_progress_changed(detail)
-        evaluations = int(detail.get("evaluations", 0))
-        budget = int(detail.get("budget", 0))
-        if budget:
-            self.match_card_status.setText(f"{evaluations} / {budget} evaluations")
-        else:
-            self.match_card_status.setText(
-                str(detail.get("phase", "matching")).replace("-", " ").title()
-            )

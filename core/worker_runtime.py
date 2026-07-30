@@ -46,6 +46,9 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "packaged-runtime-gate": WorkerEntryPoint(
         "scripts.verify_packaged_runtime"
     ),
+    "workflow-card-gate": WorkerEntryPoint(
+        "scripts.verify_workflow_cards"
+    ),
 }
 
 

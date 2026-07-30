@@ -34,6 +34,10 @@ def main() -> int:
         relay=relay_from_environment(),
         render_processes=args.workers,
         log=lambda message: print(message, flush=True),
+        progress=lambda detail: print(
+            "LOCAL_LIBRARY_PROGRESS=" + json.dumps(detail, sort_keys=True),
+            flush=True,
+        ),
     )
     print("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(result), sort_keys=True), flush=True)
     return 0

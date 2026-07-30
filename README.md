@@ -463,10 +463,11 @@ and means both:
 - non-factory preset files plus fingerprints/settings may be contributed to
   the private developer library. Audio is never contributed.
 
-Disagreeing leaves instant factory matching enabled and visibly disables the
-folder section. “Use & share my own presets” is the single persisted On/Off
-setting for changing this later. Turning it off does not delete the user's
-local data, but immediately excludes it from use and disables linking.
+Disagreeing leaves instant factory matching enabled. The folder card remains
+visible as an optional action and explains that Privacy must be enabled before
+linking. “Use & share my own presets” is the single persisted On/Off setting
+for changing this later. Turning it off does not delete the user's local data,
+but immediately excludes it from use and prevents linking.
 
 Local work always runs before the storage-side relay hash check. Shared-pool
 dedup therefore never skips this user's scan, parameter extraction, rendering,
@@ -715,10 +716,27 @@ either host; its lone `Bank` parameter selects only anonymous `Prog 1` through
 
 ## Four-step workflow
 
-1. Select Preset Folder
-2. Render Sound Library
-3. Analyze & Learn
-4. Match a Sound
+The four cards always describe the running machine's real state:
+
+1. **Link My Preset Folder** is optional. It reports the linked folder and the
+   number of locally cataloged presets, or prompts the user to link one.
+2. **Render Sound Library** applies only to personally linked presets. Factory
+   fingerprints ship ready to search, so a user with no linked folder sees
+   “Not required” rather than an incomplete setup warning.
+3. **Analyze & Learn** starts complete because PatchLab ships its trained CLAP
+   assets and factory index. Linked presets are rendered and fingerprinted
+   during the folder job, then added to retrieval beside the shipped factory
+   data.
+4. **Match a Sound** validates the checkpoint, tokenizer cache, and factory
+   fingerprint database before claiming readiness, then prompts for an audio
+   file and reports live matching progress.
+
+Full parameter-model retraining is not incremental in this release. The
+installed app therefore does not run a local-only retrain that would discard
+or replace prior shipped learning. The Analyze card explains this limitation;
+its optional action describes the automatic linked-preset fingerprint path.
+The source-development Milestone 3 pipeline remains a full monolithic rebuild,
+not an incremental personal-model update.
 
 Launch the Milestone 1 desktop shell from the project root with:
 

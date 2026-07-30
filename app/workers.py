@@ -118,6 +118,7 @@ class _ProcessRunnerBase(QObject):
 class ScanProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     progress = Signal(int, int)
+    stage_progress = Signal(dict)
     completed = Signal(dict)
     failed = Signal(str)
 
@@ -158,6 +159,10 @@ class ScanProcessRunner(_ProcessRunnerBase):
             if line.startswith("WORKER_PROGRESS="):
                 current, total = line.removeprefix("WORKER_PROGRESS=").split("/", 1)
                 self.progress.emit(int(current), int(total))
+            elif line.startswith("LOCAL_LIBRARY_PROGRESS="):
+                self.stage_progress.emit(
+                    json.loads(line.removeprefix("LOCAL_LIBRARY_PROGRESS="))
+                )
             elif line.startswith("SCAN_SUMMARY="):
                 self._summary = json.loads(line.removeprefix("SCAN_SUMMARY="))
                 self.log.emit(line)

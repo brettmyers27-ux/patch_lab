@@ -78,6 +78,21 @@ QFrame#heroCard[accent="teal"] { border-color: rgba(45, 212, 191, 175); }
 QFrame#heroCard[accent="violet"] { border-color: rgba(168, 85, 247, 175); }
 QFrame#heroCard[accent="amber"] { border-color: rgba(245, 158, 11, 175); }
 QFrame#heroCard[accent="blue"] { border-color: rgba(59, 130, 246, 175); }
+QFrame#heroCard[workflowState="needs-action"] {
+  border-style: dashed;
+  background: rgba(30, 41, 59, 214);
+}
+QFrame#heroCard[workflowState="in-progress"] {
+  border-width: 2px;
+  background: rgba(30, 41, 59, 230);
+}
+QFrame#heroCard[workflowState="complete"] {
+  background: rgba(15, 39, 42, 220);
+}
+QFrame#heroCard[workflowState="not-required"] {
+  border-color: #475569;
+  background: rgba(15, 23, 42, 175);
+}
 QPushButton#heroAction {
   background: transparent;
   border: 0;
@@ -105,6 +120,22 @@ QLabel#stepBadge[accent="teal"] { background: #2DD4BF; }
 QLabel#stepBadge[accent="violet"] { background: #A855F7; }
 QLabel#stepBadge[accent="amber"] { background: #F59E0B; }
 QLabel#stepBadge[accent="blue"] { background: #3B82F6; }
+QLabel#stepBadge[workflowState="complete"] {
+  background: #22C55E;
+  color: #04130A;
+}
+QLabel#stepBadge[workflowState="not-required"] {
+  background: #64748B;
+  color: #F8FAFC;
+}
+QLabel#stepBadge[workflowState="needs-action"] {
+  background: #F59E0B;
+  color: #160B00;
+}
+QLabel#cardStatus[workflowState="needs-action"] { color: #FBBF24; }
+QLabel#cardStatus[workflowState="in-progress"] { color: #60A5FA; }
+QLabel#cardStatus[workflowState="complete"] { color: #34D399; }
+QLabel#cardStatus[workflowState="not-required"] { color: #94A3B8; }
 QProgressBar {
   min-height: 6px;
   max-height: 6px;

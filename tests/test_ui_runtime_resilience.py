@@ -79,3 +79,43 @@ def test_large_library_job_requires_explicit_confirmation(
         assert "was not started" in window.log_pane.toPlainText()
     finally:
         window.close()
+
+
+def test_linked_folder_card_refreshes_without_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _window(tmp_path, monkeypatch)
+    window.runner.start = Mock()  # type: ignore[method-assign]
+    linked = tmp_path / "Linked Presets"
+    linked.mkdir()
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: str(linked),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    try:
+        window.choose_folder()
+        assert window.privacy_store.load().linked_folder == str(linked)
+        assert window.scan_box.property("workflowState") == "in-progress"
+
+        window._scan_completed(
+            {
+                "found": 0,
+                "searchable_local": 0,
+                "relay_uploaded": 0,
+                "relay_already_present": 0,
+                "relay_upload_failed": 0,
+                "relay_disabled_after_failures": 0,
+                "factory_skipped_upload": 0,
+            }
+        )
+        assert window.scan_box.property("workflowState") == "complete"
+        assert "Linked Presets" in window.scan_card_status.text()
+    finally:
+        window.close()

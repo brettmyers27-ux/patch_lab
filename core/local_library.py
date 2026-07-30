@@ -29,6 +29,7 @@ from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstp
 
 
 LogCallback = Callable[[str], None]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class RelayProtocol(Protocol):
@@ -159,6 +160,7 @@ def process_linked_folder(
     env: PlatformEnv = ENV,
     relay: RelayProtocol | None = None,
     log: LogCallback = print,
+    progress: ProgressCallback | None = None,
     render_processes: int = 4,
 ) -> LocalLibrarySummary:
     """Always process locally first, then perform storage-only relay dedup."""
@@ -172,7 +174,16 @@ def process_linked_folder(
     summary = LocalLibrarySummary(found=len(paths))
     id_to_path: dict[int, Path] = {}
     new_or_pending: list[int] = []
-    for path in paths:
+    if progress is not None:
+        progress(
+            {
+                "stage": "scan",
+                "current": 0,
+                "total": len(paths),
+                "text": f"Scanning 0 of {len(paths):,} presets",
+            }
+        )
+    for discovered_index, path in enumerate(paths, start=1):
         synth = synth_for(path)
         assert synth is not None
         digest = sha1_file(path)
@@ -191,6 +202,17 @@ def process_linked_folder(
             )
         if status in {"scanned", "failed_load"}:
             new_or_pending.append(preset_id)
+        if progress is not None:
+            progress(
+                {
+                    "stage": "scan",
+                    "current": discovered_index,
+                    "total": len(paths),
+                    "text": (
+                        f"Scanning {discovered_index:,} of {len(paths):,} presets"
+                    ),
+                }
+            )
     log(f"Local catalog: {len(paths)} files; {summary.deduped_local} already known locally")
 
     serum1_ids = [
@@ -198,9 +220,14 @@ def process_linked_folder(
         for preset_id in new_or_pending
         if synth_for(id_to_path[preset_id]) == "serum1"
     ]
+    serum2_ids = [
+        preset_id
+        for preset_id in new_or_pending
+        if synth_for(id_to_path[preset_id]) == "serum2"
+    ]
     if serum1_ids:
         ingestor = SequentialSerum1VST2(env)
-        for preset_id in serum1_ids:
+        for ingest_index, preset_id in enumerate(serum1_ids, start=1):
             try:
                 parameters, rms, strategy = ingestor.ingest(id_to_path[preset_id])
                 database.replace_params(preset_id, parameters, strategy)
@@ -213,12 +240,19 @@ def process_linked_folder(
                 database.mark_failed(preset_id, "failed_load", repr(exc))
                 summary.failed_load += 1
                 log(f"Local load failed: {id_to_path[preset_id].name}: {exc}")
+            if progress is not None:
+                progress(
+                    {
+                        "stage": "scan",
+                        "current": ingest_index,
+                        "total": len(serum1_ids) + len(serum2_ids),
+                        "text": (
+                            f"Preparing {ingest_index:,} of "
+                            f"{len(serum1_ids) + len(serum2_ids):,} presets"
+                        ),
+                    }
+                )
 
-    serum2_ids = [
-        preset_id
-        for preset_id in new_or_pending
-        if synth_for(id_to_path[preset_id]) == "serum2"
-    ]
     if serum2_ids:
         from pedalboard import load_plugin
 
@@ -227,7 +261,7 @@ def process_linked_folder(
         )
         live = load_plugin(str(candidate.path), plugin_name="Serum 2")
         template = decode_host_template(bytes(live.preset_data))
-        for preset_id in serum2_ids:
+        for serum2_index, preset_id in enumerate(serum2_ids, start=1):
             try:
                 _store_serum2(
                     database, preset_id, id_to_path[preset_id], template, Path(state_dir)
@@ -238,12 +272,57 @@ def process_linked_folder(
                 database.mark_failed(preset_id, "failed_load", repr(exc))
                 summary.failed_load += 1
                 log(f"Local Serum 2 load failed: {id_to_path[preset_id].name}: {exc}")
+            if progress is not None:
+                complete = len(serum1_ids) + serum2_index
+                progress(
+                    {
+                        "stage": "scan",
+                        "current": complete,
+                        "total": len(serum1_ids) + len(serum2_ids),
+                        "text": (
+                            f"Preparing {complete:,} of "
+                            f"{len(serum1_ids) + len(serum2_ids):,} presets"
+                        ),
+                    }
+                )
 
     renderable = [
         record.id
         for record in database.renderable_presets()
         if record.id in id_to_path
     ]
+    def render_progress(detail: dict[str, Any]) -> None:
+        if progress is None:
+            return
+        current = int(detail.get("completed_note_pairs", 0))
+        total = int(detail.get("total_note_pairs", 0))
+        progress(
+            {
+                **detail,
+                "stage": "render",
+                "current": current,
+                "total": total,
+                "text": f"Rendering {current:,} of {total:,} notes",
+            }
+        )
+
+    if progress is not None:
+        existing_notes = database.existing_render_notes()
+        completed_notes = sum(
+            len(existing_notes.get(preset_id, set()).intersection(MIDI_NOTES))
+            for preset_id in renderable
+        )
+        total_notes = len(renderable) * len(MIDI_NOTES)
+        progress(
+            {
+                "stage": "render",
+                "current": completed_notes,
+                "total": total_notes,
+                "text": (
+                    f"Rendering {completed_notes:,} of {total_notes:,} notes"
+                ),
+            }
+        )
     render_summary = render_library(
         db_path=db_path,
         audio_root=audio_root,
@@ -251,6 +330,7 @@ def process_linked_folder(
         preset_ids=renderable,
         processes=render_processes,
         log=log,
+        progress=render_progress,
     )
     log("Local render summary: " + json.dumps(summary_dict(render_summary), sort_keys=True))
 
@@ -274,7 +354,7 @@ def process_linked_folder(
     ]
     if needs_features:
         embedder = ClapEmbedder(env)
-        for preset_id in needs_features:
+        for feature_index, preset_id in enumerate(needs_features, start=1):
             prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
             for note in MIDI_NOTES:
                 wav = Path(audio_root) / str(preset_id) / f"{note}.wav"
@@ -311,6 +391,18 @@ def process_linked_folder(
                 )
                 summary.fingerprints_created += 1
                 log(f"Local fingerprint ready: {id_to_path[preset_id].name}")
+            if progress is not None:
+                progress(
+                    {
+                        "stage": "analyze",
+                        "current": feature_index,
+                        "total": len(needs_features),
+                        "text": (
+                            f"Learning {feature_index:,} of "
+                            f"{len(needs_features):,} linked presets"
+                        ),
+                    }
+                )
 
     with database.connect() as connection:
         searchable_ids = {

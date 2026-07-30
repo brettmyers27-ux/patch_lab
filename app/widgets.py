@@ -200,6 +200,7 @@ class HeroCard(QFrame):
         super().__init__()
         self.setObjectName("heroCard")
         self.setProperty("accent", accent)
+        self.setProperty("workflowState", "needs-action")
         self.setMinimumHeight(78)
         self.setMaximumHeight(84)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -235,7 +236,6 @@ class HeroCard(QFrame):
         self.progress.setTextVisible(False)
         self.status = QLabel("Ready")
         self.status.setObjectName("cardStatus")
-        self.status.setStyleSheet(f"color: {ACCENTS[accent]};")
         self.body.addWidget(self.button)
         self.body.addWidget(self.progress)
         self.body.addWidget(self.status)
@@ -245,6 +245,43 @@ class HeroCard(QFrame):
         # (the app's scaled-canvas rendering) and causes paint/bounds glitches.
         # The QSS accent border on #heroCard already carries the color cue.
         self._position_step_badge()
+
+    def setWorkflowState(
+        self,
+        phase: str,
+        text: str,
+        current: int,
+        total: int,
+        *,
+        detail: str = "",
+    ) -> None:
+        """Apply a resolved workflow state without duplicating UI policy."""
+
+        self.setProperty("workflowState", phase)
+        self.status.setProperty("workflowState", phase)
+        self.progress.setProperty("workflowState", phase)
+        self.status.setText(text)
+        self.status.setToolTip(detail or text)
+        if total <= 0:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, max(int(total), 1))
+            self.progress.setValue(max(0, min(int(current), int(total))))
+        marker = {
+            "needs-action": "!",
+            "in-progress": "…",
+            "complete": "✓",
+            "not-required": "—",
+        }.get(phase, "?")
+        if self.step_badge is not None:
+            self.step_badge.setText(marker)
+            self.step_badge.setToolTip(phase.replace("-", " ").title())
+            self.step_badge.setProperty("workflowState", phase)
+        for widget in (self, self.status, self.progress, self.step_badge):
+            if widget is not None:
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
