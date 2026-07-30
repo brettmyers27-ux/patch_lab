@@ -163,22 +163,46 @@ class AudioDropLabel(QFrame):
     def set_playable(self, playable: bool) -> None:
         self.play_button.setEnabled(playable)
 
-    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        urls = event.mimeData().urls()
-        if len(urls) == 1 and Path(urls[0].toLocalFile()).suffix.casefold() in SUPPORTED_AUDIO_SUFFIXES:
-            self.setProperty("dragActive", True)
-            self.style().unpolish(self)
-            self.style().polish(self)
-            event.acceptProposedAction()
+    @staticmethod
+    def _accepts_audio_drag(mime_data) -> bool:  # type: ignore[no-untyped-def]
+        urls = mime_data.urls()
+        return (
+            len(urls) == 1
+            and Path(urls[0].toLocalFile()).suffix.casefold()
+            in SUPPORTED_AUDIO_SUFFIXES
+        )
 
-    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        self.setProperty("dragActive", False)
+    def _set_drag_active(self, active: bool) -> None:
+        self.setProperty("dragActive", active)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._accepts_audio_drag(event.mimeData()):
+            self._set_drag_active(True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._accepts_audio_drag(event.mimeData()):
+            self._set_drag_active(True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_drag_active(False)
+        event.accept()
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_drag_active(False)
         urls = event.mimeData().urls()
-        if urls:
+        if self._accepts_audio_drag(event.mimeData()):
             self.file_dropped.emit(urls[0].toLocalFile())
             event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 class LibraryEntryRow(QFrame):
@@ -211,6 +235,24 @@ class ScaledGraphicsView(QGraphicsView):
     yet when the containing QMainWindow's resizeEvent fires, which produces
     a wrong (usually tiny) initial scale if called from there instead.
     """
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if AudioDropLabel._accepts_audio_drag(event.mimeData()):
+            super().dragEnterEvent(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if AudioDropLabel._accepts_audio_drag(event.mimeData()):
+            super().dragMoveEvent(event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if AudioDropLabel._accepts_audio_drag(event.mimeData()):
+            super().dropEvent(event)
+        else:
+            event.ignore()
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)

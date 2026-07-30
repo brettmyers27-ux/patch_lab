@@ -16,6 +16,8 @@ choosing the synthesis path over the factory-fingerprint fallback.
 from __future__ import annotations
 
 import os
+import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,7 @@ SERUM2_TARGETS_NAME = "serum2_targets.npz"
 SERUM2_SCHEMA_NAME = "serum2_target_schema.json"
 PRESET_INDEX_NAME = "preset_index.npy"
 NOTE_INDEX_NAME = "note_index.npy"
+SYNTHESIS_CATALOG_NAME = "patchlab-synthesis-catalog.sqlite"
 
 # Serum 2 candidates are rendered from a per-preset .vstpreset template, so a
 # usable install needs the full set rather than a sample of it. The floor is
@@ -68,7 +71,27 @@ class SynthesisReadiness:
 
 
 def _distribution_mode() -> bool:
-    return os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1"
+    # PyInstaller multiprocessing children can import this module before the
+    # custom runtime hook's environment assignment is visible. ``sys.frozen``
+    # is set by the bootloader itself, so it is the authoritative fallback and
+    # prevents spawned synthesis workers from treating bundle Resources as a
+    # writable development checkout.
+    return bool(getattr(sys, "frozen", False)) or (
+        os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1"
+    )
+
+
+def _library_database_ready(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM presets"
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return False
+    return bool(row and int(row[0]) > 0)
 
 
 def resolve_synthesis_assets() -> SynthesisAssets:
@@ -102,7 +125,14 @@ def resolve_synthesis_assets() -> SynthesisAssets:
     else:
         roots = (shipped_states.expanduser().resolve(),)
     render_states = roots[0]
-    default_db = local["db"] if _distribution_mode() else root / "data" / "library.db"
+    bundled_catalog = repo_models / SYNTHESIS_CATALOG_NAME
+    default_db = (
+        bundled_catalog
+        if _distribution_mode() and bundled_catalog.is_file()
+        else local["db"]
+        if _distribution_mode()
+        else root / "data" / "library.db"
+    )
     library_db = Path(
         os.environ.get("PATCHLAB_LIBRARY_DB", str(default_db))
     ).expanduser().resolve()
@@ -149,8 +179,8 @@ def synthesis_readiness(target_synth: str | None = None) -> SynthesisReadiness:
     ):
         if not path.is_file():
             missing.append(label)
-    if not assets.library_db.is_file():
-        missing.append(assets.library_db.name)
+    if not _library_database_ready(assets.library_db):
+        missing.append(f"{assets.library_db.name} (missing preset catalog)")
 
     if target_synth != "serum1":
         if not assets.serum2_targets.is_file():

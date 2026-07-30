@@ -15,11 +15,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.build_info import assert_packaged_commit, current_build_info
 from core.model_assets import ModelAssetsError, validate_model_assets
+from core.synthesis_assets import resolve_synthesis_assets, synthesis_readiness
 
 
 def _drag_drop_gate(audio_path: Path) -> dict[str, object]:
-    from PySide6.QtCore import QMimeData, QPointF, QUrl, Qt
-    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+    from PySide6.QtCore import QMimeData, QPoint, QPointF, QUrl, Qt
+    from PySide6.QtGui import (
+        QDragEnterEvent,
+        QDragMoveEvent,
+        QDropEvent,
+    )
     from PySide6.QtWidgets import QApplication, QGraphicsProxyWidget
 
     from app.ui import MainWindow
@@ -39,47 +44,113 @@ def _drag_drop_gate(audio_path: Path) -> dict[str, object]:
             if isinstance(item, QGraphicsProxyWidget)
         ]
         proxy_accepts_drop = bool(root_proxies and root_proxies[0].acceptDrops())
-        drop_center = window.match_drop.mapTo(
-            window._ui_root,
-            window.match_drop.rect().center(),
-        )
-        viewport_position = window._graphics_view.mapFromScene(
-            QPointF(drop_center)
-        )
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(str(audio_path))])
-        drag_enter = QDragEnterEvent(
-            viewport_position,
-            Qt.DropAction.CopyAction,
-            mime,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        drag_move = QDragMoveEvent(
-            viewport_position,
-            Qt.DropAction.CopyAction,
-            mime,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        drop = QDropEvent(
-            QPointF(viewport_position),
-            Qt.DropAction.CopyAction,
-            mime,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        QApplication.sendEvent(window._graphics_view.viewport(), drag_enter)
-        QApplication.sendEvent(window._graphics_view.viewport(), drag_move)
-        QApplication.sendEvent(window._graphics_view.viewport(), drop)
+        viewport = window._graphics_view.viewport()
+        drop_wiring = {
+            "drop_widget": window.match_drop.acceptDrops(),
+            "root_proxy": proxy_accepts_drop,
+            "graphics_view": window._graphics_view.acceptDrops(),
+            "viewport": viewport.acceptDrops(),
+        }
+
+        def viewport_point(x_ratio: float, y_ratio: float) -> QPoint:
+            local = QPoint(
+                round(window.match_drop.width() * x_ratio),
+                round(window.match_drop.height() * y_ratio),
+            )
+            canvas = window.match_drop.mapTo(window._ui_root, local)
+            return window._graphics_view.mapFromScene(QPointF(canvas))
+
+        positions = [
+            viewport_point(0.12, 0.25),
+            viewport_point(0.30, 0.50),
+            viewport_point(0.50, 0.72),
+            viewport_point(0.70, 0.50),
+            viewport_point(0.88, 0.25),
+        ]
+
+        def exercise_drag(path: Path) -> tuple[
+            QDragEnterEvent,
+            list[QDragMoveEvent],
+            QDropEvent,
+        ]:
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(str(path))])
+            drag_enter = QDragEnterEvent(
+                positions[0],
+                Qt.DropAction.CopyAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(viewport, drag_enter)
+            drag_moves: list[QDragMoveEvent] = []
+            for position in positions:
+                drag_move = QDragMoveEvent(
+                    position,
+                    Qt.DropAction.CopyAction,
+                    mime,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                QApplication.sendEvent(viewport, drag_move)
+                drag_moves.append(drag_move)
+            drop = QDropEvent(
+                QPointF(positions[-1]),
+                Qt.DropAction.CopyAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(viewport, drop)
+            return drag_enter, drag_moves, drop
+
+        drag_enter, drag_moves, drop = exercise_drag(audio_path)
         application.processEvents()
         selected = window._match_audio_path
+        move_acceptance = [event.isAccepted() for event in drag_moves]
+        positive_pass = bool(
+            all(drop_wiring.values())
+            and drag_enter.isAccepted()
+            and all(move_acceptance)
+            and drop.isAccepted()
+            and selected == audio_path.resolve()
+        )
+
+        # A rejected drag must neither set the highlight nor mutate the selected
+        # query. Exercise this through the graphics viewport too, because direct
+        # widget delivery bypasses the scene behavior under test.
+        window._match_audio_path = None
+        unsupported = Path(temporary) / "unsupported.txt"
+        unsupported.write_text("not audio", encoding="utf-8")
+        rejected_enter, rejected_moves, rejected_drop = exercise_drag(unsupported)
+        application.processEvents()
+        rejected_move_acceptance = [
+            event.isAccepted() for event in rejected_moves
+        ]
+        negative_pass = bool(
+            not rejected_enter.isAccepted()
+            and not any(rejected_move_acceptance)
+            and not rejected_drop.isAccepted()
+            and window._match_audio_path is None
+        )
         result = {
+            "drop_wiring": drop_wiring,
             "root_proxy_accepts_drops": proxy_accepts_drop,
             "drag_enter_accepted": drag_enter.isAccepted(),
+            "drag_move_accepted": all(move_acceptance),
+            "drag_move_acceptance": move_acceptance,
             "drop_accepted": drop.isAccepted(),
             "selected_path": str(selected) if selected else None,
-            "drag_drop_pass": selected == audio_path.resolve(),
+            "unsupported_enter_rejected": not rejected_enter.isAccepted(),
+            "unsupported_moves_rejected": not any(rejected_move_acceptance),
+            "unsupported_drop_rejected": not rejected_drop.isAccepted(),
+            "unsupported_selected_path": (
+                str(window._match_audio_path)
+                if window._match_audio_path is not None
+                else None
+            ),
+            "negative_drag_pass": negative_pass,
+            "drag_drop_pass": positive_pass and negative_pass,
         }
         window.close()
         application.processEvents()
@@ -123,6 +194,18 @@ def main() -> int:
     report["model_assets_pass"] = True
     report["model_cache"] = str(assets.cache_dir)
     report["checkpoint"] = str(assets.checkpoint)
+    synthesis_assets = resolve_synthesis_assets()
+    serum2_readiness = synthesis_readiness("serum2")
+    report["serum2_synthesis"] = {
+        "available": serum2_readiness.available,
+        "reason": serum2_readiness.reason,
+        "missing": list(serum2_readiness.missing),
+        "library_db": str(synthesis_assets.library_db),
+        "feature_dir": str(synthesis_assets.feature_dir),
+        "render_state_roots": [
+            str(path) for path in synthesis_assets.render_state_roots
+        ],
+    }
     if args.expected_commit:
         assert_packaged_commit(args.expected_commit)
         report["build_commit_pass"] = True
@@ -130,6 +213,7 @@ def main() -> int:
         report["drag_drop"] = _drag_drop_gate(args.drag_audio.resolve())
     report["gate_pass"] = bool(
         report["model_assets_pass"]
+        and serum2_readiness.available
         and report.get("build_commit_pass", True)
         and (
             not args.drag_audio

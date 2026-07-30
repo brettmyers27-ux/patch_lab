@@ -4,9 +4,11 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import QMimeData, QPoint, QUrl, Qt
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from app.ui import MainWindow
+from app.ui import AudioDropLabel, MainWindow
 from core.privacy import PrivacyStore
 
 
@@ -20,6 +22,67 @@ def _window(
     privacy = PrivacyStore(tmp_path / "privacy.json")
     privacy.save(True)
     return MainWindow(privacy_store=privacy)
+
+
+def _drag_mime(path: Path) -> QMimeData:
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    return mime
+
+
+def test_audio_drop_acceptance_is_identical_at_enter_and_move(
+    tmp_path: Path,
+) -> None:
+    QApplication.instance() or QApplication([])
+    drop = AudioDropLabel()
+    supported = _drag_mime(tmp_path / "query.aif")
+    unsupported = _drag_mime(tmp_path / "notes.txt")
+    try:
+        enter = QDragEnterEvent(
+            QPoint(10, 10),
+            Qt.DropAction.CopyAction,
+            supported,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        move = QDragMoveEvent(
+            QPoint(20, 20),
+            Qt.DropAction.CopyAction,
+            supported,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(drop, enter)
+        QApplication.sendEvent(drop, move)
+        assert enter.isAccepted()
+        assert move.isAccepted()
+        assert drop.property("dragActive") is True
+
+        leave = QDragLeaveEvent()
+        QApplication.sendEvent(drop, leave)
+        assert leave.isAccepted()
+        assert drop.property("dragActive") is False
+
+        rejected_enter = QDragEnterEvent(
+            QPoint(10, 10),
+            Qt.DropAction.CopyAction,
+            unsupported,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        rejected_move = QDragMoveEvent(
+            QPoint(20, 20),
+            Qt.DropAction.CopyAction,
+            unsupported,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(drop, rejected_enter)
+        QApplication.sendEvent(drop, rejected_move)
+        assert not rejected_enter.isAccepted()
+        assert not rejected_move.isAccepted()
+    finally:
+        drop.close()
 
 
 def test_model_error_remains_visible_during_unrelated_library_progress(

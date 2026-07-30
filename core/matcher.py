@@ -7,6 +7,7 @@ import math
 import multiprocessing as mp
 import os
 import sqlite3
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -20,11 +21,11 @@ import soundfile as sf
 from core.dataset import _serum1_targets, _serum2_targets
 from core.delta_model import load_delta_model, predict_delta
 from core.features import CLAP_SAMPLE_RATE, ClapEmbedder, handcrafted_features
-from core.local_library import default_local_paths
 from core.match import cosine_topk, l2_normalize
+from core.model_assets import runtime_root
 from core.perturbation import perturb_serum1, perturb_serum2
 from core.platform_env import ENV
-from core.synthesis_assets import resolve_synthesis_assets
+from core.synthesis_assets import SynthesisAssets, resolve_synthesis_assets
 from core.train import load_parameter_model, predict_parameters
 
 
@@ -41,8 +42,14 @@ def _audio_root() -> Path:
     not at import time) keeps a frozen build from binding the checkout layout.
     """
 
-    if os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1":
-        return default_local_paths()["audio"]
+    if bool(getattr(sys, "frozen", False)) or (
+        os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1"
+    ):
+        # The packaged synthesis index uses the stable training-catalog IDs,
+        # while a user's linked-library cache uses independent local IDs.
+        # Never cross those namespaces; only consume catalog-ID renders shipped
+        # beside the index (development has them, frozen builds normally do not).
+        return runtime_root() / "data" / "audio"
     return PROJECT_ROOT / "data" / "audio"
 
 
@@ -250,7 +257,10 @@ def multi_resolution_stft_loss(target: np.ndarray, candidate: np.ndarray) -> flo
     return float(np.mean(losses))
 
 
-def _init_render_worker(scratch_root: str) -> None:
+def _init_render_worker(
+    scratch_root: str,
+    assets: SynthesisAssets | None = None,
+) -> None:
     from core.plugin_host import make_dawdreamer_processor
 
     hosts = {}
@@ -259,7 +269,11 @@ def _init_render_worker(scratch_root: str) -> None:
             item for item in ENV.plugins_for(synth) if item.format == required and item.hostable
         )
         hosts[synth] = make_dawdreamer_processor(candidate)
-    assets = resolve_synthesis_assets()
+    # The parent resolves paths once and passes the immutable dataclass through
+    # spawn. Re-resolving inside a PyInstaller multiprocessing child can happen
+    # before its distribution environment is fully restored, which previously
+    # pointed children at an empty database inside bundle Resources.
+    assets = assets or resolve_synthesis_assets()
     _RENDER.update(
         hosts=hosts,
         s1=_serum1_targets(assets.library_db),
@@ -371,16 +385,18 @@ def _render_candidate(
 class AnalysisBySynthesisMatcher:
     def __init__(self, processes: int = 4) -> None:
         context = mp.get_context("spawn")
+        assets = resolve_synthesis_assets()
+        self.assets = assets
+        self.audio_root = _audio_root()
         self._scratch = tempfile.TemporaryDirectory(
             prefix="patchlab-match-session-"
         )
         self.pool = context.Pool(
             processes,
             initializer=_init_render_worker,
-            initargs=(self._scratch.name,),
+            initargs=(self._scratch.name, assets),
         )
         self.embedder = ClapEmbedder(ENV)
-        assets = resolve_synthesis_assets()
         self.stores = {
             1: _serum1_targets(assets.library_db),
             2: _serum2_targets(assets.serum2_targets, assets.serum2_schema),

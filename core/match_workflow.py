@@ -13,7 +13,6 @@ import soundfile as sf
 
 from core.audio_input import DecodedAudio, decode_audio_file
 from core.branding import display_match_name, generated_preset_name
-from core.db import DEFAULT_DB_PATH
 from core.matcher import AnalysisBySynthesisMatcher, Candidate, SearchConfig
 from core.serum2_preset_writer import vector_was_modified
 
@@ -80,11 +79,15 @@ def _section_for_serum1(name: str) -> str:
     return "Global"
 
 
-def _preset_details(preset_ids: list[int]) -> dict[int, dict[str, Any]]:
+def _preset_details(
+    preset_ids: list[int],
+    database_path: Path,
+) -> dict[int, dict[str, Any]]:
     placeholders = ",".join("?" for _ in preset_ids)
-    with sqlite3.connect(DEFAULT_DB_PATH) as connection:
+    with sqlite3.connect(database_path) as connection:
         rows = connection.execute(
-            f"SELECT id,name,synth,path FROM presets WHERE id IN ({placeholders})",
+            f"SELECT id,name,synth,path,content_hash FROM presets "
+            f"WHERE id IN ({placeholders})",
             tuple(preset_ids),
         ).fetchall()
     return {
@@ -92,23 +95,30 @@ def _preset_details(preset_ids: list[int]) -> dict[int, dict[str, Any]]:
             "name": str(row[1]),
             "synth": str(row[2]),
             "source_path": str(row[3]),
+            "content_hash": str(row[4]),
         }
         for row in rows
     }
 
 
-def _nearest_render(preset_id: int, midi_note: int) -> tuple[int, Path]:
+def _nearest_render(
+    preset_id: int,
+    midi_note: int,
+    audio_root: Path,
+) -> tuple[int, Path | None]:
     notes = (24, 36, 48, 60, 72, 84, 96)
     ordered = sorted(notes, key=lambda value: abs(value - midi_note))
     for note in ordered:
-        path = PROJECT_ROOT / "data" / "audio" / str(preset_id) / f"{note}.wav"
+        path = audio_root / str(preset_id) / f"{note}.wav"
         if path.is_file():
             return note, path
-    raise FileNotFoundError(f"No audition render for preset {preset_id}")
+    return ordered[0], None
 
 
 def _serum1_settings(
-    candidate: Candidate, base_vector: np.ndarray
+    candidate: Candidate,
+    base_vector: np.ndarray,
+    database_path: Path,
 ) -> dict[str, dict[str, Any]]:
     from core.platform_env import ENV
     from core.plugin_host import dump_dawdreamer_parameters, make_dawdreamer_processor
@@ -119,7 +129,7 @@ def _serum1_settings(
         if item.format == "VST2" and item.hostable
     )
     _engine, processor = make_dawdreamer_processor(plugin)
-    with sqlite3.connect(DEFAULT_DB_PATH) as connection:
+    with sqlite3.connect(database_path) as connection:
         path = connection.execute(
             "SELECT path FROM presets WHERE id=?", (candidate.base_preset_id,)
         ).fetchone()[0]
@@ -214,7 +224,11 @@ def _candidate_payload(
     row = store.preset_row[candidate.base_preset_id]
     base = np.asarray(store.vectors[row], dtype=np.float32)
     if candidate.synth == "serum1":
-        settings = _serum1_settings(candidate, base)
+        settings = _serum1_settings(
+            candidate,
+            base,
+            matcher.assets.library_db,
+        )
     else:
         settings = _serum2_settings(
             candidate, base, matcher.absolute_checkpoint["serum2_schema"]
@@ -275,7 +289,10 @@ def run_match_file(
     try:
         embedding = matcher.query_embedding(decoded.mono, decoded.sample_rate)
         retrieval = matcher.retrieve_existing(embedding, 10)
-        detail = _preset_details([preset_id for preset_id, _score in retrieval])
+        detail = _preset_details(
+            [preset_id for preset_id, _score in retrieval],
+            matcher.assets.library_db,
+        )
 
         def search_progress(value: dict[str, Any]) -> None:
             _emit(progress_callback, {"phase": "searching", **value})
@@ -290,7 +307,11 @@ def run_match_file(
         )
         existing = []
         for preset_id, score in retrieval:
-            note, wav_path = _nearest_render(preset_id, result.midi_note)
+            note, wav_path = _nearest_render(
+                preset_id,
+                result.midi_note,
+                matcher.audio_root,
+            )
             existing.append(
                 {
                     "preset_id": preset_id,
@@ -298,7 +319,7 @@ def run_match_file(
                     "similarity": score,
                     "similarity_percent": 100.0 * score,
                     "audition_midi_note": note,
-                    "audition_path": str(wav_path),
+                    "audition_path": str(wav_path) if wav_path else None,
                 }
             )
         settings, base_vector = _candidate_payload(matcher, result.best)

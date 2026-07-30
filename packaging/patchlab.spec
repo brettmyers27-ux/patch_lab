@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -46,10 +47,56 @@ build_info_path.write_text(
     encoding="utf-8",
 )
 
+# Build the smallest database that analysis-by-synthesis actually consumes.
+# Shipping the developer library.db would also carry renders, match history,
+# full Serum 2 settings, and other private runtime state. This catalog retains
+# only stable preset identity plus Serum 1's automation targets; Serum 2 uses
+# its separately packaged target matrix and render-state templates.
+source_library = ROOT / "data" / "library.db"
+if not source_library.is_file():
+    raise RuntimeError(
+        "A functional PatchLab build requires data/library.db so the sanitized "
+        "synthesis catalog can be generated."
+    )
+synthesis_catalog = ROOT / "build" / "patchlab-synthesis-catalog.sqlite"
+synthesis_catalog.unlink(missing_ok=True)
+with sqlite3.connect(synthesis_catalog) as catalog:
+    catalog.execute("ATTACH DATABASE ? AS source", (str(source_library),))
+    catalog.executescript(
+        """
+        CREATE TABLE presets (
+          id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL,
+          name TEXT NOT NULL,
+          synth TEXT NOT NULL,
+          content_hash TEXT NOT NULL
+        );
+        INSERT INTO presets
+          SELECT id,path,name,synth,content_hash FROM source.presets;
+        CREATE TABLE params (
+          preset_id INTEGER,
+          param_index INTEGER,
+          param_name TEXT,
+          norm_value REAL,
+          display_value TEXT,
+          PRIMARY KEY (preset_id,param_index)
+        );
+        INSERT INTO params
+          SELECT pa.preset_id,pa.param_index,pa.param_name,
+                 pa.norm_value,pa.display_value
+          FROM source.params pa
+          JOIN source.presets p ON p.id=pa.preset_id
+          WHERE p.synth='serum1';
+        """
+    )
+    catalog.commit()
+    catalog.execute("VACUUM")
+
 datas = [
     (str(ROOT / "app" / "theme.qss"), "app"),
     (str(ROOT / "app" / "icons"), "app/icons"),
     (str(build_info_path), "."),
+    (str(synthesis_catalog), "data/models"),
 ]
 for source, destination in (
     (ROOT / "data" / "dist" / "factory_bundle.sqlite", "data/dist"),
@@ -114,9 +161,12 @@ for package in ("dawdreamer", "laion_clap"):
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
-# Numba's cached librosa kernels require a real source-file locator. Keeping
-# the .py files beside the frozen modules avoids "no locator available" at
-# first match while preserving JIT performance.
+# Librosa contains Numba kernels declared with cache=True. Merely copying its
+# .py files as data is insufficient: if the module is imported from the PYZ,
+# Numba still sees PyInstaller's frozen importer and raises "no locator
+# available" before the first synthesis evaluation. Collect librosa as real
+# source modules so SourceFileLoader supplies the locator while retaining JIT
+# performance. The data-file collection also carries librosa's non-code assets.
 datas += collect_data_files("librosa", include_py_files=True)
 hiddenimports += [
     entry.module
@@ -135,6 +185,7 @@ analysis = Analysis(
     runtime_hooks=[str(ROOT / "packaging" / "runtime_distribution.py")],
     excludes=[],
     noarchive=False,
+    module_collection_mode={"librosa": "py"},
 )
 pyz = PYZ(analysis.pure)
 executable = EXE(
