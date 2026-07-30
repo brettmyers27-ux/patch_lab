@@ -57,6 +57,20 @@ for source, destination in (
         ROOT / "data" / "models" / "music_audioset_epoch_15_esc_90.14.pt",
         "data/models",
     ),
+    # Analysis-by-synthesis inputs. Without these the packaged app can only
+    # retrieve the closest existing preset — it cannot generate a new patch —
+    # so they are part of a functional build, not an optional extra.
+    (ROOT / "data" / "features" / "preset_index.npy", "data/features"),
+    (ROOT / "data" / "features" / "note_index.npy", "data/features"),
+    (ROOT / "data" / "features" / "similarity_manifest.npz", "data/features"),
+    (ROOT / "data" / "features" / "serum2_targets.npz", "data/features"),
+    (ROOT / "data" / "models" / "serum2_target_schema.json", "data/models"),
+    (ROOT / "data" / "models" / "param_model.pt", "data/models"),
+    (ROOT / "data" / "models" / "delta_param_model.pt", "data/models"),
+    (
+        ROOT / "data" / "models" / "serum2_render_states",
+        "data/models/serum2_render_states",
+    ),
 ):
     if source.exists():
         datas.append((str(source), destination))

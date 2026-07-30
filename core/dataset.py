@@ -105,12 +105,27 @@ def _serum1_targets(db_path: Path) -> TargetStore:
     )
 
 
-def _serum2_targets() -> TargetStore:
-    stored = np.load(FEATURE_DIR / "serum2_targets.npz")
+def _serum2_targets(
+    targets_path: Path | None = None,
+    schema_path: Path | None = None,
+) -> TargetStore:
+    """Load the Serum 2 parameter targets.
+
+    Both paths are injectable so a distributed install can point at delivered
+    artifacts instead of the source checkout; omitting them keeps the existing
+    repository-relative behavior for training and offline scripts.
+    """
+
+    stored = np.load(targets_path or FEATURE_DIR / "serum2_targets.npz")
     vectors = stored["vectors"].astype(np.float32, copy=False)
     masks = stored["masks"].astype(np.bool_, copy=False)
     preset_ids = stored["preset_ids"].astype(np.int64, copy=False)
-    schema = json.loads((PROJECT_ROOT / "data" / "models" / "serum2_target_schema.json").read_text())
+    schema = json.loads(
+        (
+            schema_path
+            or PROJECT_ROOT / "data" / "models" / "serum2_target_schema.json"
+        ).read_text(encoding="utf-8")
+    )
     return TargetStore(
         vectors=vectors,
         masks=masks,

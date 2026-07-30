@@ -17,20 +17,33 @@ import librosa
 import numpy as np
 import soundfile as sf
 
-from core.dataset import FEATURE_DIR, _serum1_targets, _serum2_targets
-from core.db import DEFAULT_DB_PATH
+from core.dataset import _serum1_targets, _serum2_targets
 from core.delta_model import load_delta_model, predict_delta
 from core.features import CLAP_SAMPLE_RATE, ClapEmbedder, handcrafted_features
+from core.local_library import default_local_paths
 from core.match import cosine_topk, l2_normalize
 from core.perturbation import perturb_serum1, perturb_serum2
 from core.platform_env import ENV
+from core.synthesis_assets import resolve_synthesis_assets
 from core.train import load_parameter_model, predict_parameters
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-STATE_ROOT = PROJECT_ROOT / "data" / "models" / "serum2_render_states"
 SAMPLE_RATE = 44_100
 _RENDER: dict[str, Any] = {}
+
+
+def _audio_root() -> Path:
+    """Return the render cache root for the current install shape.
+
+    A distributed install renders into the per-user app data directory; the
+    source checkout keeps renders under data/audio. Resolving this lazily (and
+    not at import time) keeps a frozen build from binding the checkout layout.
+    """
+
+    if os.environ.get("PATCHLAB_DISTRIBUTION_MODE", "0").strip() == "1":
+        return default_local_paths()["audio"]
+    return PROJECT_ROOT / "data" / "audio"
 
 
 @dataclass(slots=True)
@@ -246,25 +259,51 @@ def _init_render_worker(scratch_root: str) -> None:
             item for item in ENV.plugins_for(synth) if item.format == required and item.hostable
         )
         hosts[synth] = make_dawdreamer_processor(candidate)
+    assets = resolve_synthesis_assets()
     _RENDER.update(
         hosts=hosts,
-        s1=_serum1_targets(DEFAULT_DB_PATH),
-        s2=_serum2_targets(),
-        schema=json.loads(
-            (PROJECT_ROOT / "data" / "models" / "serum2_target_schema.json").read_text()
-        ),
+        s1=_serum1_targets(assets.library_db),
+        s2=_serum2_targets(assets.serum2_targets, assets.serum2_schema),
+        schema=json.loads(assets.serum2_schema.read_text(encoding="utf-8")),
+        assets=assets,
+        library_db=assets.library_db,
         state_path=Path(scratch_root) / f"worker-{os.getpid()}.vstpreset",
     )
+
+
+
+def _state_file(assets: Any, preset_id: int) -> Path:
+    """Locate a Serum 2 render-state template across every candidate root."""
+
+    found = assets.find_render_state(preset_id)
+    if found is None:
+        raise RuntimeError(
+            f"No Serum 2 render state for preset {preset_id} in "
+            + ", ".join(str(root) for root in assets.render_state_roots)
+        )
+    return found
+
+
+def _state_root_for(assets: Any, preset_id: int) -> Path:
+    return _state_file(assets, preset_id).parent
 
 
 def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.ndarray, float]:
     candidate, midi_note, duration = payload
     engine, processor = _RENDER["hosts"][candidate.synth]
+    assets = _RENDER["assets"]
     if candidate.synth == "serum1":
-        with sqlite3.connect(PROJECT_ROOT / "data" / "library.db") as connection:
-            path = connection.execute(
+        with sqlite3.connect(_RENDER["library_db"]) as connection:
+            row = connection.execute(
                 "SELECT path FROM presets WHERE id=?", (candidate.base_preset_id,)
-            ).fetchone()[0]
+            ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Serum 1 preset {candidate.base_preset_id} is not in "
+                f"{_RENDER['library_db']}; the synthesis database and the "
+                "retrieval index disagree about the library contents"
+            )
+        path = row[0]
         if processor.load_preset(str(path)) is False:
             raise RuntimeError(f"Serum 1 rejected preset {candidate.base_preset_id}")
         if not candidate.exact_base:
@@ -274,7 +313,7 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
     elif candidate.exact_base:
         from core.serum2_state_reconstruct import load_render_state
 
-        load_render_state(processor, candidate.base_preset_id, STATE_ROOT)
+        load_render_state(processor, candidate.base_preset_id, _state_root_for(assets, candidate.base_preset_id))
         coverage = 1.0
     else:
         from core.serum2_preset import Serum2Preset
@@ -285,11 +324,11 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
         from core.serum2_targets import decode_vector
 
         template = decode_host_template(
-            (STATE_ROOT / f"{candidate.base_preset_id}.vstpreset").read_bytes()
+            _state_file(assets, candidate.base_preset_id).read_bytes()
         )
         graph = decode_vector(candidate.vector, _RENDER["schema"], candidate.mask)
         decoded = Serum2Preset(
-            path=STATE_ROOT / f"{candidate.base_preset_id}.vstpreset",
+            path=_state_file(assets, candidate.base_preset_id),
             metadata={"presetName": "PatchLab candidate"},
             data=graph,
             metadata_length=0,
@@ -341,10 +380,14 @@ class AnalysisBySynthesisMatcher:
             initargs=(self._scratch.name,),
         )
         self.embedder = ClapEmbedder(ENV)
-        self.stores = {1: _serum1_targets(DEFAULT_DB_PATH), 2: _serum2_targets()}
-        self.preset_index = np.load(FEATURE_DIR / "preset_index.npy", mmap_mode="r")
-        self.note_index = np.load(FEATURE_DIR / "note_index.npy", mmap_mode="r")
-        manifest = np.load(FEATURE_DIR / "similarity_manifest.npz")
+        assets = resolve_synthesis_assets()
+        self.stores = {
+            1: _serum1_targets(assets.library_db),
+            2: _serum2_targets(assets.serum2_targets, assets.serum2_schema),
+        }
+        self.preset_index = np.load(assets.preset_index, mmap_mode="r")
+        self.note_index = np.load(assets.note_index, mmap_mode="r")
+        manifest = np.load(assets.feature_dir / "similarity_manifest.npz")
         self.preset_ids = manifest["preset_ids"].astype(np.int64)
         self.preset_synths = manifest["preset_synths"].astype(np.uint8)
         self.note_midi_notes = manifest["note_midi_notes"].astype(np.int16)
@@ -542,7 +585,7 @@ class AnalysisBySynthesisMatcher:
         live_payloads = []
         for position, candidate in enumerate(candidates):
             candidate_note = candidate.midi_note or midi_note
-            cached = PROJECT_ROOT / "data" / "audio" / str(candidate.base_preset_id) / f"{candidate_note}.wav"
+            cached = _audio_root() / str(candidate.base_preset_id) / f"{candidate_note}.wav"
             if candidate.exact_base and cached.is_file():
                 audio, rate = sf.read(cached, dtype="float32", always_2d=True)
                 mono = np.mean(audio, axis=1, dtype=np.float32)[: int(round(duration * rate))]

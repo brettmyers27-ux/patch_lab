@@ -97,6 +97,7 @@ from core.preview_cache import (
     unmodified_recommendation_basis_index,
 )
 from core.privacy import PrivacyStore, distribution_mode
+from core.synthesis_assets import synthesis_readiness
 from core.workflow_state import (
     WorkflowActivity,
     WorkflowCardState,
@@ -1049,8 +1050,19 @@ class LegacyMainWindow(QMainWindow):
         self.recommendation_placeholder.setVisible(True)
         target_synth = str(self.match_synth.currentData())
         budget = str(self.match_budget.currentData())
+        # Analysis-by-synthesis produces a genuinely new patch; the factory
+        # fingerprint path can only hand back the closest existing preset
+        # unmodified. Prefer synthesis whenever its assets are present, and fall
+        # back only when they are not — reporting why, so an install that
+        # silently degrades to retrieval is visible instead of looking like a
+        # quality problem.
+        readiness = synthesis_readiness(target_synth)
+        factory_only = self.distribution_mode and not readiness.available
+        if factory_only:
+            self.append_log(f"Synthesis unavailable — {readiness.reason}")
         self.append_log(
-            f"Matching {self._match_audio_path.name} for {target_synth} ({budget})"
+            f"Matching {self._match_audio_path.name} for {target_synth} ({budget}) "
+            f"via {'factory fingerprints' if factory_only else 'analysis-by-synthesis'}"
         )
         self.match_runner.start(
             self._match_audio_path,
@@ -1058,11 +1070,11 @@ class LegacyMainWindow(QMainWindow):
             budget=budget,
             offset=float(self.match_offset.value()),
             session_root=Path(self._match_session.name),
-            factory_only=self.distribution_mode,
-            factory_mapping=self.factory_mapping_path if self.distribution_mode else None,
+            factory_only=factory_only,
+            factory_mapping=self.factory_mapping_path if factory_only else None,
             local_db=(
                 self.local_paths["db"]
-                if self.distribution_mode
+                if factory_only
                 and bool(self.privacy_choice.use_and_share_own_presets)
                 else None
             ),
@@ -2987,17 +2999,23 @@ class MainWindow(LegacyMainWindow):
             f"Batch matching {path.name} ({current_number}/{state['total']})"
         )
         self.append_log(f"Batch matching: {path.name}")
+        # Batch runs take the same synthesis-or-fallback decision as a single
+        # match so a folder is never processed at lower quality than the
+        # one-off path would give it.
+        batch_factory_only = self.distribution_mode and not synthesis_readiness(
+            str(state["target_synth"])
+        ).available
         self.match_runner.start(
             path,
             target_synth=state["target_synth"],
             budget=state["budget"],
             offset=0.0,
             session_root=Path(self._match_session.name),
-            factory_only=self.distribution_mode,
-            factory_mapping=self.factory_mapping_path if self.distribution_mode else None,
+            factory_only=batch_factory_only,
+            factory_mapping=self.factory_mapping_path if batch_factory_only else None,
             local_db=(
                 self.local_paths["db"]
-                if self.distribution_mode
+                if batch_factory_only
                 and bool(self.privacy_choice.use_and_share_own_presets)
                 else None
             ),
