@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.local_library import default_local_paths
+from core.platform_env import ENV
 from core.model_assets import runtime_root
 
 
@@ -52,6 +53,11 @@ class SynthesisAssets:
     # must be searchable or one of the two preset populations becomes
     # unrenderable, so keep every candidate root rather than a single path.
     render_state_roots: tuple[Path, ...] = ()
+    # The synthesis catalog stores the absolute preset path from the machine
+    # that built it. Those paths do not exist on anyone else's computer, so a
+    # Serum 1 candidate must be resolvable by content hash against this
+    # machine's own factory install instead.
+    factory_mapping: Path | None = None
 
     def find_render_state(self, preset_id: int) -> Path | None:
         """Return the .vstpreset template for `preset_id`, or None if absent."""
@@ -145,6 +151,12 @@ def resolve_synthesis_assets() -> SynthesisAssets:
         render_states=render_states,
         library_db=library_db,
         render_state_roots=roots,
+        factory_mapping=Path(
+            os.environ.get(
+                "PATCHLAB_FACTORY_MAPPING",
+                str(ENV.app_data_dir / "factory-paths.json"),
+            )
+        ).expanduser().resolve(),
     )
 
 

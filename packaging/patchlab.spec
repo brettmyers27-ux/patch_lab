@@ -48,49 +48,16 @@ build_info_path.write_text(
 )
 
 # Build the smallest database that analysis-by-synthesis actually consumes.
-# Shipping the developer library.db would also carry renders, match history,
-# full Serum 2 settings, and other private runtime state. This catalog retains
-# only stable preset identity plus Serum 1's automation targets; Serum 2 uses
-# its separately packaged target matrix and render-state templates.
-source_library = ROOT / "data" / "library.db"
-if not source_library.is_file():
-    raise RuntimeError(
-        "A functional PatchLab build requires data/library.db so the sanitized "
-        "synthesis catalog can be generated."
-    )
-synthesis_catalog = ROOT / "build" / "patchlab-synthesis-catalog.sqlite"
-synthesis_catalog.unlink(missing_ok=True)
-with sqlite3.connect(synthesis_catalog) as catalog:
-    catalog.execute("ATTACH DATABASE ? AS source", (str(source_library),))
-    catalog.executescript(
-        """
-        CREATE TABLE presets (
-          id INTEGER PRIMARY KEY,
-          path TEXT NOT NULL,
-          name TEXT NOT NULL,
-          synth TEXT NOT NULL,
-          content_hash TEXT NOT NULL
-        );
-        INSERT INTO presets
-          SELECT id,path,name,synth,content_hash FROM source.presets;
-        CREATE TABLE params (
-          preset_id INTEGER,
-          param_index INTEGER,
-          param_name TEXT,
-          norm_value REAL,
-          display_value TEXT,
-          PRIMARY KEY (preset_id,param_index)
-        );
-        INSERT INTO params
-          SELECT pa.preset_id,pa.param_index,pa.param_name,
-                 pa.norm_value,pa.display_value
-          FROM source.params pa
-          JOIN source.presets p ON p.id=pa.preset_id
-          WHERE p.synth='serum1';
-        """
-    )
-    catalog.commit()
-    catalog.execute("VACUUM")
+# Shared with the gated-artifact packaging via scripts/build_synthesis_catalog.py
+# so a frozen build and a git-clone install can never disagree about what the
+# catalog contains.
+sys.path.insert(0, str(ROOT / "scripts"))
+from build_synthesis_catalog import build_synthesis_catalog  # noqa: E402
+
+synthesis_catalog = build_synthesis_catalog(
+    ROOT / "data" / "library.db",
+    ROOT / "build" / "patchlab-synthesis-catalog.sqlite",
+)
 
 datas = [
     (str(ROOT / "app" / "theme.qss"), "app"),

@@ -286,6 +286,48 @@ def _init_render_worker(
 
 
 
+def _factory_paths_by_hash() -> dict[str, str]:
+    """Load this machine's content-hash -> factory preset path mapping once."""
+
+    cached = _RENDER.get("factory_paths")
+    if cached is not None:
+        return cached
+    mapping: dict[str, str] = {}
+    location = _RENDER["assets"].factory_mapping
+    if location is not None and Path(location).is_file():
+        try:
+            raw = json.loads(Path(location).read_text(encoding="utf-8"))
+            mapping = {
+                str(key): str(value)
+                for key, value in raw.get("local_paths_by_hash", {}).items()
+            }
+        except (OSError, ValueError):
+            mapping = {}
+    _RENDER["factory_paths"] = mapping
+    return mapping
+
+
+def _resolve_serum1_preset_file(stored_path: str, content_hash: str) -> str:
+    """Return a Serum 1 preset file that exists on *this* machine.
+
+    The synthesis catalog records the absolute path from the machine that built
+    it, so on any other computer those paths are dangling. Falling back to the
+    locally-scanned factory mapping keyed by content hash lets a shared catalog
+    drive synthesis on a machine whose Serum lives somewhere else entirely.
+    """
+
+    if stored_path and Path(stored_path).is_file():
+        return stored_path
+    local = _factory_paths_by_hash().get(content_hash, "")
+    if local and Path(local).is_file():
+        return local
+    raise RuntimeError(
+        f"Serum 1 preset {content_hash or 'unknown'} is not present on this "
+        "machine; the catalog path does not exist here and no locally scanned "
+        "factory preset matches its content hash"
+    )
+
+
 def _state_file(assets: Any, preset_id: int) -> Path:
     """Locate a Serum 2 render-state template across every candidate root."""
 
@@ -309,7 +351,8 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
     if candidate.synth == "serum1":
         with sqlite3.connect(_RENDER["library_db"]) as connection:
             row = connection.execute(
-                "SELECT path FROM presets WHERE id=?", (candidate.base_preset_id,)
+                "SELECT path,content_hash FROM presets WHERE id=?",
+                (candidate.base_preset_id,),
             ).fetchone()
         if row is None:
             raise RuntimeError(
@@ -317,7 +360,7 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
                 f"{_RENDER['library_db']}; the synthesis database and the "
                 "retrieval index disagree about the library contents"
             )
-        path = row[0]
+        path = _resolve_serum1_preset_file(str(row[0]), str(row[1] or ""))
         if processor.load_preset(str(path)) is False:
             raise RuntimeError(f"Serum 1 rejected preset {candidate.base_preset_id}")
         if not candidate.exact_base:
