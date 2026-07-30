@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -63,26 +64,33 @@ hf_cache = ROOT / "data" / "models" / "huggingface"
 if hf_cache.is_dir():
     # Bundle only the pinned runtime snapshots—not download locks or local
     # Hugging Face/Xet logs, which can contain machine-specific diagnostics.
+    # Materialize snapshot symlinks as ordinary files first: PyInstaller's
+    # macOS BUNDLE relocation cannot safely nest Hugging Face's relative cache
+    # symlinks beneath its own Frameworks -> Resources data symlink.
     required_model_caches = __import__(
         "core.model_assets",
         fromlist=["TOKENIZER_REQUIREMENTS"],
     ).TOKENIZER_REQUIREMENTS
+    staged_hf_cache = ROOT / "build" / "patchlab-hf-runtime"
+    if staged_hf_cache.exists():
+        shutil.rmtree(staged_hf_cache)
     for model_cache_name in required_model_caches:
         model_cache = hf_cache / "transformers" / model_cache_name
         if model_cache.is_dir():
-            datas.append(
-                (
-                    str(model_cache),
-                    f"data/models/huggingface/transformers/{model_cache_name}",
-                )
+            shutil.copytree(
+                model_cache,
+                staged_hf_cache / "transformers" / model_cache_name,
+                symlinks=False,
+                ignore=shutil.ignore_patterns(".no_exist"),
             )
     transformers_version = hf_cache / "transformers" / "version.txt"
     if transformers_version.is_file():
+        staged_version = staged_hf_cache / "transformers" / "version.txt"
+        staged_version.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(transformers_version, staged_version)
+    if staged_hf_cache.is_dir():
         datas.append(
-            (
-                str(transformers_version),
-                "data/models/huggingface/transformers",
-            )
+            (str(staged_hf_cache), "data/models/huggingface")
         )
 
 binaries = []
