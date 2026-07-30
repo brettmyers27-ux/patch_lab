@@ -1540,11 +1540,58 @@ class LegacyMainWindow(QMainWindow):
         self.statusBar().showMessage(error)
 
     def _default_export_folder(self, synth: str) -> Path:
+        """Return the Serum preset root generated presets belong under.
+
+        A user-writable root is strongly preferred over a shared/system one.
+        On macOS the machine-wide `/Library/Audio/Presets/...` tree is usually
+        the only root that already exists, but it needs administrator rights to
+        write to, so defaulting an export there sends people somewhere outside
+        their own folder that then fails to save.
+        """
+
         token = "serum 2" if synth == "serum2" else "serum presets"
+        home = Path.home().resolve()
+
+        def under_home(path: Path) -> bool:
+            try:
+                path.resolve().relative_to(home)
+            except (OSError, ValueError):
+                return False
+            return True
+
         matching = [
+            path for path in ENV.preset_roots if token in str(path).casefold()
+        ]
+        for candidate in matching:
+            if under_home(candidate) and candidate.is_dir():
+                return candidate
+        # Nothing under the user's folder exists yet. Prefer the first
+        # user-owned candidate the platform defines — Serum scans these by
+        # default — rather than falling back to a root we cannot write to.
+        for candidate in matching:
+            if under_home(candidate):
+                return candidate
+        existing = [
             path for path in ENV.existing_preset_roots if token in str(path).casefold()
         ]
-        return matching[0] if matching else Path.home()
+        return existing[0] if existing else home
+
+    def _patchlab_export_folder(self, synth: str) -> Path:
+        """Return (and create) the PatchLab subfolder for generated presets.
+
+        Every generated preset defaults here so a user's own Serum library is
+        never mixed with PatchLab output. The save dialog still opens on this
+        folder rather than writing blindly, so a name can be changed first.
+        """
+
+        folder = self._default_export_folder(synth) / "PatchLab"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # A read-only or missing parent must not block the export dialog;
+            # fall back to the root so the user can still choose a location.
+            return self._default_export_folder(synth)
+        return folder
 
     def save_match_preset(self) -> None:
         if not self._match_result or self._match_result_path is None:
@@ -1555,7 +1602,7 @@ class LegacyMainWindow(QMainWindow):
         synth = str(recommendation["synth"])
         extension = ".fxp" if synth == "serum1" else ".SerumPreset"
         name = generated_preset_name(synth)
-        suggested = self._default_export_folder(synth) / f"{name}{extension}"
+        suggested = self._patchlab_export_folder(synth) / f"{name}{extension}"
         selected, _filter = QFileDialog.getSaveFileName(
             self,
             "Save generated Serum preset",
@@ -1589,7 +1636,7 @@ class LegacyMainWindow(QMainWindow):
         synth = str(recommendation["synth"])
         extension = ".fxp" if synth == "serum1" else ".SerumPreset"
         name = generated_preset_name(synth)
-        folder = self._default_export_folder(synth)
+        folder = self._patchlab_export_folder(synth)
         output = folder / f"{name}{extension}"
         counter = 2
         while output.exists():
@@ -2730,7 +2777,7 @@ class MainWindow(LegacyMainWindow):
         _source, result_path = resolved_record_paths(record, self._match_library_root())
         extension = ".fxp" if record.recommendation_synth == "serum1" else ".SerumPreset"
         suggested = (
-            self._default_export_folder(record.recommendation_synth)
+            self._patchlab_export_folder(record.recommendation_synth)
             / f"{generated_preset_name(record.recommendation_synth)}{extension}"
         )
         selected, _ = QFileDialog.getSaveFileName(
@@ -2926,11 +2973,7 @@ class MainWindow(LegacyMainWindow):
             return
         target_synth = str(self.match_synth.currentData())
         budget = str(self.match_budget.currentData())
-        export_folder = (
-            self._default_export_folder(target_synth)
-            / "PatchLab"
-            / folder_name
-        )
+        export_folder = self._patchlab_export_folder(target_synth) / folder_name
         if export_folder.exists():
             choice = QMessageBox.question(
                 self,

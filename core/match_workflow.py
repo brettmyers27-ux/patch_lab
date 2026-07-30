@@ -312,14 +312,29 @@ def run_match_file(
                 result.midi_note,
                 matcher.audio_root,
             )
+            # Pre-rendered auditions only exist where the full render library
+            # was built locally; an install that never rendered has none. Carry
+            # the preset file forward so the row can still be rendered on
+            # demand, exactly as the factory-fingerprint path does. Without
+            # this every closest match reports "No local audio or factory
+            # preset is available" and its octave buttons stay dead.
+            row = detail[preset_id]
+            source_path = str(row.get("source_path") or "")
+            preview_source = (
+                source_path
+                if source_path and not wav_path and Path(source_path).is_file()
+                else None
+            )
             existing.append(
                 {
                     "preset_id": preset_id,
-                    **detail[preset_id],
+                    **row,
                     "similarity": score,
                     "similarity_percent": 100.0 * score,
                     "audition_midi_note": note,
                     "audition_path": str(wav_path) if wav_path else None,
+                    "preview_source_path": preview_source,
+                    "local_source_available": bool(wav_path or preview_source),
                 }
             )
         settings, base_vector = _candidate_payload(matcher, result.best)
