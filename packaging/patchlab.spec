@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
@@ -10,9 +14,41 @@ sys.path.insert(0, str(ROOT))
 VERSION = {}
 exec((ROOT / "app" / "__version__.py").read_text(), VERSION)
 
+SOURCE_COMMIT = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"],
+    cwd=ROOT,
+    text=True,
+).strip()
+TRACKED_CHANGES = subprocess.check_output(
+    ["git", "status", "--porcelain", "--untracked-files=no"],
+    cwd=ROOT,
+    text=True,
+).strip()
+if TRACKED_CHANGES and os.environ.get("PATCHLAB_ALLOW_DIRTY_BUILD") != "1":
+    raise RuntimeError(
+        "Refusing to build PatchLab.app from uncommitted tracked source. "
+        "Commit the changes first, or set PATCHLAB_ALLOW_DIRTY_BUILD=1 for "
+        "a clearly marked non-release diagnostic build."
+    )
+build_info_path = ROOT / "build" / "patchlab-build-info.json"
+build_info_path.parent.mkdir(parents=True, exist_ok=True)
+build_info_path.write_text(
+    json.dumps(
+        {
+            "source_commit": SOURCE_COMMIT,
+            "built_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source_dirty": bool(TRACKED_CHANGES),
+        },
+        indent=2,
+        sort_keys=True,
+    ),
+    encoding="utf-8",
+)
+
 datas = [
     (str(ROOT / "app" / "theme.qss"), "app"),
     (str(ROOT / "app" / "icons"), "app/icons"),
+    (str(build_info_path), "."),
 ]
 for source, destination in (
     (ROOT / "data" / "dist" / "factory_bundle.sqlite", "data/dist"),
@@ -23,6 +59,31 @@ for source, destination in (
 ):
     if source.exists():
         datas.append((str(source), destination))
+hf_cache = ROOT / "data" / "models" / "huggingface"
+if hf_cache.is_dir():
+    # Bundle only the pinned runtime snapshots—not download locks or local
+    # Hugging Face/Xet logs, which can contain machine-specific diagnostics.
+    required_model_caches = __import__(
+        "core.model_assets",
+        fromlist=["TOKENIZER_REQUIREMENTS"],
+    ).TOKENIZER_REQUIREMENTS
+    for model_cache_name in required_model_caches:
+        model_cache = hf_cache / "transformers" / model_cache_name
+        if model_cache.is_dir():
+            datas.append(
+                (
+                    str(model_cache),
+                    f"data/models/huggingface/transformers/{model_cache_name}",
+                )
+            )
+    transformers_version = hf_cache / "transformers" / "version.txt"
+    if transformers_version.is_file():
+        datas.append(
+            (
+                str(transformers_version),
+                "data/models/huggingface/transformers",
+            )
+        )
 
 binaries = []
 hiddenimports = []
@@ -87,5 +148,6 @@ app = BUNDLE(
         "CFBundleShortVersionString": VERSION["__version__"],
         "CFBundleVersion": VERSION["__version__"],
         "NSHighResolutionCapable": True,
+        "PatchLabSourceCommit": SOURCE_COMMIT,
     },
 )

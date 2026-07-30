@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -12,16 +11,19 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from core.model_assets import (
+    CLAP_CHECKPOINT_NAME,
+    configure_model_environment,
+    resolve_model_assets,
+    validate_model_assets,
+)
 from core.platform_env import PlatformEnv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = PROJECT_ROOT / "data" / "models"
-HF_DIR = Path(
-    os.environ.get("PATCHLAB_MODEL_CACHE", str(MODEL_DIR / "huggingface"))
-).expanduser()
-CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
-CLAP_CHECKPOINT = MODEL_DIR / CLAP_CHECKPOINT_NAME
+_MODEL_ASSETS = resolve_model_assets()
+MODEL_DIR = _MODEL_ASSETS.model_dir
+HF_DIR = _MODEL_ASSETS.cache_dir
+CLAP_CHECKPOINT = _MODEL_ASSETS.checkpoint
 CLAP_SAMPLE_RATE = 48_000
 CLAP_DIMENSIONS = 512
 HANDCRAFTED_NAMES = (
@@ -38,14 +40,7 @@ HANDCRAFTED_NAMES = (
 
 
 def configure_model_cache() -> None:
-    HF_DIR.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(HF_DIR))
-    os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_DIR / "transformers"))
-    os.environ.setdefault("TORCH_HOME", str(MODEL_DIR / "torch"))
-    # All required assets are populated by scripts/cache_clap.py. Avoid remote
-    # HEAD probes (and their retry backoff) during the hours-long feature pass.
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    configure_model_environment()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +116,13 @@ def handcrafted_features(audio: np.ndarray, sample_rate: int = CLAP_SAMPLE_RATE)
 class ClapEmbedder:
     """One frozen LAION-CLAP HTSAT-base model reused across all batches."""
 
-    def __init__(self, platform_env: PlatformEnv, checkpoint: Path = CLAP_CHECKPOINT) -> None:
-        configure_model_cache()
-        if not checkpoint.is_file():
-            raise FileNotFoundError(
-                f"Missing {checkpoint}; run scripts/cache_clap.py before analysis"
-            )
+    def __init__(
+        self,
+        platform_env: PlatformEnv,
+        checkpoint: Path | None = None,
+    ) -> None:
+        assets = validate_model_assets(checkpoint=checkpoint)
+        checkpoint = assets.checkpoint
         import laion_clap
 
         if bool(getattr(__import__("sys"), "frozen", False)):

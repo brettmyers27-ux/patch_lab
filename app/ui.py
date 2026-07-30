@@ -72,6 +72,7 @@ from app.workers import (
 )
 from core.audio_input import SUPPORTED_AUDIO_SUFFIXES
 from core.branding import display_match_name, generated_preset_name
+from core.build_info import current_build_info
 from core.db import DEFAULT_DB_PATH, Database
 from core.factory_verify import FactoryVerification
 from core.local_library import default_local_paths
@@ -257,6 +258,7 @@ class LegacyMainWindow(QMainWindow):
         self.preview_runner.completed.connect(self._preview_completed)
         self.preview_runner.failed.connect(self._preview_failed)
         self._render_paused = False
+        self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
         self._match_result: dict | None = None
@@ -606,6 +608,22 @@ class LegacyMainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "Select Serum preset folder", initial)
         if not selected:
             return
+        if self.distribution_mode:
+            answer = QMessageBox.question(
+                self,
+                "Start local preset-library processing?",
+                "PatchLab will scan and locally render every eligible preset in this "
+                "folder. A large factory library can take 1–4 hours, use several "
+                "gigabytes of storage, and keep four processor workers busy.\n\n"
+                "You can continue matching while it runs, but matching may be "
+                "noticeably slower until library processing finishes.\n\n"
+                "Start the library job now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.append_log("Local preset-library processing was not started")
+                return
         self.scan_button.setEnabled(False)
         self.scan_progress.setValue(0)
         self.append_log(
@@ -810,9 +828,10 @@ class LegacyMainWindow(QMainWindow):
         self._match_result_path = None
         self.match_drop.setText(path.name)
         self.match_drop.set_playable(True)
-        self.match_start_button.setEnabled(True)
+        self.match_start_button.setEnabled(self._model_asset_error is None)
         self.match_stats.setText(
-            "Ready to match. Existing-preset results always search both synths."
+            self._model_asset_error
+            or "Ready to match. Existing-preset results always search both synths."
         )
         # match_results now hosts the drop zone itself, so it stays visible;
         # only the per-result detail section is reset here.
@@ -821,6 +840,9 @@ class LegacyMainWindow(QMainWindow):
         self.save_preset_button.setEnabled(False)
 
     def start_match(self) -> None:
+        if self._model_asset_error:
+            self.report_model_asset_error(self._model_asset_error, show_dialog=True)
+            return
         if self._match_audio_path is None:
             return
         self.match_start_button.setEnabled(False)
@@ -855,6 +877,7 @@ class LegacyMainWindow(QMainWindow):
         )
 
     def _match_progress_changed(self, detail: dict) -> None:
+        self.match_stats.setStyleSheet("")
         phase = str(detail.get("phase", "working"))
         evaluations = int(detail.get("evaluations", 0))
         budget = int(detail.get("budget", 0))
@@ -1006,15 +1029,42 @@ class LegacyMainWindow(QMainWindow):
     def _match_failed(self, error: str) -> None:
         self.match_progress.setRange(0, 100)
         self.match_progress.setValue(0)
-        self.match_start_button.setEnabled(self._match_audio_path is not None)
-        self.match_button.setEnabled(True)
+        self.match_start_button.setEnabled(
+            self._match_audio_path is not None and self._model_asset_error is None
+        )
+        self.match_button.setEnabled(self._model_asset_error is None)
         self.match_cancel_button.setEnabled(False)
         self.match_synth.setEnabled(True)
         self.match_budget.setEnabled(True)
         self.match_offset.setEnabled(True)
         self.match_stats.setText(error)
+        self.match_stats.setStyleSheet("color: #ff5f67; font-weight: 700;")
         self.append_log(f"Match failed: {error}")
         self.statusBar().showMessage(error)
+        if hasattr(self, "match_card_status"):
+            self.match_card_status.setText("Match failed — see the message below")
+            self.match_card_status.setStyleSheet("color: #ff5f67;")
+
+    def report_model_asset_error(
+        self,
+        error: str,
+        *,
+        show_dialog: bool = False,
+    ) -> None:
+        """Keep model failures visible while unrelated jobs report progress."""
+
+        self._model_asset_error = error
+        self.match_start_button.setEnabled(False)
+        self.match_button.setEnabled(False)
+        self.match_stats.setText(error)
+        self.match_stats.setStyleSheet("color: #ff5f67; font-weight: 700;")
+        if hasattr(self, "match_card_status"):
+            self.match_card_status.setText("Model files need attention")
+            self.match_card_status.setStyleSheet("color: #ff5f67;")
+        self.append_log(f"Match unavailable: {error}")
+        self.statusBar().showMessage("Matching unavailable — model files need attention")
+        if show_dialog:
+            QMessageBox.critical(self, "PatchLab model files are unavailable", error)
 
     def play_winner(self) -> None:
         if not self._match_result:
@@ -1271,6 +1321,7 @@ class MainWindow(LegacyMainWindow):
         self.preview_runner.completed.connect(self._preview_completed)
         self.preview_runner.failed.connect(self._preview_failed)
         self._render_paused = False
+        self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
         self._match_result: dict | None = None
@@ -1346,7 +1397,8 @@ class MainWindow(LegacyMainWindow):
         self._rebuild_visual_tree()
         self.resize(1440, 810)
         self.append_log(
-            f"Interface ready · {ENV.branch} · compute {ENV.compute_backend}"
+            f"Interface ready · {ENV.branch} · compute {ENV.compute_backend} · "
+            f"build {current_build_info().short_commit}"
         )
         self.statusBar().showMessage(
             f"Ready — {ENV.branch}, compute: {ENV.compute_backend}"
@@ -2773,12 +2825,14 @@ class MainWindow(LegacyMainWindow):
         )
 
     def open_help(self) -> None:
+        build = current_build_info()
         QMessageBox.about(
             self,
             "About PatchLab",
             "PatchLab\n\n"
             "Select a library, render it, analyze it once, then match any sound. "
             "The complete workflow and troubleshooting guide are in README.md.\n\n"
+            f"Build: {build.short_commit} · {build.built_at_utc}\n\n"
             f"{Path(__file__).resolve().parents[1] / 'README.md'}",
         )
 

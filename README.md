@@ -534,10 +534,27 @@ pyinstaller --clean --noconfirm packaging/patchlab.spec
 ```
 
 This creates the one-folder bundle `dist/PatchLab.app`. The runtime hook
-enables distribution mode without requiring a terminal or environment toggle.
-The build embeds the factory fingerprint bundle and pinned CLAP checkpoint when
-those private/local artifacts are present at their documented `data/` paths,
-but neither artifact is committed to Git.
+enables distribution mode and points `PATCHLAB_MODEL_CACHE` at the bundle's
+populated offline cache without requiring a terminal or environment toggle.
+The same shared resolver consumes that variable from the macOS launcher,
+Windows launcher, frozen workers, and development mode. The build embeds the
+factory fingerprint bundle, pinned CLAP checkpoint, and required Hugging Face
+tokenizer/model cache when those private/local artifacts are present at their
+documented `data/` paths, but none is committed to Git.
+
+Release builds refuse uncommitted tracked source by default and embed the exact
+Git commit plus UTC build time. PatchLab reports that identity in its activity
+log and About dialog. A packaged build can report it without opening the GUI:
+
+```bash
+dist/PatchLab.app/Contents/MacOS/PatchLab --patchlab-build-info
+```
+
+PatchLab keeps Hugging Face offline mode enabled by default so long matches and
+batches cannot stall on network retries. It does not silently download missing
+multi-gigabyte/private assets at runtime. Startup validates the checkpoint and
+all required tokenizer/model snapshots and gives the exact resolved paths plus
+the installer command if anything is incomplete.
 
 The build remains useful for package engineering, but it is currently 3.3 GB
 and is not the tester delivery path. `install.sh` creates a few-kilobyte
@@ -578,6 +595,8 @@ assets or source-controlled files.
 | Serum not found on macOS | Install licensed Serum 1 VST2 and Serum 2 VST3 builds in a standard system or user `Audio/Plug-Ins` folder. |
 | Serum 1 VST2 not found on Windows | Install `Serum_x64.dll`, or correct `VSTPluginsPath` under `HKLM`/`HKCU\SOFTWARE\VST`. The installer prints every registry and common-folder location searched. |
 | PowerShell blocks `install.ps1` | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then rerun `.\install.ps1`. This does not change machine-wide policy. |
+| Matching says model files are unavailable | Rerun `install.sh` on macOS or `install.ps1` on Windows. PatchLab's message names the exact cache and checkpoint path that is missing. Development checkouts can run `python scripts/cache_clap.py`. |
+| Fix exists in source but not the app | Run the packaged `--patchlab-build-info` command above and compare `source_commit` with `git rev-parse HEAD`; rebuild if they differ. |
 | Gatekeeper warning | Right-click `PatchLab.app`, choose **Open**, and confirm once. The lightweight launcher is unsigned. |
 | Windows SmartScreen warning | Choose **More info**, confirm the script/source is PatchLab, then choose **Run anyway**. |
 
@@ -708,8 +727,10 @@ python app/main.py
 ```
 
 The folder scan runs in an isolated process, reports progress and activity in
-the window, and commits each preset independently. The persisted gate can be
-rechecked without loading Serum:
+the window, and commits each preset independently. Distribution builds warn
+before starting local render/index work that a large library can take 1–4
+hours, use several gigabytes, and slow matching while four workers are active.
+The persisted gate can be rechecked without loading Serum:
 
 ```bash
 python scripts/verify_scan.py

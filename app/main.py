@@ -18,11 +18,20 @@ if str(PROJECT_ROOT) not in sys.path:
 if __name__ == "__main__":
     mp.freeze_support()
     from app.worker_dispatch import frozen_worker_request, run_worker
+    from core.build_info import current_build_info
 
     _worker_request = frozen_worker_request(sys.argv[1:])
     if _worker_request is not None:
         raise SystemExit(run_worker(*_worker_request))
+    if len(sys.argv) == 2 and sys.argv[1] == "--patchlab-build-info":
+        print(
+            "PATCHLAB_BUILD_INFO="
+            + json.dumps(current_build_info().as_dict(), sort_keys=True),
+            flush=True,
+        )
+        raise SystemExit(0)
 
+from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.access_dialog import PasscodeDialog  # noqa: E402
@@ -32,6 +41,7 @@ from core.access_gate import AccessManager  # noqa: E402
 from core.audio_lifecycle import cleanup_stale_match_scratch  # noqa: E402
 from core.factory_verify import verify_local_factory_install  # noqa: E402
 from core.launch_gates import run_distribution_gates  # noqa: E402
+from core.model_assets import ModelAssetsError, validate_model_assets  # noqa: E402
 from core.platform_env import ENV  # noqa: E402,F401
 from core.privacy import distribution_mode  # noqa: E402
 
@@ -84,6 +94,7 @@ def main() -> int:
     if probe_path := os.environ.get("PATCHLAB_PACKAGED_HOST_PROBE"):
         return _run_packaged_host_probe(probe_path)
     factory_verification = None
+    model_asset_error: str | None = None
     if distribution_mode():
         access = AccessManager()
         allowed = run_distribution_gates(
@@ -103,7 +114,20 @@ def main() -> int:
         factory_verification = verify_local_factory_install(
             mapping_path=ENV.app_data_dir / "factory-paths.json"
         )
+        try:
+            validate_model_assets()
+        except ModelAssetsError as exc:
+            model_asset_error = str(exc)
     window = MainWindow(factory_verification=factory_verification)
+    if model_asset_error:
+        window.report_model_asset_error(model_asset_error)
+        QTimer.singleShot(
+            0,
+            lambda: window.report_model_asset_error(
+                model_asset_error or "",
+                show_dialog=True,
+            ),
+        )
     window.show()
     return application.exec()
 

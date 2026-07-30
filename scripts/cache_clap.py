@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import urllib.request
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = PROJECT_ROOT / "data" / "models"
-HF_DIR = MODEL_DIR / "huggingface"
-CHECKPOINT = MODEL_DIR / "music_audioset_epoch_15_esc_90.14.pt"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.model_assets import configure_model_environment  # noqa: E402
+
+
+MODEL_ASSETS = configure_model_environment()
+MODEL_DIR = MODEL_ASSETS.model_dir
+HF_DIR = MODEL_ASSETS.cache_dir
+CHECKPOINT = MODEL_ASSETS.checkpoint
 CHECKPOINT_URL = (
     "https://huggingface.co/lukewys/laion_clap/resolve/main/"
     "music_audioset_epoch_15_esc_90.14.pt"
@@ -20,10 +26,7 @@ CHECKPOINT_URL = (
 
 
 def _configure_cache() -> None:
-    HF_DIR.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"] = str(HF_DIR)
-    os.environ["TRANSFORMERS_CACHE"] = str(HF_DIR / "transformers")
-    os.environ["TORCH_HOME"] = str(MODEL_DIR / "torch")
+    configure_model_environment()
 
 
 def _download() -> None:
