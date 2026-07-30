@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import soundfile as sf
@@ -17,11 +19,44 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.platform_env import ENV
-from core.plugin_host import make_dawdreamer_processor
+from core.plugin_host import _vst3_class_id, build_vstpreset, make_dawdreamer_processor
 from core.preset_scan import sha1_file
 from core.render import SAMPLE_RATE, _render_audio, _trim_tail
 from core.serum2_preset import parse_serum2_preset
 from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstpreset
+
+
+def _decode_juce_memory_block(value: str) -> bytes:
+    size_text, encoded = value.split(".", 1)
+    output = bytearray(int(size_text))
+    alphabet = ".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+"
+    for position, character in enumerate(encoded):
+        bits = alphabet.index(character)
+        bit_offset = position * 6
+        for index in range(6):
+            absolute = bit_offset + index
+            if absolute >= len(output) * 8:
+                break
+            if bits & (1 << index):
+                output[absolute // 8] |= 1 << (absolute % 8)
+    return bytes(output)
+
+
+def _dawdreamer_template(candidate: object, processor: object) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="patchlab-serum2-template-") as temporary:
+        state_path = Path(temporary) / "state.bin"
+        processor.save_state(str(state_path))
+        payload = state_path.read_bytes()
+    if not payload.startswith(b"VC2!") or len(payload) < 8:
+        raise ValueError("DawDreamer did not return a JUCE VST3 state container")
+    xml_size = struct.unpack_from("<I", payload, 4)[0]
+    root = ET.fromstring(payload[8 : 8 + xml_size].rstrip(b"\0"))
+    component = _decode_juce_memory_block(root.findtext("IComponent") or "")
+    controller = _decode_juce_memory_block(root.findtext("IEditController") or "")
+    class_id = _vst3_class_id(candidate.path, "Serum 2")
+    if not class_id:
+        raise ValueError("Serum 2 component class ID was not found")
+    return build_vstpreset(component, class_id, controller_state=controller)
 
 
 def render_preview(
@@ -49,15 +84,13 @@ def render_preview(
         for item in ENV.plugins_for(synth)
         if item.format == required and item.hostable
     )
-    engine, processor = make_dawdreamer_processor(candidate)
     if synth == "serum1":
+        engine, processor = make_dawdreamer_processor(candidate)
         if processor.load_preset(str(source)) is False:
             raise RuntimeError("Serum 1 rejected the local factory preset")
     else:
-        from pedalboard import load_plugin
-
-        live = load_plugin(str(candidate.path), plugin_name="Serum 2")
-        template = decode_host_template(bytes(live.preset_data))
+        engine, processor = make_dawdreamer_processor(candidate)
+        template = decode_host_template(_dawdreamer_template(candidate, processor))
         state, _partition = reconstruct_vstpreset(
             parse_serum2_preset(source), template
         )

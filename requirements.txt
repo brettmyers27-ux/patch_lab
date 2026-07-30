@@ -1,4 +1,4 @@
-# Install torch and torchaudio first with the OS-specific command printed by
+# Install torch, torchaudio, and torchvision first with the OS-specific command printed by
 # scripts/verify_env.py. They are intentionally not repeated here because the
 # Windows RTX 5070 must use the cu128 index while macOS must use plain PyPI.
 dawdreamer==0.8.3
@@ -10,7 +10,6 @@ soundfile==0.13.1
 librosa==0.10.2.post1
 soxr==1.1.0
 laion-clap==1.1.7
-torchvision==0.28.0
 transformers==4.30.2
 sounddevice==0.5.2
 imageio-ffmpeg==0.6.0

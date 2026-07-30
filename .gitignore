@@ -24,6 +24,7 @@ htmlcov/
 !.env.example
 privacy-settings.json
 **/privacy-settings.json
+.patchlab-launcher.json
 
 # OS/editor/build artifacts.
 .DS_Store

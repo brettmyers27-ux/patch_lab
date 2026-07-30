@@ -52,6 +52,7 @@ class _ProcessRunnerBase(QObject):
         self.process.start(program, invocation)
 
     def _handle_worker_line(self, line: str) -> bool:
+        line = line.rstrip("\r")
         if not line.startswith(WORKER_READY_PREFIX):
             return False
         actual = line.removeprefix(WORKER_READY_PREFIX)
@@ -153,6 +154,7 @@ class ScanProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("WORKER_PROGRESS="):
@@ -235,6 +237,7 @@ class RenderProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("RENDER_PROGRESS="):
@@ -313,6 +316,7 @@ class AnalyzeProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("MILESTONE3_PHASE="):
@@ -409,6 +413,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
         )
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("MATCH_PROGRESS="):
@@ -471,6 +476,7 @@ class ExportProcessRunner(_ProcessRunnerBase):
         )
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("EXPORT_RESULT="):
@@ -556,6 +562,7 @@ class PreviewProcessRunner(_ProcessRunnerBase):
         )
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
             if self._handle_worker_line(line):
                 continue
             if line.startswith("PREVIEW_RESULT="):

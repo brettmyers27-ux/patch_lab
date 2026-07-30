@@ -227,7 +227,7 @@ if (-not (Test-Path -LiteralPath $VenvPythonw)) {
 }
 
 $requirementsHash = (Get-FileHash -Algorithm SHA256 (Join-Path $InstallRoot "requirements.txt")).Hash.ToLowerInvariant()
-$hashInput = [Text.Encoding]::UTF8.GetBytes("$requirementsHash|windows-$($torch.Flavor)-torch-v1")
+$hashInput = [Text.Encoding]::UTF8.GetBytes("$requirementsHash|windows-$($torch.Flavor)-torch-v2")
 $hasher = [Security.Cryptography.SHA256]::Create()
 $dependencyHash = ([BitConverter]::ToString($hasher.ComputeHash($hashInput))).Replace("-", "").ToLowerInvariant()
 $hasher.Dispose()
@@ -238,7 +238,7 @@ if (-not (Test-Path -LiteralPath $dependencyMarker)) {
     if ($LASTEXITCODE -ne 0) { Stop-Install "pip could not update." }
     $torchWheel = if ($torch.Flavor -eq "cuda") { "cu128" } else { "cpu" }
     $torchIndex = "https://download.pytorch.org/whl/$torchWheel"
-    & $VenvPython -m pip install torch torchaudio --index-url $torchIndex
+    & $VenvPython -m pip install torch torchaudio torchvision --index-url $torchIndex
     if ($LASTEXITCODE -ne 0) { Stop-Install "PyTorch installation failed for $($torch.Flavor): $torchIndex" }
     & $VenvPython -m pip install -r (Join-Path $InstallRoot "requirements.txt")
     if ($LASTEXITCODE -ne 0) { Stop-Install "PatchLab dependency installation failed." }
@@ -249,8 +249,12 @@ if (-not (Test-Path -LiteralPath $dependencyMarker)) {
 }
 
 $env:PATCHLAB_RELAY_URL = $RelayUrl
-& $VenvPython (Join-Path $InstallRoot "scripts\install_support.py") auth-status *> $null
-if ($LASTEXITCODE -eq 0) {
+$savedErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $VenvPython (Join-Path $InstallRoot "scripts\install_support.py") auth-status 1>$null 2>$null
+$authStatusExitCode = $LASTEXITCODE
+$ErrorActionPreference = $savedErrorActionPreference
+if ($authStatusExitCode -eq 0) {
     Write-Step "Existing group authentication found; the app will not prompt again."
 } else {
     if ($TestMode -and $env:PATCHLAB_PASSCODE_FILE) {

@@ -40,6 +40,11 @@ For a trusted member who wants the one-command form:
 irm https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.ps1 | iex
 ```
 
+Run that line in **Windows PowerShell** (the prompt begins with `PS`), not
+`cmd.exe`. It performs the complete install, keeps the passcode prompt
+interactive, selects matching CUDA/CPU builds of Torch, torchaudio, and
+torchvision, and creates console-free Desktop and Start Menu shortcuts.
+
 If local execution policy blocks the inspected script, change policy for this
 PowerShell process only, then rerun it:
 
@@ -93,7 +98,7 @@ cd patch_lab
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install torch torchaudio
+pip install torch torchaudio torchvision
 pip install -r requirements.txt
 python scripts/verify_env.py
 python app/main.py
@@ -103,13 +108,13 @@ On Windows, activate with `.venv\Scripts\Activate.ps1`. Use CUDA 12.8 wheels
 when an NVIDIA adapter is present:
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
 On a Windows PC without an NVIDIA adapter, use the CPU wheels instead:
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
 `install.ps1` makes this selection automatically and prints the detected

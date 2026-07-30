@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 WORKER_FLAG = "--patchlab-worker"
@@ -60,6 +61,17 @@ def is_frozen_build() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def worker_executable() -> str:
+    """Return a console-capable interpreter for worker handshakes on Windows."""
+
+    executable = Path(sys.executable)
+    if sys.platform == "win32" and executable.name.casefold() == "pythonw.exe":
+        console_executable = executable.with_name("python.exe")
+        if console_executable.is_file():
+            return str(console_executable)
+    return str(executable)
+
+
 def worker_invocation(
     worker_name: str,
     arguments: list[str] | tuple[str, ...] = (),
@@ -76,7 +88,7 @@ def worker_invocation(
     suffix = [worker_name, *map(str, arguments)]
     if is_frozen_build():
         return sys.executable, [WORKER_FLAG, *suffix]
-    return sys.executable, ["-m", "app.worker_dispatch", *suffix]
+    return worker_executable(), ["-m", "app.worker_dispatch", *suffix]
 
 
 def worker_invocation_for_script(arguments: list[str]) -> tuple[str, list[str]]:
