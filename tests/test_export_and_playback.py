@@ -43,12 +43,38 @@ class ClosestMatchPlayabilityTest(unittest.TestCase):
 
 
 class GeneratedPresetExportLocationTest(unittest.TestCase):
-    """Generated presets default into a PatchLab folder the user owns.
+    """Generated presets default into a PatchLab folder Serum itself scans.
 
-    Defaulting to the machine-wide preset tree points people outside their own
-    folder at a location that usually needs administrator rights, so the save
-    silently fails.
+    On macOS this is Serum's own well-known "User" preset folder under
+    /Library/Audio/Presets — Xfer ships that tree world-writable specifically
+    so no administrator rights are needed, and Serum's browser already scans
+    it, unlike an arbitrary path under the user's home directory. On Windows
+    it is a user-writable root beneath the user's own profile.
     """
+
+    def test_macos_export_targets_are_serums_own_user_preset_folders(self) -> None:
+        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '"/Library/Audio/Presets/Xfer Records/Serum Presets/Presets/User"',
+            source,
+        )
+        self.assertIn(
+            '"/Library/Audio/Presets/Xfer Records/Serum 2 Presets/Presets/User"',
+            source,
+        )
+
+    def test_macos_export_folders_are_created_at_startup(self) -> None:
+        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        # A brand-new machine has never exported anything, so the folders must
+        # exist before the first export, not just be created lazily on demand.
+        calls = re.findall(r"_ensure_patchlab_export_folders\(\)", source)
+        self.assertGreaterEqual(
+            len(calls),
+            2,
+            "startup must call _ensure_patchlab_export_folders() from the "
+            "actually-instantiated MainWindow.__init__, not only the unused "
+            "LegacyMainWindow.__init__",
+        )
 
     def test_export_sites_use_the_patchlab_folder(self) -> None:
         source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")

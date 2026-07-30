@@ -279,6 +279,7 @@ class LegacyMainWindow(QMainWindow):
             else Path(__file__).resolve().parents[1] / "data" / "local" / "factory_paths.json"
         )
         self.local_paths = default_local_paths()
+        self._ensure_patchlab_export_folders()
         self.setWindowTitle("PatchLab")
         self.resize(1050, 900)
         self.runner = ScanProcessRunner(self)
@@ -1539,15 +1540,53 @@ class LegacyMainWindow(QMainWindow):
         self.append_log(f"Factory preview failed: {error}")
         self.statusBar().showMessage(error)
 
+    # Xfer ships these system preset trees world-writable specifically so any
+    # local user can save into them without administrator rights — Serum 1's
+    # own "User" folder even contains a literal SaveYourPresetsHere.txt. These
+    # are also the exact folders Serum's own preset browser scans, unlike an
+    # arbitrary path under the user's home directory, so PatchLab output saved
+    # here shows up inside Serum immediately rather than needing a manual
+    # "Add Folder" step.
+    MACOS_SERUM1_USER_PRESETS = Path(
+        "/Library/Audio/Presets/Xfer Records/Serum Presets/Presets/User"
+    )
+    MACOS_SERUM2_USER_PRESETS = Path(
+        "/Library/Audio/Presets/Xfer Records/Serum 2 Presets/Presets/User"
+    )
+
+    def _ensure_patchlab_export_folders(self) -> None:
+        """Create the PatchLab export folders up front, not just on first export.
+
+        A brand-new machine has never run an export, so waiting for that would
+        leave the destination invisible in Serum's browser until the first
+        save. Runs at construction time, before self.log_pane exists — a
+        failure here must never crash or block startup, so it is tolerated
+        completely silently; `_patchlab_export_folder` retries the same
+        `mkdir` at export time and can report there if it still fails.
+        """
+
+        if ENV.branch != "macos":
+            return
+        for root in (self.MACOS_SERUM1_USER_PRESETS, self.MACOS_SERUM2_USER_PRESETS):
+            try:
+                (root / "PatchLab").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+
     def _default_export_folder(self, synth: str) -> Path:
         """Return the Serum preset root generated presets belong under.
 
-        A user-writable root is strongly preferred over a shared/system one.
-        On macOS the machine-wide `/Library/Audio/Presets/...` tree is usually
-        the only root that already exists, but it needs administrator rights to
-        write to, so defaulting an export there sends people somewhere outside
-        their own folder that then fails to save.
+        On macOS this is Serum's own well-known User preset folder — see
+        MACOS_SERUM1_USER_PRESETS / MACOS_SERUM2_USER_PRESETS. Elsewhere, a
+        user-writable root is preferred over a shared/system one.
         """
+
+        if ENV.branch == "macos":
+            return (
+                self.MACOS_SERUM2_USER_PRESETS
+                if synth == "serum2"
+                else self.MACOS_SERUM1_USER_PRESETS
+            )
 
         token = "serum 2" if synth == "serum2" else "serum presets"
         home = Path.home().resolve()
@@ -1753,6 +1792,7 @@ class MainWindow(LegacyMainWindow):
             / "factory_paths.json"
         )
         self.local_paths = default_local_paths()
+        self._ensure_patchlab_export_folders()
         self.runner = ScanProcessRunner(self)
         self.runner.log.connect(self.append_log)
         self.runner.progress.connect(self._progress)
