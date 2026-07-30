@@ -34,6 +34,25 @@ class _ProcessRunnerBase(QObject):
         self._worker_name = ""
         self._worker_ready = False
         self._startup_failure_emitted = False
+        self._buffer = ""
+
+    def _pop_line(self) -> str | None:
+        """Return the next complete worker output line, or None if none is buffered.
+
+        Windows' text-mode stdout translates every printed '\\n' to '\\r\\n', so
+        a worker running there emits handshake, progress, and result lines all
+        carrying a trailing '\\r'. Splitting on bare '\\n' alone leaves that '\\r'
+        attached to `line`, which silently breaks exact-string comparisons —
+        this is what previously made every worker (scan, render, analyze,
+        match, export, preview) report "wrong startup handshake" on Windows
+        while working correctly on macOS. `rstrip("\\r")` is a no-op on
+        properly-terminated Unix output, so this is safe on every platform.
+        """
+
+        if "\n" not in self._buffer:
+            return None
+        line, self._buffer = self._buffer.split("\n", 1)
+        return line.rstrip("\r")
 
     def _start_worker(self, worker_name: str, arguments: list[str]) -> None:
         self._worker_name = worker_name
@@ -153,8 +172,7 @@ class ScanProcessRunner(_ProcessRunnerBase):
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("WORKER_PROGRESS="):
@@ -239,8 +257,7 @@ class RenderProcessRunner(_ProcessRunnerBase):
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("RENDER_PROGRESS="):
@@ -317,8 +334,7 @@ class AnalyzeProcessRunner(_ProcessRunnerBase):
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("MILESTONE3_PHASE="):
@@ -413,8 +429,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
             "utf-8", errors="replace"
         )
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("MATCH_PROGRESS="):
@@ -475,8 +490,7 @@ class ExportProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
             "utf-8", errors="replace"
         )
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("EXPORT_RESULT="):
@@ -616,8 +630,7 @@ class PreviewProcessRunner(_ProcessRunnerBase):
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
             "utf-8", errors="replace"
         )
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
             if line.startswith("PREVIEW_RESULT="):
