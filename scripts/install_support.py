@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -386,6 +387,41 @@ def _artifacts_preflight(args: argparse.Namespace) -> None:
     print(f"ARTIFACT_PREFLIGHT_PASS count={len(rows)}")
 
 
+def _extract_tar_gz(archive: Path, target: Path) -> int:
+    """Extract `archive` into `target`, refusing anything that escapes it.
+
+    The archive arrives over the network, so its member names are untrusted
+    input: a member named ../../x or an absolute path would otherwise write
+    outside the install root. Links are rejected outright rather than resolved,
+    since a symlink can redirect a later member to an arbitrary location.
+    """
+
+    target.mkdir(parents=True, exist_ok=True)
+    resolved_target = target.resolve()
+    extracted = 0
+    with tarfile.open(archive, "r:gz") as bundle:
+        members = bundle.getmembers()
+        for member in members:
+            if member.issym() or member.islnk():
+                raise InstallError(
+                    f"{archive.name}: refusing archive containing link {member.name!r}"
+                )
+            if not (member.isfile() or member.isdir()):
+                raise InstallError(
+                    f"{archive.name}: refusing archive containing special file "
+                    f"{member.name!r}"
+                )
+            candidate = (resolved_target / member.name).resolve()
+            if candidate != resolved_target and resolved_target not in candidate.parents:
+                raise InstallError(
+                    f"{archive.name}: refusing member {member.name!r} that escapes "
+                    f"{resolved_target}"
+                )
+            extracted += 1
+        bundle.extractall(resolved_target)
+    return extracted
+
+
 def _artifacts(args: argparse.Namespace) -> None:
     token, rows = _artifact_manifest(args.relay_url)
     root = args.install_root.resolve()
@@ -395,7 +431,14 @@ def _artifacts(args: argparse.Namespace) -> None:
         name = str(row["name"])
         size = int(row["size"])
         sha256 = str(row["sha256"])
-        destination = (root / str(row["destination"])).resolve()
+        unpack = str(row.get("unpack") or "")
+        relative = Path(str(row["destination"]))
+        # An unpacked artifact names the directory it expands into; a plain one
+        # names the file itself. Download archives beside their target so the
+        # checksum is verified before anything is written into the tree.
+        destination = (
+            (root / relative / name) if unpack else (root / relative)
+        ).resolve()
         if root not in destination.parents:
             raise InstallError(f"manifest destination escapes install root: {name}")
         print(f"Private artifact: {name} ({size} bytes)")
@@ -409,6 +452,12 @@ def _artifacts(args: argparse.Namespace) -> None:
             token=token,
         )
         print(f"  {result}")
+        if unpack:
+            if unpack != "extract-tar-gz":
+                raise InstallError(f"{name}: unsupported unpack mode {unpack!r}")
+            count = _extract_tar_gz(destination, (root / relative).resolve())
+            destination.unlink()
+            print(f"  extracted {count} entries into {relative}")
         completed += 1
         total += size
     print(f"ARTIFACTS_OK count={completed} bytes={total}")
