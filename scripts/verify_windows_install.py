@@ -344,7 +344,12 @@ def _playback_probe(audio_path: Path | None) -> Result:
             audio_path, dtype="float32", always_2d=True
         )
         probe = audio[: min(len(audio), max(1, int(sample_rate * 0.15)))]
-        sd.play(probe, samplerate=sample_rate, blocking=True)
+        # A disconnected or sleeping Windows output device can leave
+        # ``blocking=True`` waiting forever. Start playback asynchronously,
+        # keep the probe alive for a bounded interval, then stop explicitly.
+        sd.play(probe, samplerate=sample_rate, blocking=False)
+        sd.sleep(max(200, int(1000 * len(probe) / sample_rate) + 50))
+        sd.stop()
         return Result(
             "source/preview sounddevice playback",
             "PASS",

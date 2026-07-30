@@ -200,6 +200,38 @@ class ScaledGraphicsView(QGraphicsView):
     a wrong (usually tiny) initial scale if called from there instead.
     """
 
+    file_dropped = Signal(str)
+
+    @staticmethod
+    def _audio_path(event) -> str | None:  # type: ignore[no-untyped-def]
+        urls = event.mimeData().urls()
+        if len(urls) != 1 or not urls[0].isLocalFile():
+            return None
+        path = Path(urls[0].toLocalFile())
+        if path.suffix.casefold() not in SUPPORTED_AUDIO_SUFFIXES:
+            return None
+        return str(path)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._audio_path(event) is not None:
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._audio_path(event) is not None:
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        path = self._audio_path(event)
+        if path is not None:
+            self.file_dropped.emit(path)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
         scene = self.scene()
@@ -1952,6 +1984,8 @@ class MainWindow(LegacyMainWindow):
         )
         self._graphics_view.setDragMode(QGraphicsView.DragMode.NoDrag)
         self._graphics_view.setAcceptDrops(True)
+        self._graphics_view.viewport().setAcceptDrops(True)
+        self._graphics_view.file_dropped.connect(self._set_match_file)
         self._graphics_view.setResizeAnchor(
             QGraphicsView.ViewportAnchor.AnchorViewCenter
         )

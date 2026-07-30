@@ -49,6 +49,39 @@ def test_frozen_and_development_invocations(monkeypatch) -> None:  # type: ignor
     assert arguments == [WORKER_FLAG, "match", "fixture.wav"]
 
 
+def test_windows_pythonw_parent_uses_console_python_for_workers(
+    monkeypatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    pythonw = tmp_path / "pythonw.exe"
+    python = tmp_path / "python.exe"
+    pythonw.touch()
+    python.touch()
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(pythonw))
+
+    program, arguments = worker_invocation("match", ["fixture.wav"])
+
+    assert program == str(python)
+    assert arguments == [
+        "-m",
+        "app.worker_dispatch",
+        "match",
+        "fixture.wav",
+    ]
+
+
+def test_windows_crlf_worker_handshake_is_accepted() -> None:
+    runner = MatchProcessRunner()
+    runner._worker_name = "match"
+
+    handled = runner._handle_worker_line("PATCHLAB_WORKER_READY=match\r")
+
+    assert handled
+    assert runner._worker_ready
+    assert not runner._startup_failure_emitted
+
+
 def test_every_qprocess_runner_uses_shared_dispatch() -> None:
     cases: list[tuple[object, str, tuple, dict]] = [
         (ScanProcessRunner(), "scan", (Path("/tmp/presets"),), {}),

@@ -52,9 +52,17 @@ class WindowsParityHelpersTest(unittest.TestCase):
     def test_installer_and_launcher_keep_the_console_hidden(self) -> None:
         root = Path(__file__).resolve().parents[1]
         installer = (root / "install.ps1").read_text(encoding="utf-8")
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
         launcher = (root / "app" / "windows_launcher.pyw").read_text(encoding="utf-8")
         self.assertIn(r".venv\Scripts\pythonw.exe", installer)
         self.assertIn("CreateShortcut", installer)
+        self.assertIn(
+            "pip install torch torchaudio torchvision --index-url",
+            installer,
+        )
+        self.assertIn('$ErrorActionPreference = "Continue"', installer)
+        self.assertIn("$authStatusExitCode = $LASTEXITCODE", installer)
+        self.assertNotIn("torchvision==", requirements)
         self.assertIn("PATCHLAB_DISTRIBUTION_MODE", launcher)
         self.assertIn("utf-8-sig", launcher)
         self.assertNotIn("shell=True", launcher)
