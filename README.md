@@ -76,6 +76,8 @@ learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
 machine before library ingestion is enabled.
 
+The current PatchLab application version is **1.0.1**.
+
 It runs Serum headlessly through DawDreamer—never by automating a DAW—and
 provides a PySide6 desktop workflow for scanning presets, rendering an audition
 library, learning audio similarity, matching samples, and exporting verified
@@ -561,6 +563,30 @@ log and About dialog. A packaged build can report it without opening the GUI:
 ```bash
 dist/PatchLab.app/Contents/MacOS/PatchLab --patchlab-build-info
 ```
+
+### Versioning policy
+
+Every PatchLab source commit receives a new application version. Before a
+commit, run:
+
+```bash
+python scripts/bump_version.py
+```
+
+All three version components stay between 0 and 9. The sequence therefore
+advances `1.0.8 → 1.0.9 → 1.1.0`, rather than creating `1.0.10`. Version
+`2.0.0` is locked and requires explicit approval from Brett Myers; the normal
+version tool will never cross that boundary automatically.
+
+Developers can enable the included local commit guard once per checkout:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The same exact-increment rule runs in GitHub Actions so reused or skipped
+versions cannot be merged unnoticed. The version in `app/__version__.py`
+feeds the UI and both macOS and Windows packaging metadata.
 
 PatchLab keeps Hugging Face offline mode enabled by default so long matches and
 batches cannot stall on network retries. It does not silently download missing

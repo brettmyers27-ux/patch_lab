@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+if [ -x .venv/bin/python ]; then
+    python_command=.venv/bin/python
+elif command -v python3.11 >/dev/null 2>&1; then
+    python_command=python3.11
+else
+    python_command=python3
+fi
+
+"$python_command" scripts/verify_version_increment.py --staged

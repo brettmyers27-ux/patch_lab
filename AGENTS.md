@@ -37,3 +37,9 @@ Keep the source repository free of passcodes, tokens, OAuth credentials,
 private relay secrets, personal paths, preset files, rendered audio, databases,
 and model or index artifacts. The relay URL is non-secret configuration; its
 credentials are not.
+
+Every source commit must advance `app/__version__.py` by exactly one PatchLab
+version. Version components remain single digits: `1.0.8` advances to `1.0.9`,
+then to `1.1.0`. Run `python scripts/bump_version.py` once before each commit.
+Never set or automatically roll into `2.0.0`; only Brett Myers may explicitly
+authorize that major version.
