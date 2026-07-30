@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,12 @@ import soundfile as sf
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(
+    os.environ.get(
+        "PATCHLAB_GATE_PROJECT_ROOT",
+        str(Path(__file__).resolve().parents[1]),
+    )
+).resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -69,7 +75,15 @@ def _run_ui_worker(path: Path) -> tuple[Path, list[dict[str, Any]]]:
     timeout.setSingleShot(True)
     timeout.timeout.connect(lambda: (errors.append("UI match worker timed out"), runner.cancel(), loop.quit()))
     timeout.start(600_000)
-    runner.start(path, target_synth="serum2", budget="quick", offset=0.0)
+    mapping = os.environ.get("PATCHLAB_GATE_FACTORY_MAPPING")
+    runner.start(
+        path,
+        target_synth="serum2",
+        budget="quick",
+        offset=0.0,
+        factory_only=bool(mapping),
+        factory_mapping=Path(mapping).expanduser().resolve() if mapping else None,
+    )
     loop.exec()
     timeout.stop()
     if errors:
@@ -97,12 +111,18 @@ def main() -> int:
         raw_result = json.loads(raw_path.read_text(encoding="utf-8"))
         mp3_result = json.loads(mp3_path.read_text(encoding="utf-8"))
         silence_result = json.loads(silence_path.read_text(encoding="utf-8"))
+        with sqlite3.connect(PROJECT_ROOT / "data" / "library.db") as connection:
+            fixture_hash = str(
+                connection.execute(
+                    "SELECT content_hash FROM presets WHERE id=?", (FIXTURE_ID,)
+                ).fetchone()[0]
+            )
 
         raw_rank = next(
             (
                 index + 1
                 for index, item in enumerate(raw_result["existing_matches"])
-                if int(item["preset_id"]) == FIXTURE_ID
+                if str(item.get("content_hash")) == fixture_hash
             ),
             None,
         )
@@ -110,7 +130,7 @@ def main() -> int:
             (
                 index + 1
                 for index, item in enumerate(mp3_result["existing_matches"])
-                if int(item["preset_id"]) == FIXTURE_ID
+                if str(item.get("content_hash")) == fixture_hash
             ),
             None,
         )
@@ -127,6 +147,7 @@ def main() -> int:
 
     report = {
         "fixture_preset_id": FIXTURE_ID,
+        "fixture_content_hash": fixture_hash,
         "raw": {
             "decoder": raw_result["source"]["decoder"],
             "own_preset_rank": raw_rank,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
@@ -499,6 +500,8 @@ class PreviewProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     completed = Signal(str)
     failed = Signal(str)
+    request_completed = Signal(str, str)
+    request_failed = Signal(str, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -506,6 +509,13 @@ class PreviewProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._result: str | None = None
         self._error: str | None = None
+        self._startup_error: str | None = None
+        self._queue: list[dict[str, object]] = []
+        self._active: dict[str, object] | None = None
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._queue)
 
     def start(
         self,
@@ -515,45 +525,92 @@ class PreviewProcessRunner(_ProcessRunnerBase):
         midi_note: int,
         content_hash: str,
         output_root: Path | None = None,
-    ) -> None:
-        if self.process.state() != QProcess.ProcessState.NotRunning:
-            raise RuntimeError("A factory preview is already rendering")
+    ) -> str:
+        request_id = uuid.uuid4().hex
+        self._queue.append(
+            {
+                "id": request_id,
+                "worker": "factory-preview",
+                "source": Path(source),
+                "synth": synth,
+                "midi_note": int(midi_note),
+                "content_hash": content_hash,
+                "output_root": Path(output_root) if output_root is not None else None,
+            }
+        )
+        self._launch_next()
+        return request_id
+
+    def start_recommendation(
+        self,
+        result_path: Path,
+        midi_note: int,
+        *,
+        output_root: Path | None = None,
+        cache_key: str | None = None,
+    ) -> str:
+        request_id = uuid.uuid4().hex
+        self._queue.append(
+            {
+                "id": request_id,
+                "worker": "recommendation-preview",
+                "result_path": Path(result_path),
+                "midi_note": int(midi_note),
+                "output_root": Path(output_root) if output_root is not None else None,
+                "cache_key": cache_key,
+            }
+        )
+        self._launch_next()
+        return request_id
+
+    def _launch_next(self) -> None:
+        if (
+            self._active is not None
+            or self.process.state() != QProcess.ProcessState.NotRunning
+            or not self._queue
+        ):
+            return
+        self._active = self._queue.pop(0)
         self._buffer = ""
         self._result = None
         self._error = None
+        self._startup_error = None
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
-        arguments = [
-            str(source),
-            "--synth",
-            synth,
-            "--note",
-            str(midi_note),
-            "--content-hash",
-            content_hash,
-        ]
+        worker = str(self._active["worker"])
+        if worker == "factory-preview":
+            arguments = [
+                str(self._active["source"]),
+                "--synth",
+                str(self._active["synth"]),
+                "--note",
+                str(self._active["midi_note"]),
+                "--content-hash",
+                str(self._active["content_hash"]),
+            ]
+        else:
+            arguments = [
+                str(self._active["result_path"]),
+                "--note",
+                str(self._active["midi_note"]),
+            ]
+            cache_key = self._active.get("cache_key")
+            if cache_key:
+                arguments.extend(["--cache-key", str(cache_key)])
+        output_root = self._active.get("output_root")
         if output_root is not None:
             arguments.extend(["--output-root", str(output_root)])
-        self._start_worker("factory-preview", arguments)
-
-    def start_recommendation(self, result_path: Path, midi_note: int) -> None:
-        if self.process.state() != QProcess.ProcessState.NotRunning:
-            raise RuntimeError("A recommendation preview is already rendering")
-        self._buffer = ""
-        self._result = None
-        self._error = None
-        self.process.setWorkingDirectory(str(PROJECT_ROOT))
-        self._start_worker(
-            "recommendation-preview",
-            [
-                str(result_path),
-                "--note",
-                str(midi_note),
-            ],
-        )
+        self._start_worker(worker, arguments)
 
     def cancel(self) -> None:
+        while self._queue:
+            queued = self._queue.pop(0)
+            self.request_failed.emit(str(queued["id"]), "Preview request cancelled")
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.terminate()
+
+    def _emit_startup_failure(self, message: str) -> None:
+        self._startup_error = message
+        super()._emit_startup_failure(message)
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
@@ -572,14 +629,29 @@ class PreviewProcessRunner(_ProcessRunnerBase):
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._read_output()
+        active = self._active
+        request_id = str(active["id"]) if active is not None else ""
         if self._finished_before_ready(exit_code):
+            if request_id:
+                self.request_failed.emit(
+                    request_id,
+                    self._startup_error
+                    or f"Preview worker exited with code {exit_code} before startup",
+                )
+            self._active = None
+            QTimer.singleShot(0, self._launch_next)
             return
         if exit_code == 0 and self._result:
             self.completed.emit(self._result)
+            if request_id:
+                self.request_completed.emit(request_id, self._result)
         else:
-            self.failed.emit(
-                self._error or f"Factory preview worker exited with code {exit_code}"
-            )
+            error = self._error or f"Preview worker exited with code {exit_code}"
+            self.failed.emit(error)
+            if request_id:
+                self.request_failed.emit(request_id, error)
+        self._active = None
+        QTimer.singleShot(0, self._launch_next)
 
 
 def worker_parser() -> argparse.ArgumentParser:

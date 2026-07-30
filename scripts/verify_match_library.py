@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QApplication
 from app.ui import MainWindow
 from core.db import Database
 from core.match_library import resolve_result_path, resolved_record_paths
+from core.preview_cache import preview_cache_path, recommendation_cache_key
 
 
 def main() -> int:
@@ -46,20 +47,48 @@ def main() -> int:
     preview_ok = export_ok = False
     export_payload: dict = {}
     if isinstance(recommendation, dict):
-        preview = subprocess.run(
-            [
+        cache_key = recommendation_cache_key(result_path, recommendation)
+        cache_root = restarted._preview_cache_root()
+        if (
+            not recommendation.get("meaningfully_modified", False)
+            and recommendation.get("preview_source_path")
+        ):
+            preview_command = [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "render_factory_preview.py"),
+                str(recommendation["preview_source_path"]),
+                "--synth",
+                str(recommendation["synth"]),
+                "--note",
+                "60",
+                "--content-hash",
+                cache_key,
+                "--output-root",
+                str(cache_root),
+            ]
+        else:
+            preview_command = [
                 sys.executable,
                 str(PROJECT_ROOT / "scripts" / "render_recommendation_preview.py"),
                 str(result_path),
                 "--note",
                 "60",
-            ],
+                "--cache-key",
+                cache_key,
+                "--output-root",
+                str(cache_root),
+            ]
+        preview = subprocess.run(
+            preview_command,
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
             check=False,
         )
-        preview_ok = preview.returncode == 0 and (result_path.parent / "recommendation-60.wav").is_file()
+        preview_ok = (
+            preview.returncode == 0
+            and preview_cache_path(cache_root, cache_key, 60).is_file()
+        )
         with tempfile.TemporaryDirectory(prefix="patchlab-library-export-") as directory:
             extension = ".fxp" if record.recommendation_synth == "serum1" else ".SerumPreset"
             output = Path(directory) / f"Verified{extension}"

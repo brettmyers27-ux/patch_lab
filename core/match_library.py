@@ -74,6 +74,13 @@ def archive_match(
     result: dict[str, Any] = json.loads(result_path.read_text(encoding="utf-8"))
     recommendation = result.get("recommendation")
     recommendation_dict = recommendation if isinstance(recommendation, dict) else {}
+    if recommendation_dict:
+        # Resolve this while the ephemeral candidate still exists, then store
+        # it in the portable archive for durable preview lookup/reference
+        # tracking.
+        from core.preview_cache import annotate_recommendation_cache_key
+
+        annotate_recommendation_cache_key(result, result_path)
 
     match_uid = uuid.uuid4().hex
     temporary_root = Path(tempfile.mkdtemp(prefix=f".{match_uid}-", dir=root))
@@ -165,11 +172,18 @@ def delete_archived_match(
     match_uid: str,
     *,
     library_root: Path = DEFAULT_MATCH_LIBRARY_ROOT,
+    cache_root: Path | None = None,
 ) -> bool:
     record = db.get_match_library(match_uid)
     if record is None:
         return False
     entry_root = resolve_entry_path(library_root, Path(record.result_json_path).parent)
+    result_path = resolve_entry_path(library_root, record.result_json_path)
+    deleted_keys: set[str] = set()
+    if cache_root is not None and result_path.is_file():
+        from core.preview_cache import result_cache_keys
+
+        deleted_keys = result_cache_keys(result_path)
     staged = entry_root.parent / f".delete-{match_uid}"
     if entry_root.exists():
         entry_root.rename(staged)
@@ -181,6 +195,19 @@ def delete_archived_match(
         raise
     if staged.exists():
         shutil.rmtree(staged)
+    if cache_root is not None and deleted_keys:
+        from core.preview_cache import (
+            cleanup_deleted_entry_previews,
+            match_library_reference_counts,
+        )
+
+        cleanup_deleted_entry_previews(
+            deleted_keys,
+            remaining_references=match_library_reference_counts(
+                db, library_root=library_root
+            ),
+            cache_root=cache_root,
+        )
     return True
 
 

@@ -168,6 +168,11 @@ class SegmentedControl(QWidget):
             return self._items[index][1]
         return None
 
+    def buttonAt(self, index: int) -> QPushButton | None:
+        if 0 <= index < len(self._buttons):
+            return self._buttons[index]
+        return None
+
     def setCurrentIndex(self, index: int) -> None:
         if not 0 <= index < len(self._items):
             return

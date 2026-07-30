@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.platform_env import ENV
 from core.plugin_host import make_dawdreamer_processor
+from core.preview_cache import preview_cache_path
 from core.preset_scan import sha1_file
 from core.render import SAMPLE_RATE, _render_audio, _trim_tail
 from core.serum2_preset import parse_serum2_preset
@@ -35,11 +36,10 @@ def render_preview(
     source = source.expanduser().resolve()
     if sha1_file(source) != content_hash:
         raise RuntimeError("Local factory preset no longer matches its verified fingerprint")
-    output = (
-        (Path(output_root).resolve() if output_root else ENV.app_data_dir)
-        / "factory-previews"
-        / content_hash
-        / f"{midi_note}.wav"
+    output = preview_cache_path(
+        Path(output_root).resolve() if output_root else ENV.app_data_dir,
+        content_hash,
+        midi_note,
     )
     if output.is_file():
         return output

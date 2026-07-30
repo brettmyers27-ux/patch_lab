@@ -101,6 +101,25 @@ def test_every_qprocess_runner_uses_shared_dispatch() -> None:
     )
 
 
+def test_preview_runner_queues_instead_of_rejecting_a_second_request() -> None:
+    runner = PreviewProcessRunner()
+    runner._start_worker = Mock()  # type: ignore[method-assign]
+    first = runner.start(
+        Path("/tmp/one.fxp"),
+        synth="serum1",
+        midi_note=48,
+        content_hash="a" * 40,
+    )
+    second = runner.start(
+        Path("/tmp/two.fxp"),
+        synth="serum1",
+        midi_note=60,
+        content_hash="b" * 40,
+    )
+    assert first != second
+    assert runner.pending_count == 1
+
+
 def test_missing_handshake_fails_fast_and_kills_process(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

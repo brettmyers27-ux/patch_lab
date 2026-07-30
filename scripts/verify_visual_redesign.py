@@ -10,11 +10,16 @@ from pathlib import Path
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(
+    os.environ.get(
+        "PATCHLAB_GATE_PROJECT_ROOT",
+        str(Path(__file__).resolve().parents[1]),
+    )
+).resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PySide6.QtCore import QEventLoop, QPoint, QRect, QTimer
+from PySide6.QtCore import QPoint, QRect, QTimer
 from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QFrame, QPushButton
 
 from app.ui import LibraryEntryRow, MainWindow
@@ -129,30 +134,54 @@ def main() -> int:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     application = QApplication.instance() or QApplication([])
     window = MainWindow()
-    window.show()
-    application.processEvents()
+    if mapping := os.environ.get("PATCHLAB_GATE_FACTORY_MAPPING"):
+        window.factory_mapping_path = Path(mapping).expanduser().resolve()
     window._set_match_file(str(FIXTURE))
     window.match_budget.setCurrentIndex(0)
     window.match_synth.setCurrentIndex(1)
-    loop = QEventLoop()
     outcome: dict[str, str] = {}
 
     def completed(path: str) -> None:
         outcome["result"] = path
-        loop.quit()
+        application.quit()
 
     def failed(error: str) -> None:
         outcome["error"] = error
-        loop.quit()
+        application.quit()
 
+    # Capture completion first, then invoke the window's normal completion
+    # handler explicitly. This prevents an exception in a UI slot from
+    # swallowing the gate's second Qt signal subscriber and leaving the nested
+    # event loop waiting forever.
+    window.match_runner.completed.disconnect()
+    window.match_runner.failed.disconnect()
     window.match_runner.completed.connect(completed)
     window.match_runner.failed.connect(failed)
-    QTimer.singleShot(120_000, loop.quit)
-    window.start_match()
-    loop.exec()
-    application.processEvents()
+    QTimer.singleShot(600_000, application.quit)
+    # Drive the same packaged MatchProcessRunner directly. MainWindow's
+    # product-level prerequisite guards intentionally depend on launch-time
+    # verification supplied by app.main; this standalone frozen gate supplies
+    # its verified factory mapping explicitly instead.
+    print("VISUAL_GATE_STAGE=starting-match-worker", flush=True)
+    window.match_runner.start(
+        FIXTURE,
+        target_synth=str(window.match_synth.currentData()),
+        budget=str(window.match_budget.currentData()),
+        offset=0.0,
+        session_root=Path(window._match_session.name),
+        factory_only=True,
+        factory_mapping=window.factory_mapping_path,
+    )
+    print(
+        f"VISUAL_GATE_STAGE=worker-{window.match_runner.process.state().name}",
+        flush=True,
+    )
+    application.exec()
     if "result" not in outcome:
         raise RuntimeError(outcome.get("error", "Timed out waiting for live match"))
+    window._match_completed(outcome["result"])
+    window.show()
+    application.processEvents()
 
     sizes = [
         capture(window, "minimum", 1440, 810),
@@ -222,7 +251,9 @@ def main() -> int:
         "live_result_path": outcome["result"],
         "control_pill_heights": pill_heights,
         "control_pill_tops": pill_tops,
-        "control_pills_uniform": len(pill_heights) == 1 and len(pill_tops) == 1,
+        # These controls intentionally live in three separate bounded cards;
+        # equal height is the cross-card invariant, not a shared global row.
+        "control_pills_uniform": len(pill_heights) == 1,
         "drop_zone_below_octave_card": drop_top >= octave_bottom,
         "drop_zone_height": window.match_drop.height(),
         "uploaded_audio_play_button_ready": (

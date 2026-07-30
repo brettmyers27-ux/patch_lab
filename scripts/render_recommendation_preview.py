@@ -24,12 +24,20 @@ from core.matcher import (
     _init_render_worker,
     _render_candidate_unsafe,
 )
+from core.platform_env import ENV
+from core.preview_cache import preview_cache_path, recommendation_cache_key
 
 
 PREVIEW_NOTES = (24, 36, 48, 60, 72, 84, 96)
 
 
-def render_recommendation(result_path: Path, midi_note: int) -> Path:
+def render_recommendation(
+    result_path: Path,
+    midi_note: int,
+    *,
+    output_root: Path | None = None,
+    cache_key: str | None = None,
+) -> Path:
     result_path = Path(result_path).expanduser().resolve()
     if midi_note not in PREVIEW_NOTES:
         raise ValueError(f"Unsupported preview note {midi_note}")
@@ -37,9 +45,7 @@ def render_recommendation(result_path: Path, midi_note: int) -> Path:
     recommendation = result.get("recommendation")
     if not isinstance(recommendation, dict):
         raise RuntimeError("The match has no generated recommendation")
-    candidate_path = resolve_result_path(
-        result_path, recommendation["candidate_path"]
-    )
+    candidate_path = resolve_result_path(result_path, recommendation["candidate_path"])
     stored = np.load(candidate_path)
     candidate = Candidate(
         synth=str(recommendation["synth"]),
@@ -49,7 +55,14 @@ def render_recommendation(result_path: Path, midi_note: int) -> Path:
         origin="audition-preview",
         exact_base=not bool(recommendation.get("meaningfully_modified", False)),
     )
-    output = result_path.parent / f"recommendation-{midi_note}.wav"
+    resolved_key = cache_key or recommendation_cache_key(
+        result_path, recommendation
+    )
+    output = preview_cache_path(
+        Path(output_root).resolve() if output_root else ENV.app_data_dir,
+        resolved_key,
+        midi_note,
+    )
     if output.is_file():
         return output
     with tempfile.TemporaryDirectory(
@@ -59,6 +72,7 @@ def render_recommendation(result_path: Path, midi_note: int) -> Path:
         waveform, _coverage = _render_candidate_unsafe(
             (candidate, midi_note, 4.0)
         )
+    output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp.wav")
     sf.write(
         temporary,
@@ -75,9 +89,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("result", type=Path)
     parser.add_argument("--note", type=int, choices=PREVIEW_NOTES, required=True)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--cache-key")
     args = parser.parse_args()
     try:
-        output = render_recommendation(args.result, args.note)
+        output = render_recommendation(
+            args.result,
+            args.note,
+            output_root=args.output_root,
+            cache_key=args.cache_key,
+        )
     except Exception as exc:
         print(f"PREVIEW_ERROR={type(exc).__name__}: {exc}", flush=True)
         return 1

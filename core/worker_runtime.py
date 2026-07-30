@@ -49,6 +49,18 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "workflow-card-gate": WorkerEntryPoint(
         "scripts.verify_workflow_cards"
     ),
+    "preview-cache-gate": WorkerEntryPoint(
+        "scripts.verify_preview_cache"
+    ),
+    "visual-redesign-gate": WorkerEntryPoint(
+        "scripts.verify_visual_redesign"
+    ),
+    "milestone4-ui-gate": WorkerEntryPoint(
+        "scripts.verify_milestone4_ui"
+    ),
+    "first-run-gate": WorkerEntryPoint(
+        "scripts.verify_first_run"
+    ),
 }
 
 

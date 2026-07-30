@@ -239,7 +239,7 @@ def _audio_parity(
             local_paths[preset.content_hash] = str(source)
             cached = (
                 render_root
-                / "factory-previews"
+                / "audio"
                 / preset.content_hash
                 / f"{midi_note}.wav"
             )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import shutil
 import tempfile
 import time
 from datetime import datetime
@@ -90,6 +91,11 @@ from core.match_library import (
     resolved_record_paths,
 )
 from core.platform_env import ENV
+from core.preview_cache import (
+    preview_cache_path,
+    recommendation_cache_key,
+    unmodified_recommendation_basis_index,
+)
 from core.privacy import PrivacyStore, distribution_mode
 from core.workflow_state import (
     WorkflowActivity,
@@ -260,8 +266,8 @@ class LegacyMainWindow(QMainWindow):
         self.export_runner.failed.connect(self._export_failed)
         self.preview_runner = PreviewProcessRunner(self)
         self.preview_runner.log.connect(self.append_log)
-        self.preview_runner.completed.connect(self._preview_completed)
-        self.preview_runner.failed.connect(self._preview_failed)
+        self.preview_runner.request_completed.connect(self._preview_request_completed)
+        self.preview_runner.request_failed.connect(self._preview_request_failed)
         self._render_paused = False
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
@@ -271,8 +277,11 @@ class LegacyMainWindow(QMainWindow):
         self._existing_page = 0
         self._favorite_hashes: set[str] = set()
         self._current_match_uid: str | None = None
-        self._library_preview_button: QPushButton | None = None
-        self._library_preview_uid: str | None = None
+        self._preview_requests: dict[
+            str, list[tuple[QPushButton | None, str, int]]
+        ] = {}
+        self._preview_inflight: dict[tuple[str, int], str] = {}
+        self._preview_request_targets: dict[str, tuple[str, int]] = {}
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
         self._workflow_activities: dict[str, WorkflowActivity] = {}
@@ -1263,7 +1272,12 @@ class LegacyMainWindow(QMainWindow):
         if show_dialog:
             QMessageBox.critical(self, "PatchLab model files are unavailable", error)
 
-    def play_winner(self) -> None:
+    def play_winner(
+        self,
+        _checked: bool = False,
+        *,
+        button: QPushButton | None = None,
+    ) -> None:
         if not self._match_result:
             return
         recommendation = self._match_result.get("recommendation")
@@ -1274,44 +1288,194 @@ class LegacyMainWindow(QMainWindow):
             if hasattr(self, "_selected_preview_note")
             else 60
         )
-        if recommendation.get("preview_source_path"):
-            self._render_preview(
-                {
-                    "preview_source_path": recommendation["preview_source_path"],
-                    "synth": recommendation["synth"],
-                    "audition_midi_note": note,
-                    "content_hash": recommendation["content_hash"],
-                }
-            )
+        if self._match_result_path is None:
             return
-        if self._match_result_path and recommendation.get("candidate_path"):
-            cached = self._match_result_path.parent / f"recommendation-{note}.wav"
-            if cached.is_file():
-                self._play_audio(cached)
-                return
-            self.statusBar().showMessage(
-                f"Rendering recommendation preview at MIDI {note}…"
-            )
-            try:
-                self.preview_runner.start_recommendation(
-                    self._match_result_path,
-                    note,
-                )
-            except RuntimeError as exc:
-                self.statusBar().showMessage(str(exc))
-            return
-        if recommendation.get("winner_audio_path"):
-            self._play_audio(Path(recommendation["winner_audio_path"]))
-
-    def _render_preview(self, detail: dict) -> None:
-        self.statusBar().showMessage("Rendering factory preview locally…")
-        self.preview_runner.start(
-            Path(detail["preview_source_path"]),
-            synth=str(detail["synth"]),
-            midi_note=int(detail.get("audition_midi_note") or 60),
-            content_hash=str(detail["content_hash"]),
-            output_root=Path(self._match_session.name),
+        cache_key = recommendation_cache_key(
+            self._match_result_path, recommendation
         )
+        unmodified_source = (
+            recommendation.get("preview_source_path")
+            if not bool(recommendation.get("meaningfully_modified", False))
+            else None
+        )
+        existing_audio: Path | None = None
+        if not bool(recommendation.get("meaningfully_modified", False)):
+            basis = next(
+                (
+                    item
+                    for item in self._match_result.get("existing_matches", [])
+                    if isinstance(item, dict)
+                    and str(item.get("content_hash") or "") == cache_key
+                ),
+                None,
+            )
+            if basis and basis.get("audition_path"):
+                existing_audio = (
+                    Path(str(basis["audition_path"])).parent / f"{note}.wav"
+                )
+        self._resolve_octave_preview(
+            cache_key=cache_key,
+            note=note,
+            synth=str(recommendation["synth"]),
+            preview_source_path=unmodified_source,
+            result_path=self._match_result_path,
+            existing_audio_path=existing_audio,
+            button=button,
+        )
+
+    def _preview_cache_root(self) -> Path:
+        # Distribution storage follows PATCHLAB_APP_DATA through local_paths;
+        # source/dev mode keeps the established repository data/audio layout.
+        return (
+            Path(self.local_paths["audio"]).parent
+            if self.distribution_mode
+            else DEFAULT_DB_PATH.parent
+        )
+
+    @staticmethod
+    def _copy_preview_into_cache(source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.stem}-{time.time_ns()}.tmp.wav"
+        )
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+
+    def _resolve_octave_preview(
+        self,
+        *,
+        cache_key: str,
+        note: int,
+        synth: str,
+        preview_source_path: str | Path | None = None,
+        result_path: Path | None = None,
+        existing_audio_path: Path | None = None,
+        button: QPushButton | None = None,
+    ) -> None:
+        """Single cache/resolve/render/play path for every octave control."""
+
+        cached = preview_cache_path(self._preview_cache_root(), cache_key, note)
+        if cached.is_file():
+            self._play_audio(cached)
+            self.statusBar().showMessage(
+                f"Playing cached C{1 + (note - 24) // 12} preview"
+            )
+            return
+
+        # Migrate existing durable/local renders without asking Serum to render
+        # the same (preset, octave) again.
+        migration_sources: list[Path] = []
+        if existing_audio_path is not None:
+            migration_sources.append(Path(existing_audio_path))
+        migration_sources.append(
+            self._preview_cache_root()
+            / "factory-previews"
+            / cache_key
+            / f"{note}.wav"
+        )
+        if result_path is not None:
+            migration_sources.append(
+                Path(result_path).resolve().parent / f"recommendation-{note}.wav"
+            )
+        for source in migration_sources:
+            if source.is_file():
+                self._copy_preview_into_cache(source, cached)
+                self._play_audio(cached)
+                self.statusBar().showMessage(
+                    f"Playing cached C{1 + (note - 24) // 12} preview"
+                )
+                return
+
+        original_text = button.text() if button is not None else ""
+        if button is not None:
+            button.setText("Rendering…")
+            button.setEnabled(False)
+        target = (cache_key, note)
+        existing_request = self._preview_inflight.get(target)
+        if existing_request:
+            self._preview_requests[existing_request].append(
+                (button, original_text, note)
+            )
+            self.statusBar().showMessage(
+                f"C{1 + (note - 24) // 12} preview is already rendering…"
+            )
+            return
+        try:
+            if preview_source_path:
+                source = Path(preview_source_path).expanduser()
+                if not source.is_absolute() and result_path is not None:
+                    source = resolve_result_path(result_path, source)
+                request_id = self.preview_runner.start(
+                    source,
+                    synth=synth,
+                    midi_note=note,
+                    content_hash=cache_key,
+                    output_root=self._preview_cache_root(),
+                )
+            elif result_path is not None:
+                request_id = self.preview_runner.start_recommendation(
+                    result_path,
+                    note,
+                    output_root=self._preview_cache_root(),
+                    cache_key=cache_key,
+                )
+            else:
+                raise RuntimeError("No verified render source is available for this preview")
+        except Exception as exc:
+            if button is not None:
+                button.setText(original_text)
+                button.setEnabled(True)
+            self._preview_failed(f"{type(exc).__name__}: {exc}")
+            return
+        self._preview_requests[request_id] = [(button, original_text, note)]
+        self._preview_inflight[target] = request_id
+        self._preview_request_targets[request_id] = target
+        queued = self.preview_runner.pending_count
+        suffix = f" ({queued} queued)" if queued else ""
+        self.statusBar().showMessage(
+            f"Rendering C{1 + (note - 24) // 12} preview{suffix}…"
+        )
+
+    def _render_preview(
+        self, detail: dict, *, button: QPushButton | None = None
+    ) -> None:
+        self._resolve_octave_preview(
+            cache_key=str(detail["content_hash"]),
+            note=int(detail.get("audition_midi_note") or 60),
+            synth=str(detail["synth"]),
+            preview_source_path=detail.get("preview_source_path"),
+            button=button,
+        )
+
+    def _preview_request_completed(self, request_id: str, path: str) -> None:
+        requests = self._preview_requests.pop(
+            request_id, [(None, "", 60)]
+        )
+        target = self._preview_request_targets.pop(request_id, None)
+        if target is not None:
+            self._preview_inflight.pop(target, None)
+        note = requests[0][2]
+        for button, original_text, _note in requests:
+            if button is not None:
+                button.setText(original_text)
+                button.setEnabled(True)
+        self.statusBar().showMessage(
+            f"C{1 + (note - 24) // 12} preview ready"
+        )
+        self._play_audio(Path(path))
+
+    def _preview_request_failed(self, request_id: str, error: str) -> None:
+        requests = self._preview_requests.pop(
+            request_id, [(None, "", 60)]
+        )
+        target = self._preview_request_targets.pop(request_id, None)
+        if target is not None:
+            self._preview_inflight.pop(target, None)
+        for button, original_text, _note in requests:
+            if button is not None:
+                button.setText(original_text)
+                button.setEnabled(True)
+        self._preview_failed(error)
 
     def _preview_completed(self, path: str) -> None:
         self.statusBar().showMessage("Factory preview ready")
@@ -1516,8 +1680,8 @@ class MainWindow(LegacyMainWindow):
         self.export_runner.failed.connect(self._export_failed)
         self.preview_runner = PreviewProcessRunner(self)
         self.preview_runner.log.connect(self.append_log)
-        self.preview_runner.completed.connect(self._preview_completed)
-        self.preview_runner.failed.connect(self._preview_failed)
+        self.preview_runner.request_completed.connect(self._preview_request_completed)
+        self.preview_runner.request_failed.connect(self._preview_request_failed)
         self._render_paused = False
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
@@ -1527,8 +1691,11 @@ class MainWindow(LegacyMainWindow):
         self._existing_page = 0
         self._favorite_hashes: set[str] = set()
         self._current_match_uid: str | None = None
-        self._library_preview_button: QPushButton | None = None
-        self._library_preview_uid: str | None = None
+        self._preview_requests: dict[
+            str, list[tuple[QPushButton | None, str, int]]
+        ] = {}
+        self._preview_inflight: dict[tuple[str, int], str] = {}
+        self._preview_request_targets: dict[str, tuple[str, int]] = {}
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
         self._workflow_activities: dict[str, WorkflowActivity] = {}
@@ -2112,7 +2279,11 @@ class MainWindow(LegacyMainWindow):
         limitation.setStyleSheet("font-size: 9px;")
         details_layout.addWidget(limitation)
         self.wavetable_limitation = limitation
-        self.match_results.setFixedHeight(740)
+        # Distribution adds the factory-health strip and three separated
+        # control cards above the results. Keep the results bounded so its
+        # bottom edge never runs underneath the log/status rows in the locked
+        # 16:9 canvas.
+        self.match_results.setFixedHeight(660 if self.distribution_mode else 740)
         results_layout.addWidget(closest, 43)
         results_layout.addWidget(recommendation, 57)
         self.match_results.setVisible(True)
@@ -2422,23 +2593,41 @@ class MainWindow(LegacyMainWindow):
         _source, result_path = resolved_record_paths(
             record, self._match_library_root()
         )
-        cached = result_path.parent / f"recommendation-{note}.wav"
-        if cached.is_file():
-            self._play_audio(cached)
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        recommendation = result.get("recommendation")
+        if not isinstance(recommendation, dict):
+            self.statusBar().showMessage("This Library entry has no preset preview")
             return
-        if self._batch_state is not None:
-            self.statusBar().showMessage(
-                "This uncached octave can be rendered after the active batch finishes"
+        cache_key = recommendation_cache_key(result_path, recommendation)
+        unmodified_source = (
+            recommendation.get("preview_source_path")
+            if not bool(recommendation.get("meaningfully_modified", False))
+            else None
+        )
+        existing_audio: Path | None = None
+        if not bool(recommendation.get("meaningfully_modified", False)):
+            basis = next(
+                (
+                    item
+                    for item in result.get("existing_matches", [])
+                    if isinstance(item, dict)
+                    and str(item.get("content_hash") or "") == cache_key
+                ),
+                None,
             )
-            return
-        if self.preview_runner.process.state() != QProcess.ProcessState.NotRunning:
-            self.statusBar().showMessage("Another preview is already rendering")
-            return
-        self._library_preview_button = button
-        self._library_preview_uid = match_uid
-        button.setText("Rendering…")
-        button.setEnabled(False)
-        self.preview_runner.start_recommendation(result_path, note)
+            if basis and basis.get("audition_path"):
+                existing_audio = (
+                    Path(str(basis["audition_path"])).parent / f"{note}.wav"
+                )
+        self._resolve_octave_preview(
+            cache_key=cache_key,
+            note=note,
+            synth=str(recommendation["synth"]),
+            preview_source_path=unmodified_source,
+            result_path=result_path,
+            existing_audio_path=existing_audio,
+            button=button,
+        )
 
     def open_library_match(self, match_uid: str) -> None:
         record = Database(self._match_database_path()).get_match_library(match_uid)
@@ -2458,13 +2647,16 @@ class MainWindow(LegacyMainWindow):
         if QMessageBox.question(
             self,
             "Delete saved match?",
-            "This permanently removes the archived audio, generated files, and history entry.",
+            "This permanently removes this Match Library entry and its private "
+            "generated preview audio. Shared factory/user-preset previews are "
+            "kept so future auditions remain instant.",
         ) != QMessageBox.StandardButton.Yes:
             return
         delete_archived_match(
             Database(self._match_database_path()),
             match_uid,
             library_root=self._match_library_root(),
+            cache_root=self._preview_cache_root(),
         )
         if self._current_match_uid == match_uid:
             self._current_match_uid = None
@@ -2646,25 +2838,9 @@ class MainWindow(LegacyMainWindow):
         super()._export_failed(error)
 
     def _preview_completed(self, path: str) -> None:
-        if self._library_preview_button is not None:
-            button = self._library_preview_button
-            cached = Path(path)
-            octave = 1 + (int(cached.stem.split("-")[-1]) - 24) // 12
-            button.setText(f"C{octave}")
-            button.setEnabled(True)
-            self._library_preview_button = None
-            self._library_preview_uid = None
-            self._play_audio(cached)
-            self.statusBar().showMessage("Library octave preview ready")
-            return
         super()._preview_completed(path)
 
     def _preview_failed(self, error: str) -> None:
-        if self._library_preview_button is not None:
-            self._library_preview_button.setText("Retry")
-            self._library_preview_button.setEnabled(True)
-            self._library_preview_button = None
-            self._library_preview_uid = None
         super()._preview_failed(error)
 
     def start_batch_folder(self) -> None:
@@ -3236,7 +3412,7 @@ class MainWindow(LegacyMainWindow):
         """User clicked an octave button — update state and play immediately."""
 
         self._octave_changed(index)
-        self.play_winner()
+        self.play_winner(button=self.octave_selector.buttonAt(index))
 
     def play_uploaded_audio(self) -> None:
         """Audition the source file the user uploaded, for A/B against a match."""
@@ -3260,27 +3436,31 @@ class MainWindow(LegacyMainWindow):
             f"Playing uploaded audio — {self._match_audio_path.name}"
         )
 
-    def _play_existing_match(self, detail: dict, note: int | None = None) -> None:
+    def _play_existing_match(
+        self,
+        detail: dict,
+        note: int | None = None,
+        *,
+        button: QPushButton | None = None,
+    ) -> None:
         if note is None:
             note = self._selected_preview_note()
+        content_hash = str(detail.get("content_hash") or "")
+        if not content_hash:
+            self.statusBar().showMessage("This preset has no verified preview identity")
+            return
         audition_path = detail.get("audition_path")
+        selected: Path | None = None
         if audition_path:
             selected = Path(audition_path).parent / f"{note}.wav"
-            if selected.is_file():
-                self._play_audio(selected)
-                return
-        if detail.get("preview_source_path"):
-            self._render_preview(
-                {
-                    **detail,
-                    "audition_midi_note": note,
-                }
-            )
-            return
-        octave = 1 + (note - 24) // 12
-        message = f"No C{octave} preview is available for this preset."
-        self.append_log(message)
-        self.statusBar().showMessage(message)
+        self._resolve_octave_preview(
+            cache_key=content_hash,
+            note=note,
+            synth=str(detail["synth"]),
+            preview_source_path=detail.get("preview_source_path"),
+            existing_audio_path=selected,
+            button=button,
+        )
 
     def _favorites_db_path(self) -> Path:
         if self.distribution_mode and bool(
@@ -3337,6 +3517,7 @@ class MainWindow(LegacyMainWindow):
             "PatchLab library result · "
             f"{'Serum 1' if item['synth'] == 'serum1' else 'Serum 2'}"
         )
+        relationship = str(item.get("recommendation_relationship") or "")
         similarity = float(item["similarity_percent"])
         bar = QProgressBar()
         bar.setObjectName("similarityBar")
@@ -3363,6 +3544,11 @@ class MainWindow(LegacyMainWindow):
             favorite.setToolTip("Favoriting is unavailable for this result.")
         header.addWidget(rank_label)
         header.addWidget(name_label, 1)
+        if relationship:
+            basis = QLabel("RECOMMENDED BASIS")
+            basis.setObjectName("tagPill")
+            basis.setToolTip(relationship)
+            header.addWidget(basis)
         header.addWidget(bar)
         header.addWidget(percent_label)
         header.addWidget(favorite)
@@ -3378,8 +3564,8 @@ class MainWindow(LegacyMainWindow):
             if playable:
                 note_button.setToolTip(f"Play at C{octave} (MIDI {note})")
                 note_button.clicked.connect(
-                    lambda _checked=False, detail=dict(item), n=note: self._play_existing_match(
-                        detail, note=n
+                    lambda _checked=False, detail=dict(item), n=note, b=note_button: self._play_existing_match(
+                        detail, note=n, button=b
                     )
                 )
             octave_row.addWidget(note_button)
@@ -3413,11 +3599,19 @@ class MainWindow(LegacyMainWindow):
     def _show_match_result(self, result: dict) -> None:
         self.match_results.setVisible(True)
         existing = list(result.get("existing_matches", []))
+        recommendation = result.get("recommendation")
+        basis_index = unmodified_recommendation_basis_index(result)
+        if basis_index is not None:
+            item = dict(existing[basis_index])
+            item["recommendation_relationship"] = (
+                "This closest match is also the unchanged basis shown "
+                "in the Recommended Preset panel."
+            )
+            existing[basis_index] = item
         self._existing_matches = existing
         self._favorite_hashes = self._load_favorite_hashes()
         self._render_existing_matches()
 
-        recommendation = result.get("recommendation")
         self.settings_tree.clear()
         self.recommendation_placeholder.setVisible(False)
         self.recommendation_details.setVisible(True)
@@ -3463,12 +3657,40 @@ class MainWindow(LegacyMainWindow):
             if similarity >= 65
             else theme.RED
         )
-        base_name = generated_preset_name(synth_key)
+        meaningfully_modified = bool(
+            recommendation.get("meaningfully_modified", False)
+        )
+        matching_basis = next(
+            (
+                item
+                for item in existing
+                if str(item.get("content_hash") or "")
+                == str(recommendation.get("content_hash") or "")
+            ),
+            None,
+        )
+        base_name = (
+            generated_preset_name(synth_key)
+            if meaningfully_modified
+            else display_match_name(
+                matching_basis.get("name") if matching_basis else None,
+                1,
+                source_path=(
+                    matching_basis.get("source_path")
+                    if matching_basis
+                    else recommendation.get("preview_source_path")
+                ),
+            )
+        )
         self.recommendation_badge.setText(confidence_label.upper())
         self.recommendation_badge.setStyleSheet(f"color: {color};")
         self.recommendation_name.setText(base_name)
-        category = "Generated"
-        self.recommendation_subtitle.setText(f"PatchLab · {synth_name}")
+        category = "Generated" if meaningfully_modified else "Existing preset"
+        self.recommendation_subtitle.setText(
+            f"PatchLab generated · {synth_name}"
+            if meaningfully_modified
+            else f"Closest-match basis · {synth_name}"
+        )
         self.recommendation_thumbnail.setAccent(
             "blue" if synth_key == "serum2" else "violet"
         )
@@ -3493,9 +3715,14 @@ class MainWindow(LegacyMainWindow):
             "font-size: 11px;"
         )
         self.recommendation_confidence.setText(
-            "PatchLab generated preset · "
-            f"{recommendation['evaluations']} evaluations · "
-            f"{float(recommendation['elapsed_s']):.1f}s"
+            (
+                "PatchLab generated preset · "
+                f"{recommendation['evaluations']} evaluations · "
+                f"{float(recommendation['elapsed_s']):.1f}s"
+            )
+            if meaningfully_modified
+            else "Unmodified closest preset · the tagged result on the left "
+            "is the same patch, shown as its recommendation basis"
         )
         self.octave_selector.setEnabled(
             bool(

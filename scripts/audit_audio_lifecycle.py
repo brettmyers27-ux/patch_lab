@@ -25,14 +25,14 @@ INVENTORY = [
     {
         "location": "core/match_workflow.py",
         "kind": "application-session-temporary",
-        "purpose": "Winning recommendation WAV and selected-octave previews",
-        "cleanup": "The UI owns one TemporaryDirectory and removes it when the window closes",
+        "purpose": "Winning optimization render before the completed match is archived",
+        "cleanup": "The UI archives the winner/result then removes remaining session scratch on close",
     },
     {
         "location": "scripts/render_recommendation_preview.py",
-        "kind": "application-session-temporary",
+        "kind": "permanent-local-only",
         "purpose": "On-demand C1-C7 recommendation audition",
-        "cleanup": "Written inside the UI match session and removed when the window closes",
+        "cleanup": "Content-addressed under app-data audio; generated keys are removed after their final Match Library reference",
     },
     {
         "location": "scripts/render_factory_preview.py",
@@ -129,7 +129,7 @@ def main() -> int:
         "scratch_after": sorted(after),
         "new_scratch_paths": leaked,
         "candidate_audio_storage": "in-memory numpy arrays",
-        "retained_match_audio": "winner and selected-octave previews only until the app closes",
+        "retained_match_audio": "octave previews persist in one content-addressed local cache; generated entries are reference-cleaned",
         "relay_has_audio_route": relay_has_audio_route,
         "gate_pass": (not args.run_cma or completed_query)
         and not leaked
