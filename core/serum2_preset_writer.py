@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 import struct
 import tempfile
 from dataclasses import dataclass
@@ -296,6 +297,83 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         raise
 
 
+def _resolve_serum2_base(
+    base_preset_id: int, db_path: Path
+) -> tuple[Path, dict[str, Any]]:
+    """Return the base preset's file path and decoded settings.
+
+    A developer checkout answers both from `data/library.db`. A packaged or
+    git-clone install has no such database, and its synthesis catalog carries
+    only Serum 1 automation targets — so every Serum 2 export failed there with
+    "Unknown Serum 2 base preset". The already-shipped factory bundle holds the
+    same settings/metadata/payload_version this needs, and the locally scanned
+    factory mapping resolves the file itself, so fall back to both rather than
+    shipping a second copy of a 177 MB table.
+    """
+
+    from core.synthesis_assets import resolve_synthesis_assets
+
+    resolved_db = Path(db_path)
+    if resolved_db.is_file():
+        try:
+            database = Database(resolved_db)
+            with database.connect() as connection:
+                row = connection.execute(
+                    "SELECT path FROM presets WHERE id=? AND synth='serum2'",
+                    (base_preset_id,),
+                ).fetchone()
+            if row is not None:
+                return (
+                    Path(str(row["path"])).resolve(),
+                    database.serum2_full_settings(base_preset_id),
+                )
+        except (KeyError, sqlite3.Error):
+            pass  # fall through to the bundle
+
+    assets = resolve_synthesis_assets()
+    from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
+
+    bundle_path = DEFAULT_FACTORY_BUNDLE
+    if not Path(bundle_path).is_file():
+        raise KeyError(f"Unknown Serum 2 base preset {base_preset_id}")
+    bundle = FactoryBundle(bundle_path)
+    try:
+        preset = bundle.preset_by_id(base_preset_id)
+        settings, metadata, payload_version = bundle.settings(base_preset_id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KeyError(
+            f"Unknown Serum 2 base preset {base_preset_id}"
+        ) from exc
+
+    local_path = _factory_path_for_hash(
+        assets.factory_mapping, str(preset.content_hash)
+    )
+    if local_path is None:
+        raise KeyError(
+            f"Serum 2 base preset {base_preset_id} is not installed on this "
+            "machine; its factory preset file could not be located by content hash"
+        )
+    return local_path, {
+        "settings": settings,
+        "metadata": metadata if metadata is not None else {},
+        "payload_version": int(payload_version or 0),
+    }
+
+
+def _factory_path_for_hash(mapping_path: Path | None, content_hash: str) -> Path | None:
+    if mapping_path is None or not Path(mapping_path).is_file():
+        return None
+    try:
+        raw = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = raw.get("local_paths_by_hash", {}).get(content_hash)
+    if not value:
+        return None
+    candidate = Path(str(value))
+    return candidate.resolve() if candidate.is_file() else None
+
+
 def write_serum2_preset(
     output_path: Path,
     *,
@@ -310,16 +388,7 @@ def write_serum2_preset(
 ) -> Serum2WriteResult:
     """Write a native preset and decode it back before returning success."""
 
-    database = Database(db_path)
-    with database.connect() as connection:
-        preset_row = connection.execute(
-            "SELECT path,name FROM presets WHERE id=? AND synth='serum2'",
-            (base_preset_id,),
-        ).fetchone()
-    if preset_row is None:
-        raise KeyError(f"Unknown Serum 2 base preset {base_preset_id}")
-    base_path = Path(str(preset_row["path"])).resolve()
-    base = database.serum2_full_settings(base_preset_id)
+    base_path, base = _resolve_serum2_base(base_preset_id, db_path)
     base_graph = base["settings"]
     base_assets = asset_references(base_graph)
     output_path = Path(output_path).expanduser().resolve()
