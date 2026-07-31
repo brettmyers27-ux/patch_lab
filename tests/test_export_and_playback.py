@@ -42,6 +42,45 @@ class ClosestMatchPlayabilityTest(unittest.TestCase):
         )
 
 
+class AutoSaveAndRenameTest(unittest.TestCase):
+    """Every completed match auto-saves; the old export button renames in place.
+
+    A generated preset used to sit only in the archived match_library folder
+    until someone clicked Export Preset. Both single matches and batch files
+    now write the preset the moment the match completes, and the button that
+    used to open a save dialog now just renames the file that already exists
+    — never a second file, so there is nothing to leave as a duplicate.
+    """
+
+    def test_match_completion_auto_saves_for_both_single_and_batch(self) -> None:
+        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "_auto_save_generated_preset(archived, Path(source))",
+            source,
+            "_match_completed must auto-save regardless of whether a batch is "
+            "running, not only when self._batch_state is set",
+        )
+
+    def test_rename_is_a_filesystem_rename_not_a_new_export(self) -> None:
+        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "current_path.rename(new_path)",
+            source,
+            "renaming a saved preset must move the existing file, never write "
+            "a second one via export_runner",
+        )
+
+    def test_library_row_renames_when_already_saved(self) -> None:
+        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "self._rename_saved_preset(match_uid, Path(record.exported_preset_path))",
+            source,
+            "export_library_match must rename in place once a preset has "
+            "already been auto-saved, or the button silently creates a "
+            "second, duplicate file for every entry",
+        )
+
+
 class GeneratedPresetExportLocationTest(unittest.TestCase):
     """Generated presets default into a PatchLab folder Serum itself scans.
 

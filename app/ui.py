@@ -1726,37 +1726,87 @@ class LegacyMainWindow(QMainWindow):
             return self._default_export_folder(synth)
         return folder
 
-    def save_match_preset(self) -> None:
-        if not self._match_result or self._match_result_path is None:
+    def _rename_saved_preset(self, match_uid: str, current_path: Path) -> None:
+        """Prompt for a new name and rename an already-saved preset in place.
+
+        A plain filesystem rename in the same folder — never a new export —
+        so there is never a second, duplicate file left behind; the
+        auto-named one simply becomes the new name.
+        """
+
+        if not current_path.is_file():
+            QMessageBox.warning(
+                self,
+                "Preset not found",
+                f"The saved preset is missing from disk:\n{current_path}",
+            )
             return
-        recommendation = self._match_result.get("recommendation")
-        if not isinstance(recommendation, dict):
-            return
-        synth = str(recommendation["synth"])
-        extension = ".fxp" if synth == "serum1" else ".SerumPreset"
-        name = generated_preset_name(synth)
-        suggested = self._patchlab_export_folder(synth) / f"{name}{extension}"
-        selected, _filter = QFileDialog.getSaveFileName(
-            self,
-            "Save generated Serum preset",
-            str(suggested),
-            "Serum 1 preset (*.fxp)"
-            if synth == "serum1"
-            else "Serum 2 preset (*.SerumPreset)",
+        new_stem, accepted = QInputDialog.getText(
+            self, "Rename preset", "Preset name:", text=current_path.stem
         )
-        if not selected:
+        if not accepted:
             return
-        output = Path(selected)
-        if output.suffix.casefold() != extension.casefold():
-            output = output.with_suffix(extension)
-        self._start_preset_export(output, trigger=self.save_preset_button, label="Export Preset")
+        sanitized = sanitize_folder_name(new_stem)
+        if not sanitized:
+            QMessageBox.warning(self, "Invalid name", "Enter a non-empty, filesystem-safe name.")
+            return
+        if sanitized == current_path.stem:
+            return
+        new_path = disambiguated_preset_path(
+            current_path.parent, sanitized, current_path.suffix
+        )
+        try:
+            current_path.rename(new_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Rename failed", f"Could not rename the preset:\n{exc}")
+            return
+        Database(self._match_database_path()).set_match_exported_path(match_uid, new_path)
+        self.refresh_match_library()
+        self.append_log(f"Renamed preset to: {new_path.name}")
+        self.statusBar().showMessage(f"Preset renamed: {new_path.name}")
+
+    def save_match_preset(self) -> None:
+        """Rename the currently displayed match's already-saved preset.
+
+        Every generated patch is now auto-saved the moment a match completes,
+        so there is nothing left to export here — the button that used to
+        write a brand-new file now just renames the one that already exists.
+        """
+
+        if self._batch_state is not None:
+            QMessageBox.information(
+                self,
+                "Batch is running",
+                "Renaming is reserved for the active batch. Try again after it finishes.",
+            )
+            return
+        if self._current_match_uid is None:
+            return
+        record = Database(self._match_database_path()).get_match_library(
+            self._current_match_uid
+        )
+        if record is None or record.exported_preset_path is None:
+            if self.export_runner.running:
+                QMessageBox.information(
+                    self,
+                    "Still saving",
+                    "This preset is still being saved. Try renaming it again in a moment.",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Nothing to rename",
+                    "This match has no saved preset yet — no confident recommendation was generated.",
+                )
+            return
+        self._rename_saved_preset(self._current_match_uid, Path(record.exported_preset_path))
 
     def load_in_serum(self) -> None:
         """Write the recommendation straight into the local Serum presets folder.
 
         This never touches a live/running Serum instance — PatchLab has
         consistently avoided automating a real DAW/plugin session. This is
-        the same verified export as "Export Preset", just written directly
+        the same verified export as "Rename Preset" performs, just written
         to the detected local install folder so Serum's own browser picks
         it up next time it refreshes, instead of prompting a save dialog.
         """
@@ -1795,7 +1845,7 @@ class LegacyMainWindow(QMainWindow):
 
     def _export_completed(self, detail: dict) -> None:
         self.save_preset_button.setEnabled(True)
-        self.save_preset_button.setText("Export Preset")
+        self.save_preset_button.setText("Rename Preset")
         load_button = getattr(self, "load_in_serum_button", None)
         if load_button is not None:
             load_button.setEnabled(True)
@@ -1811,7 +1861,7 @@ class LegacyMainWindow(QMainWindow):
 
     def _export_failed(self, error: str) -> None:
         self.save_preset_button.setEnabled(True)
-        self.save_preset_button.setText("Export Preset")
+        self.save_preset_button.setText("Rename Preset")
         load_button = getattr(self, "load_in_serum_button", None)
         if load_button is not None:
             load_button.setEnabled(True)
@@ -2439,7 +2489,7 @@ class MainWindow(LegacyMainWindow):
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(6)
-        self.save_preset_button = QPushButton("Export Preset")
+        self.save_preset_button = QPushButton("Rename Preset")
         self.save_preset_button.setObjectName("compactActionButton")
         self.save_preset_button.setIcon(icon("save"))
         self.save_preset_button.clicked.connect(self.save_match_preset)
@@ -2708,13 +2758,18 @@ class MainWindow(LegacyMainWindow):
                 self.play_library_octave(uid, midi, control)
             )
             row_layout.addWidget(button)
-        export = QPushButton("Export Preset")
+        # Almost every entry already has an auto-saved preset by the time it
+        # can be clicked, so this reads "Rename Preset" in the normal case;
+        # "Export Preset" only for the rare entry that was never auto-saved.
+        export = QPushButton(
+            "Rename Preset" if record.exported_preset_path is not None else "Export Preset"
+        )
         export.setObjectName("compactActionButton")
         export.setEnabled(
             not record.no_confident_match and self._batch_state is None
         )
         if self._batch_state is not None:
-            export.setToolTip("Exports resume after the active batch finishes.")
+            export.setToolTip("Reserved for the active batch. Try again after it finishes.")
         export.clicked.connect(
             lambda _checked=False, uid=record.match_uid: self.export_library_match(uid)
         )
@@ -2899,15 +2954,26 @@ class MainWindow(LegacyMainWindow):
         self.refresh_match_library()
 
     def export_library_match(self, match_uid: str) -> None:
+        """Rename a library entry's saved preset, or export it if it never got one.
+
+        Every match auto-saves its preset the moment it completes, so the
+        normal case here is a rename. The dialog-based export only remains as
+        a fallback for entries archived before auto-save existed, or where it
+        genuinely failed — there is still no confident recommendation to save.
+        """
+
         if self._batch_state is not None:
             QMessageBox.information(
                 self,
                 "Batch is running",
-                "Verified exports are reserved for the active batch. Try again after it finishes.",
+                "Exports are reserved for the active batch. Try again after it finishes.",
             )
             return
         record = Database(self._match_database_path()).get_match_library(match_uid)
         if record is None:
+            return
+        if record.exported_preset_path is not None:
+            self._rename_saved_preset(match_uid, Path(record.exported_preset_path))
             return
         _source, result_path = resolved_record_paths(record, self._match_library_root())
         extension = ".fxp" if record.recommendation_synth == "serum1" else ".SerumPreset"
@@ -2916,7 +2982,7 @@ class MainWindow(LegacyMainWindow):
             / f"{generated_preset_name(record.recommendation_synth)}{extension}"
         )
         selected, _ = QFileDialog.getSaveFileName(
-            self, "Export verified preset", str(suggested),
+            self, "Export preset (never auto-saved)", str(suggested),
             "Serum preset (*.fxp *.SerumPreset)",
         )
         if not selected:
@@ -3015,25 +3081,49 @@ class MainWindow(LegacyMainWindow):
         self._queue_recommendation_prerender(
             archived.result_json_path, self._match_result
         )
-        if self._batch_state is None:
-            return
-        self._batch_state["current_uid"] = archived.record.match_uid
-        recommendation = self._match_result.get("recommendation")
+        if self._batch_state is not None:
+            self._batch_state["current_uid"] = archived.record.match_uid
+        self._auto_save_generated_preset(archived, Path(source))
+
+    def _auto_save_generated_preset(self, archived, source: Path) -> None:
+        """Verified-export every generated patch straight into Serum's folder.
+
+        Single matches and batch files share this path so the two never
+        diverge. A batch's completion/failure bookkeeping (advancing to the
+        next file) is driven from here via _batch_state["phase"]; a single
+        match instead tags the export with _export_context_uid, which
+        _export_completed/_export_failed already handle silently — no dialog,
+        no new file, just the DB's exported_preset_path getting recorded.
+        """
+
+        recommendation = self._match_result.get("recommendation") if self._match_result else None
         if not isinstance(recommendation, dict):
-            self.append_log(
-                f"Batch retained no-confident match: {archived.record.source_name}; no preset was exported"
-            )
-            self._batch_file_completed()
+            if self._batch_state is not None:
+                self.append_log(
+                    f"Batch retained no-confident match: {archived.record.source_name}; no preset was exported"
+                )
+                self._batch_file_completed()
             return
         extension = ".fxp" if recommendation["synth"] == "serum1" else ".SerumPreset"
-        source_stem = sanitize_folder_name(Path(source).stem) or "Sound"
-        output = disambiguated_preset_path(
-            self._batch_state["export_folder"],
-            f"PatchLab - {source_stem}",
-            extension,
+        source_stem = sanitize_folder_name(source.stem) or "Sound"
+        folder = (
+            self._batch_state["export_folder"]
+            if self._batch_state is not None
+            else self._patchlab_export_folder(str(recommendation["synth"]))
         )
-        self._batch_state["phase"] = "export"
-        self.export_runner.start(archived.result_json_path, output)
+        output = disambiguated_preset_path(folder, f"PatchLab - {source_stem}", extension)
+        if self._batch_state is not None:
+            self._batch_state["phase"] = "export"
+        else:
+            self._export_context_uid = archived.record.match_uid
+        try:
+            self.export_runner.start(archived.result_json_path, output)
+        except RuntimeError as exc:
+            self.append_log(f"Could not auto-save generated preset: {exc}")
+            if self._batch_state is not None:
+                self._batch_file_failed(f"auto-save failed: {exc}")
+            else:
+                self._export_context_uid = None
 
     def _match_failed(self, error: str) -> None:
         if self._batch_state is not None:
