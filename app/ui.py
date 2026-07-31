@@ -92,6 +92,7 @@ from core.match_library import (
 )
 from core.platform_env import ENV
 from core.preview_cache import (
+    PREVIEW_NOTES,
     preview_cache_path,
     recommendation_cache_key,
     unmodified_recommendation_basis_index,
@@ -326,6 +327,7 @@ class LegacyMainWindow(QMainWindow):
         ] = {}
         self._preview_inflight: dict[tuple[str, int], str] = {}
         self._preview_request_targets: dict[str, tuple[str, int]] = {}
+        self._preview_silent_requests: set[str] = set()
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
         self._workflow_activities: dict[str, WorkflowActivity] = {}
@@ -1502,6 +1504,86 @@ class LegacyMainWindow(QMainWindow):
             button=button,
         )
 
+    def prerender_recommendation_octaves(
+        self,
+        result_path: Path,
+        *,
+        cache_key: str,
+        synth: str,
+        preview_source_path: str | Path | None = None,
+    ) -> int:
+        """Queue every octave of a generated patch so none waits on a click.
+
+        Returns the number of renders actually queued. Already-cached octaves
+        are skipped, so re-running the same sound costs nothing and a batch
+        only pays for genuinely new audio. These are queued silently: unlike a
+        clicked octave, a finished pre-render must not start playing audio at
+        the user, which would be a barrage during a batch.
+        """
+
+        queued = 0
+        for note in PREVIEW_NOTES:
+            try:
+                cached = preview_cache_path(self._preview_cache_root(), cache_key, note)
+            except ValueError:
+                continue
+            if cached.is_file():
+                continue
+            if (cache_key, note) in self._preview_inflight:
+                continue
+            try:
+                if preview_source_path:
+                    source = Path(preview_source_path).expanduser()
+                    if not source.is_absolute():
+                        source = resolve_result_path(result_path, source)
+                    request_id = self.preview_runner.start(
+                        source,
+                        synth=synth,
+                        midi_note=note,
+                        content_hash=cache_key,
+                        output_root=self._preview_cache_root(),
+                    )
+                else:
+                    request_id = self.preview_runner.start_recommendation(
+                        result_path,
+                        note,
+                        output_root=self._preview_cache_root(),
+                        cache_key=cache_key,
+                    )
+            except Exception as exc:
+                self.append_log(f"Could not queue C{1 + (note - 24) // 12} preview: {exc}")
+                continue
+            self._preview_requests[request_id] = [(None, "", note)]
+            self._preview_inflight[(cache_key, note)] = request_id
+            self._preview_request_targets[request_id] = (cache_key, note)
+            self._preview_silent_requests.add(request_id)
+            queued += 1
+        if queued:
+            self.append_log(f"Pre-rendering {queued} octave preview(s) for this patch")
+        return queued
+
+    def _queue_recommendation_prerender(
+        self, result_path: Path, result: dict
+    ) -> None:
+        """Pre-render the generated patch's octaves for a completed match."""
+
+        recommendation = result.get("recommendation")
+        if not isinstance(recommendation, dict):
+            return  # no-confident-match results have nothing to render
+        try:
+            cache_key = recommendation_cache_key(result_path, recommendation)
+        except Exception as exc:
+            self.append_log(f"Could not derive a preview cache key: {exc}")
+            return
+        if not cache_key:
+            return
+        self.prerender_recommendation_octaves(
+            result_path,
+            cache_key=cache_key,
+            synth=str(recommendation.get("synth") or "serum2"),
+            preview_source_path=recommendation.get("preview_source_path"),
+        )
+
     def _preview_request_completed(self, request_id: str, path: str) -> None:
         requests = self._preview_requests.pop(
             request_id, [(None, "", 60)]
@@ -1509,11 +1591,16 @@ class LegacyMainWindow(QMainWindow):
         target = self._preview_request_targets.pop(request_id, None)
         if target is not None:
             self._preview_inflight.pop(target, None)
+        silent = request_id in self._preview_silent_requests
+        self._preview_silent_requests.discard(request_id)
         note = requests[0][2]
         for button, original_text, _note in requests:
             if button is not None:
                 button.setText(original_text)
                 button.setEnabled(True)
+        if silent and not any(button is not None for button, _text, _n in requests):
+            # A pre-render nobody is waiting on: cache it and stay quiet.
+            return
         self.statusBar().showMessage(
             f"C{1 + (note - 24) // 12} preview ready"
         )
@@ -1526,10 +1613,17 @@ class LegacyMainWindow(QMainWindow):
         target = self._preview_request_targets.pop(request_id, None)
         if target is not None:
             self._preview_inflight.pop(target, None)
+        was_silent = request_id in self._preview_silent_requests
+        self._preview_silent_requests.discard(request_id)
         for button, original_text, _note in requests:
             if button is not None:
                 button.setText(original_text)
                 button.setEnabled(True)
+        if was_silent and not any(button is not None for button, _t, _n in requests):
+            # A background pre-render failing must not hijack the status bar or
+            # surface an error the user never asked for, especially mid-batch.
+            self.append_log(f"Octave pre-render skipped: {error}")
+            return
         self._preview_failed(error)
 
     def _preview_completed(self, path: str) -> None:
@@ -1837,6 +1931,7 @@ class MainWindow(LegacyMainWindow):
         ] = {}
         self._preview_inflight: dict[tuple[str, int], str] = {}
         self._preview_request_targets: dict[str, tuple[str, int]] = {}
+        self._preview_silent_requests: set[str] = set()
         self._export_context_uid: str | None = None
         self._batch_state: dict | None = None
         self._workflow_activities: dict[str, WorkflowActivity] = {}
@@ -2914,6 +3009,12 @@ class MainWindow(LegacyMainWindow):
             archived.result_json_path.read_text(encoding="utf-8")
         )
         self._current_match_uid = archived.record.match_uid
+        # Every octave of the generated patch is queued now, so the whole range
+        # is playable without waiting on a click. Single matches and batch
+        # files both come through here, which keeps the two consistent.
+        self._queue_recommendation_prerender(
+            archived.result_json_path, self._match_result
+        )
         if self._batch_state is None:
             return
         self._batch_state["current_uid"] = archived.record.match_uid
