@@ -1564,20 +1564,20 @@ class LegacyMainWindow(QMainWindow):
 
     def _queue_recommendation_prerender(
         self, result_path: Path, result: dict
-    ) -> None:
-        """Pre-render the generated patch's octaves for a completed match."""
+    ) -> int:
+        """Pre-render the generated patch's octaves; returns renders queued."""
 
         recommendation = result.get("recommendation")
         if not isinstance(recommendation, dict):
-            return  # no-confident-match results have nothing to render
+            return 0  # no-confident-match results have nothing to render
         try:
             cache_key = recommendation_cache_key(result_path, recommendation)
         except Exception as exc:
             self.append_log(f"Could not derive a preview cache key: {exc}")
-            return
+            return 0
         if not cache_key:
-            return
-        self.prerender_recommendation_octaves(
+            return 0
+        return self.prerender_recommendation_octaves(
             result_path,
             cache_key=cache_key,
             synth=str(recommendation.get("synth") or "serum2"),
@@ -3078,9 +3078,20 @@ class MainWindow(LegacyMainWindow):
         # Every octave of the generated patch is queued now, so the whole range
         # is playable without waiting on a click. Single matches and batch
         # files both come through here, which keeps the two consistent.
-        self._queue_recommendation_prerender(
-            archived.result_json_path, self._match_result
-        )
+        if self._batch_state is None:
+            self._queue_recommendation_prerender(
+                archived.result_json_path, self._match_result
+            )
+        else:
+            # Defer during a batch. Queueing seven CLAP-loading render
+            # subprocesses per file put ~360 of them in flight against the
+            # batch's own match and export workers, and the export worker's
+            # bounded startup handshake then timed out — reporting healthy
+            # matches as failures. The batch's job is matches and presets;
+            # octaves are rendered once it is done and the machine is free.
+            self._batch_state.setdefault("prerender", []).append(
+                archived.result_json_path
+            )
         if self._batch_state is not None:
             self._batch_state["current_uid"] = archived.record.match_uid
         self._auto_save_generated_preset(archived, Path(source))
@@ -3396,9 +3407,34 @@ class MainWindow(LegacyMainWindow):
         ):
             self.save_preset_button.setEnabled(True)
             self.load_in_serum_button.setEnabled(True)
+        deferred = list(state.get("prerender", []))
         self._batch_state = None
+        self._queue_deferred_prerenders(deferred)
         self.refresh_match_library()
         self.nav_tabs.setCurrentIndex(1)
+
+    def _queue_deferred_prerenders(self, result_paths: list[Path]) -> None:
+        """Pre-render octaves for a finished batch, now that nothing competes.
+
+        Cleared _batch_state before this runs, so these queue exactly like a
+        single match's would. Anything already cached is skipped, so a resumed
+        or repeated batch costs nothing here.
+        """
+
+        if not result_paths:
+            return
+        queued = 0
+        for result_path in result_paths:
+            try:
+                result = json.loads(Path(result_path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            queued += self._queue_recommendation_prerender(result_path, result) or 0
+        if queued:
+            self.append_log(
+                f"Batch finished — pre-rendering octaves for {len(result_paths)} "
+                "generated patch(es) in the background"
+            )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if self._batch_state is not None:

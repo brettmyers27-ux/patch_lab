@@ -8,7 +8,13 @@ from dataclasses import dataclass
 
 WORKER_FLAG = "--patchlab-worker"
 WORKER_READY_PREFIX = "PATCHLAB_WORKER_READY="
-DEFAULT_STARTUP_TIMEOUT_MS = 20_000
+# The handshake only proves a worker reached its dispatcher, not that it
+# finished loading models — but merely *spawning* a process is slow on a
+# machine already saturated by render workers and multi-gigabyte model loads.
+# At 20s a healthy export was killed mid-batch and then reported as a failed
+# match. This is deliberately generous: the timeout exists to turn a genuinely
+# hung worker into a clear error, not to police startup latency under load.
+DEFAULT_STARTUP_TIMEOUT_MS = 90_000
 
 
 @dataclass(frozen=True)
