@@ -1,0 +1,79 @@
+{
+  "bam": {
+    "completed": 99,
+    "detail_dir": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\stage2\\baseline\\bam",
+    "elapsed_s": 1.7350000000001273,
+    "errors": [],
+    "evaluations": 28809,
+    "failed": 0,
+    "mean_clap_similarity": 0.770395316559859,
+    "meaningfully_modified": 99,
+    "median_clap_similarity": 0.7749042510986328,
+    "min_clap_similarity": 0.46062740683555603,
+    "requested": 99
+  },
+  "benchmark_population": {
+    "policy": "root-level real audio; AppleDouble, Ableton .asd, and metadata excluded",
+    "user_authorized_mixed_formats": true
+  },
+  "completed_at": "2026-08-02T23:39:53.441354+00:00",
+  "elapsed_s": 172.63999999999987,
+  "library_retrieval": {
+    "completed": 200,
+    "requested": 200,
+    "retrieval_at_1": 0.56,
+    "retrieval_at_5": 0.77,
+    "seed": 20260802
+  },
+  "rhythm_invariance": {
+    "base_presets": 50,
+    "by_variant": {
+      "codec_mp3_96k": {
+        "count": 50,
+        "retrieval_at_1": 0.42,
+        "retrieval_at_5": 0.76
+      },
+      "gate_1_16": {
+        "count": 50,
+        "retrieval_at_1": 0,
+        "retrieval_at_5": 0.08
+      },
+      "gate_1_4": {
+        "count": 50,
+        "retrieval_at_1": 0.14,
+        "retrieval_at_5": 0.38
+      },
+      "gate_1_8": {
+        "count": 50,
+        "retrieval_at_1": 0.16,
+        "retrieval_at_5": 0.28
+      },
+      "loudness": {
+        "count": 50,
+        "retrieval_at_1": 0.5,
+        "retrieval_at_5": 0.8
+      },
+      "pitch": {
+        "count": 50,
+        "retrieval_at_1": 0.32,
+        "retrieval_at_5": 0.72
+      }
+    },
+    "retrieval_at_1": 0.25666666666666665,
+    "retrieval_at_5": 0.5033333333333333,
+    "seed": 20260802,
+    "variants": 300
+  },
+  "schema_version": 1,
+  "seed": 20260802,
+  "stack": {
+    "clap_checkpoint": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\models\\music_audioset_epoch_15_esc_90.14.pt",
+    "factory_bundle": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\dist\\factory_bundle.sqlite",
+    "feature_dir": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\features",
+    "library_db": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\models\\patchlab-synthesis-catalog.sqlite",
+    "name": "baseline"
+  },
+  "stage": 2,
+  "started_at": "2026-08-02T23:37:00.802525+00:00",
+  "status": "complete"
+}

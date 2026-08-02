@@ -165,3 +165,63 @@ def test_artifact_preflight_names_unreachable_artifact_before_clap(
     assert "large public CLAP download has not started" in message
     assert "completed data is preserved" in message
     assert requests == install_support.MAX_NETWORK_ATTEMPTS
+
+
+def test_legacy_tar_artifact_manifest_downloads_beside_target_and_extracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_name = "serum2_render_states.tar.gz"
+    destination = "data/models"
+    downloaded_to: list[Path] = []
+    extracted_to: list[Path] = []
+
+    monkeypatch.setattr(
+        install_support,
+        "_artifact_manifest",
+        lambda _relay_url: (
+            "token",
+            [
+                {
+                    "name": archive_name,
+                    "size": 123,
+                    "sha256": "a" * 64,
+                    "destination": destination,
+                    # The production relay's legacy manifest omits ``unpack``.
+                }
+            ],
+        ),
+    )
+
+    def fake_download(
+        _url: str,
+        path: Path,
+        *,
+        size: int,
+        sha256: str,
+        token: str | None = None,
+    ) -> str:
+        assert size == 123
+        assert sha256 == "a" * 64
+        assert token == "token"
+        downloaded_to.append(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"archive")
+        return "downloaded and verified"
+
+    def fake_extract(archive: Path, target: Path) -> int:
+        assert archive == downloaded_to[0]
+        extracted_to.append(target)
+        return 710
+
+    monkeypatch.setattr(install_support, "_download", fake_download)
+    monkeypatch.setattr(install_support, "_extract_tar_gz", fake_extract)
+
+    install_support._artifacts(
+        argparse.Namespace(relay_url="https://relay.invalid", install_root=tmp_path)
+    )
+
+    assert downloaded_to == [
+        tmp_path / "data" / "models" / archive_name
+    ]
+    assert extracted_to == [tmp_path / "data" / "models"]
+    assert not downloaded_to[0].exists()

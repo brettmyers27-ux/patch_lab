@@ -432,6 +432,13 @@ def _artifacts(args: argparse.Namespace) -> None:
         size = int(row["size"])
         sha256 = str(row["sha256"])
         unpack = str(row.get("unpack") or "")
+        # Older relay manifests identify archive artifacts by their filename and
+        # directory destination but omit the newer explicit ``unpack`` field.
+        # Treat a .tar.gz artifact aimed at a directory as the legacy spelling
+        # of extract-tar-gz.  Without this compatibility path the downloader
+        # tries to checksum the existing destination directory as a file.
+        if not unpack and name.casefold().endswith(".tar.gz"):
+            unpack = "extract-tar-gz"
         relative = Path(str(row["destination"]))
         # An unpacked artifact names the directory it expands into; a plain one
         # names the file itself. Download archives beside their target so the

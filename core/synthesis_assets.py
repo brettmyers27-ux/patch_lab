@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,7 +92,9 @@ def _library_database_ready(path: Path) -> bool:
     if not path.is_file() or path.stat().st_size == 0:
         return False
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        with closing(
+            sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        ) as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM presets"
             ).fetchone()

@@ -14,6 +14,7 @@ import re
 import sqlite3
 import sys
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -118,8 +119,9 @@ class SynthesisReadinessTest(EnvironmentGuard):
     def test_library_database_requires_at_least_one_preset(self) -> None:
         empty = Path(self.enterContext_tempdir())
         database = empty / "library.db"
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             connection.execute("CREATE TABLE presets (id INTEGER PRIMARY KEY)")
+            connection.commit()
         os.environ["PATCHLAB_LIBRARY_DB"] = str(database)
         self.assertFalse(synthesis_readiness("serum2").available)
 

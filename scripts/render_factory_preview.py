@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import soundfile as sf
@@ -23,6 +25,21 @@ from core.preset_scan import sha1_file
 from core.render import SAMPLE_RATE, _render_audio, _trim_tail
 from core.serum2_preset import parse_serum2_preset
 from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstpreset
+from core.synthesis_assets import SynthesisAssets, resolve_synthesis_assets
+
+
+def _catalog_render_state(
+    content_hash: str, assets: SynthesisAssets | None = None
+) -> Path | None:
+    """Resolve a shipped Serum 2 state by stable content hash, not bundle ID."""
+
+    resolved = assets or resolve_synthesis_assets()
+    with closing(sqlite3.connect(resolved.library_db)) as connection:
+        row = connection.execute(
+            "SELECT id FROM presets WHERE synth='serum2' AND content_hash=?",
+            (content_hash,),
+        ).fetchone()
+    return resolved.find_render_state(int(row[0])) if row is not None else None
 
 
 def render_preview(
@@ -54,21 +71,31 @@ def render_preview(
         if processor.load_preset(str(source)) is False:
             raise RuntimeError("Serum 1 rejected the local factory preset")
     else:
-        from pedalboard import load_plugin
-
-        live = load_plugin(str(candidate.path), plugin_name="Serum 2")
-        template = decode_host_template(bytes(live.preset_data))
-        state, _partition = reconstruct_vstpreset(
-            parse_serum2_preset(source), template
-        )
-        with tempfile.TemporaryDirectory(
-            prefix="patchlab-factory-preview-"
-        ) as temporary:
-            state_path = Path(temporary) / "state.vstpreset"
-            state_path.write_bytes(state)
-            if processor.load_vst3_preset(str(state_path)) is False:
-                raise RuntimeError("Serum 2 rejected the reconstructed factory state")
+        shipped_state = _catalog_render_state(content_hash)
+        if shipped_state is not None:
+            if processor.load_vst3_preset(str(shipped_state.resolve())) is False:
+                raise RuntimeError("Serum 2 rejected the shipped factory state")
             audio = _trim_tail(_render_audio(engine, processor, midi_note))
+        else:
+            # User-linked presets do not have a shipped state. Retain the
+            # reconstruction path for them, but factory previews and the
+            # installer parity gate use the same verified DawDreamer state as
+            # production synthesis and do not depend on Pedalboard VST3 scan.
+            from pedalboard import load_plugin
+
+            live = load_plugin(str(candidate.path), plugin_name="Serum 2")
+            template = decode_host_template(bytes(live.preset_data))
+            state, _partition = reconstruct_vstpreset(
+                parse_serum2_preset(source), template
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="patchlab-factory-preview-"
+            ) as temporary:
+                state_path = Path(temporary) / "state.vstpreset"
+                state_path.write_bytes(state)
+                if processor.load_vst3_preset(str(state_path)) is False:
+                    raise RuntimeError("Serum 2 rejected the reconstructed factory state")
+                audio = _trim_tail(_render_audio(engine, processor, midi_note))
     if synth == "serum1":
         audio = _trim_tail(_render_audio(engine, processor, midi_note))
     output.parent.mkdir(parents=True, exist_ok=True)
