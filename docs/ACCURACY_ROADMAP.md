@@ -6,7 +6,7 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 
 ---
 
-## 1. Project facts (verified as of 2026-07-27)
+## 1. Project facts (verified as of 2026-08-03)
 
 - Repo: `~/Documents/PatchLab/soundmatch`, venv at `.venv`, run app via `.venv/bin/python app/main.py`.
 - Rendering: headless VST hosting via DawDreamer (+ Pedalboard for state work). **Never**
@@ -26,12 +26,13 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 - Serum 2 preset files are fully *decoded* (XferJson/zstd/CBOR, `core/serum2_preset.py`) —
   we can read every setting including the mod matrix; we just can't push all of it through
   the automation surface.
-- Accepted accuracy ladder (honest numbers): ~0.99 retrieval when the answer is in the
-  library; ~0.87 lightly-disguised library sounds; ~0.82 forced rebuild without the
-  original preset; **~0.68 average on the user's real BAM production samples** (the number
-  that matters). Benchmark audio pairs live under
-  `data/evaluations/real_samples/{adaptive,baseline}/auditions/` as
-  `{sample}_target.wav` / `{sample}_result.wav`.
+- Current Windows Stage 2 ladder (99 user-authorized BAM files): pinned production stack
+  BAM mean **0.770395**, median 0.774904, minimum 0.460627; factory retrieval@1 0.560
+  and @5 0.770; rhythm/codec/pitch/loudness invariance retrieval@1 0.256667 and @5
+  0.503333. The experimental retrained-predictor stack scored BAM mean 0.771230, but
+  factory retrieval@1 fell to 0.555 and invariance@1 did not move, so it was not adopted.
+  Historical macOS figures (~0.99 in-library, ~0.87 lightly disguised, ~0.82 forced
+  rebuild, ~0.68 BAM) remain historical rather than current acceptance claims.
 - UI: PySide6, 16:9 proportionally-scaled canvas (QGraphicsScene at 1920×1080 design size).
   UI gates: `scripts/verify_visual_redesign.py` and `scripts/verify_milestone4_ui.py` must
   keep passing after any change. (`scripts/verify_milestone7_ui_fixes.py` is stale/superseded.)
@@ -106,11 +107,15 @@ Nothing may be silently dropped.
 - **Stage 1 — Smarter ears** (Mac only, no new hardware): implements A1–A8, B9–B16,
   C17–C20, D21, E23–E25. Prompt: `docs/codex-stage1-smarter-ears.md`. Expected: the
   largest single jump on the real-sample benchmark; makes every later stage measurable.
-- **Stage 2 — Smarter brain** (user's RTX 5070 PC): fine-tune CLAP on synth-domain audio
-  with augmentations that *teach* the invariances (gated/pitched/FX'd copies of the same
-  patch are positives); scale synthetic training data 10–25× and retrain the prediction
-  model. Stage 1's analysis front-end supplies the augmentation recipes; Stage 1's gates
-  measure the improvement.
+- **Stage 2 — Smarter brain** (completed on the user's RTX 5070 PC, 2026-08-03): built
+  30,000 base clips and 390,000 prediction pairs, fine-tuned CLAP with synth invariance
+  positives, and retrained both predictors. The fine-tuned encoder passed its 115-preset
+  held-out gate (augmented retrieval@1 0.486957 → 0.608696; clean 0.530435 →
+  0.634783), but 4,412 missing Serum 1 source presets made a complete atomic index rebuild
+  impossible. The pinned-encoder/retrained-predictor partial stack then failed the final
+  adoption gate (no material BAM gain, retrieval@1 down 0.005, invariance unchanged).
+  No Stage 2 model artifact is adopted; the reusable data, fine-tuning, rebuild-preflight,
+  predictor-training, and deterministic A/B pipelines are the accepted deliverable.
 - **Stage 3 — Our own algorithm**: (a) neural Serum surrogate (params → predicted audio
   embedding) enabling millions of virtual experiments per minute with real-synth
   verification of winners (research-frontier: cf. Sound2Synth/DiffMoog); (b) **layer

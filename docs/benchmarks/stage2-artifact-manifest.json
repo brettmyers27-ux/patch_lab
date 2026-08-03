@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "stage": 2,
+  "decision": "No Stage 2 model or index artifact passed the complete end-to-end adoption gate.",
+  "adopted_artifacts": [],
+  "experimental_artifacts": [
+    {
+      "filename": "patchlab_clap_ft_v1.pt",
+      "byte_size": 800729534,
+      "sha256": "fbaf3a305704890450ec4604fe9a1ab806515b68827ec44a73f500c06c042baf",
+      "intended_install_destination_if_later_adopted": "data/models/patchlab_clap_ft_v1.pt",
+      "status": "held-out gate passed; not adopted because a complete embedding-world rebuild was impossible with 4,412 Serum 1 source presets absent"
+    },
+    {
+      "filename": "param_model_stage2.pt",
+      "byte_size": 57152933,
+      "sha256": "5421c4ea66e7801ec9c0e1043890bb228c8d508b4ed73f84721dceb3dd9ac4c5",
+      "intended_install_destination_if_later_adopted": "data/models/param_model_stage2.pt",
+      "status": "not adopted; partial-stack A/B did not materially improve BAM and factory retrieval@1 declined"
+    },
+    {
+      "filename": "delta_param_model_stage2.pt",
+      "byte_size": 92130457,
+      "sha256": "e0044256dde084bb7a243d0d416f80a9c55a0e8abdc7c2170208eb7c2a521888",
+      "intended_install_destination_if_later_adopted": "data/models/delta_param_model_stage2.pt",
+      "status": "not adopted; partial-stack A/B did not materially improve BAM and factory retrieval@1 declined"
+    }
+  ],
+  "relay_action": "none",
+  "notes": "The Mac must not publish these experimental artifacts. Reconsider only after the missing Serum 1 source library permits one atomic encoder/index rebuild and the same benchmarks pass."
+}

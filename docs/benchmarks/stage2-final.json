@@ -1,0 +1,81 @@
+{
+  "bam": {
+    "completed": 99,
+    "detail_dir": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\stage2\\stage2-stack\\bam",
+    "elapsed_s": 848.3119999999981,
+    "errors": [],
+    "evaluations": 28809,
+    "failed": 0,
+    "mean_clap_similarity": 0.7712298258386477,
+    "meaningfully_modified": 99,
+    "median_clap_similarity": 0.7799985408782959,
+    "min_clap_similarity": 0.5356370210647583,
+    "requested": 99
+  },
+  "benchmark_population": {
+    "policy": "root-level real audio; AppleDouble, Ableton .asd, and metadata excluded",
+    "user_authorized_mixed_formats": true
+  },
+  "completed_at": "2026-08-03T11:16:56.414052+00:00",
+  "elapsed_s": 987.5619999999981,
+  "library_retrieval": {
+    "completed": 200,
+    "requested": 200,
+    "retrieval_at_1": 0.555,
+    "retrieval_at_5": 0.76,
+    "seed": 20260802
+  },
+  "rhythm_invariance": {
+    "base_presets": 50,
+    "by_variant": {
+      "codec_mp3_96k": {
+        "count": 50,
+        "retrieval_at_1": 0.42,
+        "retrieval_at_5": 0.76
+      },
+      "gate_1_16": {
+        "count": 50,
+        "retrieval_at_1": 0,
+        "retrieval_at_5": 0.08
+      },
+      "gate_1_4": {
+        "count": 50,
+        "retrieval_at_1": 0.14,
+        "retrieval_at_5": 0.38
+      },
+      "gate_1_8": {
+        "count": 50,
+        "retrieval_at_1": 0.16,
+        "retrieval_at_5": 0.28
+      },
+      "loudness": {
+        "count": 50,
+        "retrieval_at_1": 0.5,
+        "retrieval_at_5": 0.8
+      },
+      "pitch": {
+        "count": 50,
+        "retrieval_at_1": 0.32,
+        "retrieval_at_5": 0.72
+      }
+    },
+    "retrieval_at_1": 0.25666666666666665,
+    "retrieval_at_5": 0.5033333333333333,
+    "seed": 20260802,
+    "variants": 300
+  },
+  "schema_version": 1,
+  "seed": 20260802,
+  "stack": {
+    "clap_checkpoint": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\models\\music_audioset_epoch_15_esc_90.14.pt",
+    "delta_model": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\stage2\\artifacts-v2\\delta_param_model_stage2.pt",
+    "factory_bundle": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\dist\\factory_bundle.sqlite",
+    "feature_dir": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\features",
+    "library_db": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\models\\patchlab-synthesis-catalog.sqlite",
+    "name": "stage2-predictors-pinned-encoder",
+    "parameter_model": "C:\\Users\\a\\Documents\\PatchLab\\soundmatch\\data\\stage2\\artifacts-v2\\param_model_stage2.pt"
+  },
+  "stage": 2,
+  "started_at": "2026-08-03T11:00:28.846052+00:00",
+  "status": "complete"
+}
