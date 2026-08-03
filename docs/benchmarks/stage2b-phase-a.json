@@ -1,0 +1,34 @@
+{
+  "phase": "Stage 2B Phase A",
+  "preset_package": {
+    "source": "D:/PatchLab-Stage2-Presets",
+    "internal_destination": "E:/PatchLab-Stage2-Presets",
+    "files": 5601,
+    "bytes": 1839882180,
+    "manifest_presets": 5600,
+    "manifest_missing_preset_ids": 0
+  },
+  "mapping": {
+    "path": "C:/Users/a/AppData/Local/Patch Lab/preset-paths.json",
+    "resolved": 5600,
+    "missing": 0,
+    "local_factory_entries_preferred": 1083
+  },
+  "render_proof": {
+    "sample_size": 25,
+    "population": "previously missing Serum 1 presets",
+    "seed": 20260803,
+    "midi_note": 60,
+    "duration_seconds": 4.0,
+    "failures": 0
+  },
+  "complete_world_preflight": {
+    "required_presets": 5579,
+    "available_presets": 5579,
+    "missing_presets": 0,
+    "serum1_available": 4869,
+    "serum2_available": 710,
+    "required_note_rows": 39053
+  },
+  "resolver_fix": "The Stage 2B transferred-preset map is treated as an input. Rebuild preflight no longer passes it as the factory scanner output path, which previously overwrote its transferred entries."
+}

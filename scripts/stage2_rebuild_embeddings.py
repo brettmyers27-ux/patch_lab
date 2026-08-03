@@ -49,7 +49,20 @@ def renderability_inventory(
     preset_ids: Sequence[int], synths: Sequence[int], *, library_db: Path
 ) -> dict[str, Any]:
     assets = resolve_synthesis_assets()
-    verification = verify_local_factory_install(mapping_path=assets.factory_mapping)
+    # ``factory_mapping`` is an input to the render worker.  It may be the
+    # Stage 2B transferred-preset map, so never pass it as
+    # ``verify_local_factory_install(mapping_path=...)``: that argument is an
+    # output path and would overwrite the map with a scanner-only result.
+    verification = verify_local_factory_install()
+    local_paths = dict(verification.local_paths_by_hash)
+    if assets.factory_mapping is not None and Path(assets.factory_mapping).is_file():
+        try:
+            payload = json.loads(Path(assets.factory_mapping).read_text(encoding="utf-8"))
+            for content_hash, local_path in payload.get("local_paths_by_hash", {}).items():
+                if Path(str(local_path)).is_file():
+                    local_paths[str(content_hash)] = str(local_path)
+        except (OSError, ValueError, TypeError):
+            pass
     with closing(sqlite3.connect(library_db)) as connection:
         catalog = {
             int(preset_id): (str(path or ""), str(content_hash or ""))
@@ -73,7 +86,7 @@ def renderability_inventory(
             reason = "not present in synthesis catalog"
         elif code == 1:
             stored_path, content_hash = row
-            local = verification.local_paths_by_hash.get(content_hash, "")
+            local = local_paths.get(content_hash, "")
             reason = "" if Path(stored_path).is_file() or (local and Path(local).is_file()) else "Serum 1 preset file absent on this PC"
         else:
             reason = "" if assets.find_render_state(preset_id) is not None else "Serum 2 render-state template absent"
