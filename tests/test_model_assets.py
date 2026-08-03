@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 from core.build_info import assert_packaged_commit, current_build_info
 from core.model_assets import (
@@ -15,6 +16,7 @@ from core.model_assets import (
     configure_model_environment,
     validate_model_assets,
 )
+import core.model_assets as model_assets
 
 
 def _populate_assets(cache: Path, checkpoint: Path) -> None:
@@ -68,6 +70,37 @@ def test_missing_assets_error_is_actionable(
     assert "install.sh" in message
     assert "install.ps1" in message
     assert "scripts/cache_clap.py" in message
+
+
+def test_smaller_authenticated_finetuned_checkpoint_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    checkpoint = tmp_path / "patchlab_clap_ft_v1.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "state_dict": {
+                "audio_branch.fixture": torch.ones(1),
+                "audio_projection.fixture": torch.ones(1),
+            },
+            "patchlab_metadata": {"format": "patchlab_clap_ft_v1"},
+        },
+        checkpoint,
+    )
+    for model_name, filenames in TOKENIZER_REQUIREMENTS.items():
+        snapshot = cache / "transformers" / model_name / "snapshots" / "fixture"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            (snapshot / filename).write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(model_assets, "MIN_FINETUNED_CHECKPOINT_BYTES", 0)
+    monkeypatch.setenv("PATCHLAB_MODEL_CACHE", str(cache))
+    monkeypatch.setenv("PATCHLAB_CLAP_CHECKPOINT", str(checkpoint))
+
+    assets = validate_model_assets()
+
+    assert assets.checkpoint == checkpoint.resolve()
 
 
 def test_offline_default_allows_explicit_diagnostic_override(

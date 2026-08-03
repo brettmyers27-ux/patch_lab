@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -43,14 +46,134 @@ def _relative(synth: str, path: Path) -> str:
     raise ValueError(f"{path} is not under a {synth} factory root")
 
 
-def main() -> int:
-    output = DEFAULT_FACTORY_BUNDLE
+def _reembed_existing_bundle(
+    *,
+    source: Path,
+    output: Path,
+    feature_dir: Path,
+    catalog: Path,
+    report_path: Path,
+) -> int:
+    """Atomically copy bundle metadata/targets and replace every embedding row."""
+
+    manifest = np.load(feature_dir / "similarity_manifest.npz")
+    preset_index = np.asarray(np.load(feature_dir / "preset_index.npy"), dtype=np.float32)
+    note_index = np.asarray(np.load(feature_dir / "note_index.npy", mmap_mode="r"), dtype=np.float32)
+    preset_rows = {int(value): row for row, value in enumerate(manifest["preset_ids"])}
+    note_rows: dict[int, list[int]] = {}
+    for row, preset_id in enumerate(manifest["note_preset_ids"]):
+        note_rows.setdefault(int(preset_id), []).append(row)
+    with closing(sqlite3.connect(catalog)) as catalog_connection:
+        catalog_id_by_hash = {
+            str(content_hash): int(preset_id)
+            for preset_id, content_hash in catalog_connection.execute(
+                "SELECT id,content_hash FROM presets"
+            )
+        }
     output.parent.mkdir(parents=True, exist_ok=True)
-    database = Database(DEFAULT_DB_PATH)
-    stores = {1: _serum1_targets(DEFAULT_DB_PATH), 2: _serum2_targets()}
-    note_manifest = np.load(FEATURE_DIR / "similarity_manifest.npz")
-    note_index = np.load(FEATURE_DIR / "note_index.npy", mmap_mode="r")
-    preset_index = np.load(FEATURE_DIR / "preset_index.npy", mmap_mode="r")
+    fd, temporary_name = tempfile.mkstemp(prefix=".factory-bundle-v2.", suffix=".sqlite", dir=output.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary)
+        with closing(sqlite3.connect(temporary)) as connection:
+            rows = connection.execute(
+                "SELECT id,content_hash FROM presets WHERE searchable=1 ORDER BY id"
+            ).fetchall()
+            missing: list[dict[str, object]] = []
+            resolved: list[tuple[int, int]] = []
+            for bundle_id, content_hash in rows:
+                catalog_id = catalog_id_by_hash.get(str(content_hash))
+                if catalog_id is None or catalog_id not in preset_rows or catalog_id not in note_rows:
+                    missing.append({"bundle_id": int(bundle_id), "content_hash": str(content_hash)})
+                else:
+                    resolved.append((int(bundle_id), catalog_id))
+            if missing:
+                raise RuntimeError(
+                    f"New embedding world is incomplete for {len(missing)} searchable factory presets; "
+                    f"first={missing[0]}"
+                )
+            connection.execute("DELETE FROM preset_embeddings")
+            connection.execute("DELETE FROM note_embeddings")
+            note_count = 0
+            for bundle_id, catalog_id in resolved:
+                embedding = np.asarray(preset_index[preset_rows[catalog_id]], dtype=np.float16)
+                connection.execute(
+                    "INSERT INTO preset_embeddings(preset_id,embedding_f16) VALUES (?,?)",
+                    (bundle_id, embedding.tobytes()),
+                )
+                for row in note_rows[catalog_id]:
+                    note = int(manifest["note_midi_notes"][row])
+                    embedding = np.asarray(note_index[row], dtype=np.float16)
+                    connection.execute(
+                        "INSERT INTO note_embeddings(preset_id,midi_note,embedding_f16) VALUES (?,?,?)",
+                        (bundle_id, note, embedding.tobytes()),
+                    )
+                    note_count += 1
+            connection.execute(
+                "INSERT OR REPLACE INTO bundle_metadata(key,value) VALUES (?,?)",
+                ("embedding_world", "stage2-v2"),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO bundle_metadata(key,value) VALUES (?,?)",
+                ("searchable_preset_count", str(len(resolved))),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO bundle_metadata(key,value) VALUES (?,?)",
+                ("note_embedding_count", str(note_count)),
+            )
+            connection.commit()
+            connection.execute("VACUUM")
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    bundle = FactoryBundle(output)
+    matrix, presets = bundle.search_index()
+    report = {
+        "mode": "reembed-existing-bundle",
+        "source": str(source.resolve()),
+        "path": str(output.resolve()),
+        "file_size_bytes": output.stat().st_size,
+        "searchable_preset_count": len(presets),
+        "note_embedding_count": note_count,
+        "search_index_shape": list(matrix.shape),
+        "embedding_world": "stage2-v2",
+        "gate_pass": len(presets) == len(resolved) and note_count > 0,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    print("FACTORY_BUNDLE_REPORT=" + json.dumps(report, sort_keys=True))
+    return 0 if report["gate_pass"] else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=DEFAULT_FACTORY_BUNDLE)
+    parser.add_argument("--feature-dir", type=Path, default=FEATURE_DIR)
+    parser.add_argument("--report", type=Path, default=REPORT)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--source-bundle", type=Path)
+    parser.add_argument("--catalog", type=Path)
+    args = parser.parse_args()
+    output = args.output.expanduser().resolve()
+    feature_dir = args.feature_dir.expanduser().resolve()
+    report_path = args.report.expanduser().resolve()
+    if args.source_bundle is not None:
+        if args.catalog is None:
+            raise ValueError("--catalog is required with --source-bundle")
+        return _reembed_existing_bundle(
+            source=args.source_bundle.expanduser().resolve(),
+            output=output,
+            feature_dir=feature_dir,
+            catalog=args.catalog.expanduser().resolve(),
+            report_path=report_path,
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    database = Database(args.db)
+    stores = {1: _serum1_targets(args.db), 2: _serum2_targets()}
+    note_manifest = np.load(feature_dir / "similarity_manifest.npz")
+    note_index = np.load(feature_dir / "note_index.npy", mmap_mode="r")
+    preset_index = np.load(feature_dir / "preset_index.npy", mmap_mode="r")
     note_rows: dict[int, list[int]] = {}
     for index, preset_id in enumerate(note_manifest["note_preset_ids"]):
         note_rows.setdefault(int(preset_id), []).append(index)
@@ -249,7 +372,8 @@ def main() -> int:
             and size <= 100 * 1024**2
         ),
     }
-    REPORT.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print("FACTORY_BUNDLE_REPORT=" + json.dumps(report, sort_keys=True))
     return 0 if report["gate_pass"] else 1
 

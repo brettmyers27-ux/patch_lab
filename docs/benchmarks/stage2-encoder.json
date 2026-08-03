@@ -1,0 +1,42 @@
+{
+  "phase": "Stage 2 phases 3-4",
+  "fine_tune": {
+    "adopted_by_mid_phase_gate": true,
+    "attempt": 1,
+    "configuration": "last HTSAT stage plus audio projection",
+    "steps": 2000,
+    "elapsed_seconds": 322.063,
+    "mean_final_100_loss": 0.2434988598525524,
+    "validation_presets": 115,
+    "pinned_clean_retrieval_at_1": 0.5304347826086957,
+    "tuned_clean_retrieval_at_1": 0.6347826086956522,
+    "pinned_augmented_retrieval_at_1": 0.48695652173913045,
+    "tuned_augmented_retrieval_at_1": 0.6086956521739131,
+    "checkpoint_filename": "patchlab_clap_ft_v1.pt",
+    "checkpoint_bytes": 800729534,
+    "checkpoint_sha256": "fbaf3a305704890450ec4604fe9a1ab806515b68827ec44a73f500c06c042baf"
+  },
+  "reload_verification": {
+    "shape": [1, 512],
+    "finite": true,
+    "l2_norm": 1.0
+  },
+  "embedding_world": {
+    "status": "blocked-incomplete-source-library",
+    "required_presets": 5579,
+    "required_note_rows": 39053,
+    "available_presets": 1167,
+    "missing_presets": 4412,
+    "serum1": {
+      "required": 4869,
+      "available": 457,
+      "missing": 4412
+    },
+    "serum2": {
+      "required": 710,
+      "available": 710,
+      "missing": 0
+    },
+    "decision": "Do not build a partial v2 index or mix encoder worlds; keep the pinned encoder for the end-to-end stack on this PC."
+  }
+}

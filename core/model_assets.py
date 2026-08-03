@@ -10,6 +10,7 @@ from pathlib import Path
 
 CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
 MIN_CHECKPOINT_BYTES = 1_000_000_000
+MIN_FINETUNED_CHECKPOINT_BYTES = 750_000_000
 TOKENIZER_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "models--bert-base-uncased": (
         "config.json",
@@ -33,6 +34,27 @@ TOKENIZER_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 class ModelAssetsError(RuntimeError):
     """Raised before CLAP initialization when its offline assets are incomplete."""
+
+
+def _is_patchlab_finetuned_checkpoint(path: Path) -> bool:
+    """Recognize the smaller audio-tower-only Stage 2 checkpoint safely."""
+
+    if not path.is_file() or path.stat().st_size < MIN_FINETUNED_CHECKPOINT_BYTES:
+        return False
+    try:
+        import torch
+
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        metadata = payload.get("patchlab_metadata", {})
+        state = payload.get("state_dict", {})
+        return (
+            metadata.get("format") == "patchlab_clap_ft_v1"
+            and isinstance(state, dict)
+            and any(key.startswith("audio_branch.") for key in state)
+            and any(key.startswith("audio_projection.") for key in state)
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, AttributeError):
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +133,9 @@ def validate_model_assets(
         checkpoint.expanduser().resolve() if checkpoint is not None else assets.checkpoint
     )
     problems: list[str] = []
-    if (
-        not resolved_checkpoint.is_file()
-        or resolved_checkpoint.stat().st_size < MIN_CHECKPOINT_BYTES
+    if not resolved_checkpoint.is_file() or (
+        resolved_checkpoint.stat().st_size < MIN_CHECKPOINT_BYTES
+        and not _is_patchlab_finetuned_checkpoint(resolved_checkpoint)
     ):
         problems.append(
             "the pinned CLAP checkpoint is missing or incomplete at "

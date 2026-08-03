@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.dataset import FEATURE_DIR, load_training_bundle
+from core.dataset import FEATURE_DIR
 
 
 OUTPUT = FEATURE_DIR / "delta_neighbors.npz"
@@ -35,17 +36,34 @@ def _nearest(
 
 
 def main() -> int:
-    bundle = load_training_bundle(seed=1337)
-    manifest = np.load(FEATURE_DIR / "preset_manifest.npz")
-    embeddings = np.load(FEATURE_DIR / "preset_embeddings.npy", mmap_mode="r")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feature-dir", type=Path, default=FEATURE_DIR)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--seed", type=int, default=1337)
+    args = parser.parse_args()
+    feature_dir = args.feature_dir.expanduser().resolve()
+    output = (args.output or feature_dir / "delta_neighbors.npz").expanduser().resolve()
+    report_path = (args.report or REPORT).expanduser().resolve()
+    manifest = np.load(feature_dir / "preset_manifest.npz")
+    embeddings = np.load(feature_dir / "preset_embeddings.npy", mmap_mode="r")
     preset_ids = manifest["preset_ids"].astype(np.int64)
     synths = manifest["synths"].astype(np.uint8)
+    rng = np.random.default_rng(args.seed)
+    train_by_name: dict[str, list[int]] = {}
+    validation_by_name: dict[str, list[int]] = {}
+    for code, synth in ((1, "serum1"), (2, "serum2")):
+        values = np.asarray(sorted(map(int, preset_ids[synths == code])), dtype=np.int64)
+        rng.shuffle(values)
+        validation_count = max(1, int(round(len(values) * 0.1)))
+        validation_by_name[synth] = sorted(map(int, values[:validation_count]))
+        train_by_name[synth] = sorted(map(int, values[validation_count:]))
     neighbor_ids = np.empty_like(preset_ids)
-    report: dict[str, object] = {"seed": 1337, "by_synth": {}}
+    report: dict[str, object] = {"seed": args.seed, "by_synth": {}}
     for code, synth in ((1, "serum1"), (2, "serum2")):
         selected = np.flatnonzero(synths == code)
         ids = preset_ids[selected]
-        train_ids = np.asarray(bundle.train_preset_ids[synth], dtype=np.int64)
+        train_ids = np.asarray(train_by_name[synth], dtype=np.int64)
         train_rows = selected[np.isin(ids, train_ids)]
         if len(train_rows) < 2:
             raise RuntimeError(f"Not enough training neighbors for {synth}")
@@ -68,13 +86,17 @@ def main() -> int:
             "mean_cosine": float(np.mean(similarities)),
             "minimum_cosine": float(np.min(similarities)),
         }
-    np.savez_compressed(
-        OUTPUT, preset_ids=preset_ids, synths=synths, neighbor_preset_ids=neighbor_ids
-    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output, preset_ids=preset_ids, synths=synths, neighbor_preset_ids=neighbor_ids)
     report["gate_pass"] = all(
         row["self_neighbors"] == 0 for row in report["by_synth"].values()  # type: ignore[union-attr]
     )
-    REPORT.write_text(json.dumps(report, indent=2, sort_keys=True))
+    report["split"] = {
+        "train_preset_ids": train_by_name,
+        "validation_preset_ids": validation_by_name,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True))
     print("DELTA_NEIGHBORS=" + json.dumps(report, sort_keys=True))
     return 0 if report["gate_pass"] else 1
 

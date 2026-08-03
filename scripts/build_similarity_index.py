@@ -78,11 +78,18 @@ def octave_generalization(
 
 
 def main() -> int:
+    global FEATURE_DIR, REPORT
     parser = argparse.ArgumentParser()
     parser.add_argument("--block-size", type=int, default=256)
+    parser.add_argument("--feature-dir", type=Path)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.block_size <= 0:
         raise ValueError("--block-size must be positive")
+    if args.feature_dir is not None:
+        FEATURE_DIR = args.feature_dir.expanduser().resolve()
+    if args.report is not None:
+        REPORT = args.report.expanduser().resolve()
     note_complete = np.load(FEATURE_DIR / "note_complete.npy", mmap_mode="r")
     if not bool(np.all(note_complete)):
         raise RuntimeError("Feature extraction is incomplete")
@@ -138,6 +145,7 @@ def main() -> int:
         },
         "gate_pass": own_rate >= 0.99,
     }
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print("SIMILARITY_SUMMARY=" + json.dumps(report, sort_keys=True), flush=True)
     return 0 if report["gate_pass"] else 1
