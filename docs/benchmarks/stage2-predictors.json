@@ -1,0 +1,47 @@
+{
+  "phase": "Stage 2 phase 5",
+  "status": "complete",
+  "encoder_world": "pinned",
+  "corpus": {
+    "base_clips": 30000,
+    "training_pairs": 390000,
+    "shards": 1000
+  },
+  "preset_split": {
+    "serum1_train": 411,
+    "serum1_validation": 46,
+    "serum2_train": 625,
+    "serum2_validation": 70,
+    "seed": 1337
+  },
+  "elapsed_seconds": 867.25,
+  "parameter_model": {
+    "epochs": 15,
+    "elapsed_seconds": 374.906,
+    "peak_vram_bytes": 378922496,
+    "checkpoint_filename": "param_model_stage2.pt",
+    "checkpoint_bytes": 57152933,
+    "checkpoint_sha256": "5421c4ea66e7801ec9c0e1043890bb228c8d508b4ed73f84721dceb3dd9ac4c5",
+    "serum1_old_mae": 0.1439908589289902,
+    "serum1_new_mae": 0.09199664514092366,
+    "serum1_mean_baseline_mae": 0.0975270596839219,
+    "serum2_old_mae": 0.015366326309382962,
+    "serum2_new_mae": 0.018287479272380475,
+    "serum2_mean_baseline_mae": 0.018216778112497282
+  },
+  "delta_model": {
+    "epochs": 15,
+    "elapsed_seconds": 457.672,
+    "peak_vram_bytes": 592154624,
+    "checkpoint_filename": "delta_param_model_stage2.pt",
+    "checkpoint_bytes": 92130457,
+    "checkpoint_sha256": "e0044256dde084bb7a243d0d416f80a9c55a0e8abdc7c2170208eb7c2a521888",
+    "serum1_old_mae": 0.017085977584199826,
+    "serum1_new_mae": 0.010452872744515476,
+    "serum1_neighbor_mae": 0.009356782660238778,
+    "serum2_old_mae": 0.0008567917894775198,
+    "serum2_new_mae": 0.000537434855187417,
+    "serum2_neighbor_mae": 0.0004229783070974261
+  },
+  "decision": "Both predictors proceed to the end-to-end A/B. Artifact adoption remains gated on the same BAM and retrieval benchmarks."
+}

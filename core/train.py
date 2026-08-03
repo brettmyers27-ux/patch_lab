@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -55,10 +56,15 @@ class ParameterInferenceMLP(nn.Module):
 
 
 def load_parameter_model(
-    checkpoint_path: Path = DEFAULT_CHECKPOINT,
+    checkpoint_path: Path | None = None,
     *,
     device: str = "cpu",
 ) -> tuple[ParameterInferenceMLP, dict[str, Any]]:
+    checkpoint_path = (
+        Path(os.environ.get("PATCHLAB_PARAM_MODEL", str(DEFAULT_CHECKPOINT)))
+        if checkpoint_path is None
+        else checkpoint_path
+    ).expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["model_config"]
     model = ParameterInferenceMLP(

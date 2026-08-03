@@ -64,6 +64,8 @@ class StackConfiguration:
     feature_dir: str
     library_db: str
     factory_bundle: str
+    parameter_model: str
+    delta_model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +143,22 @@ def _stack_configuration(name: str, factory_bundle: Path) -> StackConfiguration:
         feature_dir=str(assets.feature_dir.resolve()),
         library_db=str(assets.library_db.resolve()),
         factory_bundle=str(factory_bundle.resolve()),
+        parameter_model=str(
+            Path(
+                os.environ.get(
+                    "PATCHLAB_PARAM_MODEL",
+                    PROJECT_ROOT / "data" / "models" / "param_model.pt",
+                )
+            ).expanduser().resolve()
+        ),
+        delta_model=str(
+            Path(
+                os.environ.get(
+                    "PATCHLAB_DELTA_MODEL",
+                    PROJECT_ROOT / "data" / "models" / "delta_param_model.pt",
+                )
+            ).expanduser().resolve()
+        ),
     )
 
 

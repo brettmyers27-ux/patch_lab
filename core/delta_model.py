@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -418,8 +419,13 @@ def train_delta_model(
 
 
 def load_delta_model(
-    path: Path = DEFAULT_CHECKPOINT, *, device: str = "cpu"
+    path: Path | None = None, *, device: str = "cpu"
 ) -> tuple[DeltaInferenceMLP, dict[str, Any]]:
+    path = (
+        Path(os.environ.get("PATCHLAB_DELTA_MODEL", str(DEFAULT_CHECKPOINT)))
+        if path is None
+        else path
+    ).expanduser().resolve()
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config = checkpoint["model_config"]
     model = DeltaInferenceMLP(config["serum1"], config["serum2"]).to(device)
