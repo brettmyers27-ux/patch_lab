@@ -182,6 +182,7 @@ def write_native_preset(
     meaningfully_modified: bool,
     name: str | None = None,
     db_path: Path = DEFAULT_DB_PATH,
+    structural_overrides: dict[str, Any] | None = None,
 ) -> PresetExportResult:
     if synth == "serum1":
         return write_serum1_preset(
@@ -202,6 +203,7 @@ def write_native_preset(
         meaningfully_modified=meaningfully_modified,
         name=name,
         db_path=db_path,
+        structural_overrides=structural_overrides,
     )
     return PresetExportResult(
         path=result.path,
@@ -332,6 +334,7 @@ def write_and_verify_native_preset(
     name: str | None = None,
     db_path: Path = DEFAULT_DB_PATH,
     similarity_tolerance: float = 0.15,
+    structural_overrides: dict[str, Any] | None = None,
 ) -> PresetExportVerification:
     """Write and reload a native preset, rejecting only structural failures.
 
@@ -353,6 +356,7 @@ def write_and_verify_native_preset(
             meaningfully_modified=meaningfully_modified,
             name=name,
             db_path=db_path,
+            structural_overrides=structural_overrides,
         )
         verification = verifier.verify(
             export,

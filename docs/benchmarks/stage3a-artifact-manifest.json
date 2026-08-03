@@ -1,0 +1,13 @@
+{
+  "adopted_artifacts": [],
+  "experimental_artifacts": [
+    {
+      "byte_size": 2804888,
+      "filename": "serum2_structural_space.json",
+      "install_destination": "data/models/serum2_structural_space.json",
+      "sha256": "a8f8edc27896de20cfe95d983f1e6a773d843a0b5b13d9fc79808993047fd609",
+      "status": "validated vocabulary; do not publish because Stage 3A matcher was not adopted"
+    }
+  ],
+  "notes": "No estimator weights were adopted. The generated estimator index was empty. Do not touch the relay for this stage."
+}

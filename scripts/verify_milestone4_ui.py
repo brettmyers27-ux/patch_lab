@@ -17,6 +17,7 @@ import soundfile as sf
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("PATCHLAB_DISTRIBUTION_MODE", "1")
 PROJECT_ROOT = Path(
     os.environ.get(
         "PATCHLAB_GATE_PROJECT_ROOT",

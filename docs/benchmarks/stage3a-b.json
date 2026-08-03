@@ -1,0 +1,94 @@
+{
+  "bam": {
+    "by_target_synth": {
+      "serum2": {
+        "count": 99,
+        "coverage_definition": "weighted automation coverage before; complete structural-write reachability after (not exhaustive enumeration)",
+        "mean_clap_similarity": 0.780600211837075,
+        "mean_optimizer_weighted_coverage_after": 1.0,
+        "mean_optimizer_weighted_coverage_before": 0.40324104899160207,
+        "mean_structural_override_count": 0.7272727272727273,
+        "median_clap_similarity": 0.7911196947097778,
+        "min_clap_similarity": 0.538663923740387,
+        "structural_winners": 15
+      }
+    },
+    "completed": 99,
+    "detail_dir": "data/stage3a/benchmark-b/bam",
+    "elapsed_s": 2913.155999999988,
+    "errors": [],
+    "evaluations": 28755,
+    "failed": 0,
+    "mean_clap_similarity": 0.780600211837075,
+    "meaningfully_modified": 99,
+    "median_clap_similarity": 0.7911196947097778,
+    "min_clap_similarity": 0.538663923740387,
+    "requested": 99
+  },
+  "benchmark_population": {
+    "policy": "root-level real audio; AppleDouble, Ableton .asd, and metadata excluded",
+    "user_authorized_mixed_formats": true
+  },
+  "completed_at": "2026-08-03T22:14:52.196224+00:00",
+  "elapsed_s": 3041.703999999998,
+  "library_retrieval": {
+    "completed": 200,
+    "requested": 200,
+    "retrieval_at_1": 0.785,
+    "retrieval_at_5": 0.895,
+    "seed": 20260802
+  },
+  "rhythm_invariance": {
+    "base_presets": 50,
+    "by_variant": {
+      "codec_mp3_96k": {
+        "count": 50,
+        "retrieval_at_1": 0.5,
+        "retrieval_at_5": 0.74
+      },
+      "gate_1_16": {
+        "count": 50,
+        "retrieval_at_1": 0.08,
+        "retrieval_at_5": 0.16
+      },
+      "gate_1_4": {
+        "count": 50,
+        "retrieval_at_1": 0.32,
+        "retrieval_at_5": 0.48
+      },
+      "gate_1_8": {
+        "count": 50,
+        "retrieval_at_1": 0.28,
+        "retrieval_at_5": 0.46
+      },
+      "loudness": {
+        "count": 50,
+        "retrieval_at_1": 0.76,
+        "retrieval_at_5": 0.9
+      },
+      "pitch": {
+        "count": 50,
+        "retrieval_at_1": 0.48,
+        "retrieval_at_5": 0.84
+      }
+    },
+    "retrieval_at_1": 0.4033333333333333,
+    "retrieval_at_5": 0.5966666666666667,
+    "seed": 20260802,
+    "variants": 300
+  },
+  "schema_version": 1,
+  "seed": 20260802,
+  "stack": {
+    "clap_checkpoint": "data/models/patchlab_clap_ft_v1.pt",
+    "delta_model": "data/models/delta_param_model.pt",
+    "factory_bundle": "data/dist/factory_bundle.sqlite",
+    "feature_dir": "data/features",
+    "library_db": "data/models/patchlab-synthesis-catalog.sqlite",
+    "name": "stage3a-structural-search",
+    "parameter_model": "data/models/param_model.pt"
+  },
+  "stage": 2,
+  "started_at": "2026-08-03T21:24:10.494893+00:00",
+  "status": "complete"
+}

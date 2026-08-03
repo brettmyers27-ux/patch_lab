@@ -385,16 +385,17 @@ def write_serum2_preset(
     db_path: Path = DEFAULT_DB_PATH,
     schema_path: Path = DEFAULT_SCHEMA_PATH,
     target_path: Path = DEFAULT_TARGET_PATH,
+    structural_overrides: Mapping[str, Any] | None = None,
 ) -> Serum2WriteResult:
     """Write a native preset and decode it back before returning success."""
 
     base_path, base = _resolve_serum2_base(base_preset_id, db_path)
     base_graph = base["settings"]
-    base_assets = asset_references(base_graph)
     output_path = Path(output_path).expanduser().resolve()
 
     output_name = name or generated_preset_name("serum2")
-    if not meaningfully_modified:
+    structural_overrides = dict(structural_overrides or {})
+    if not meaningfully_modified and not structural_overrides:
         payload = encode_serum2_preset(
             branded_serum2_metadata(base["metadata"], name=output_name),
             base_graph,
@@ -425,9 +426,12 @@ def write_serum2_preset(
     intended, applied, skipped = overlay_vector(
         base_graph, schema, vector, mask, base_vector
     )
+    if structural_overrides:
+        from core.serum2_structural_space import apply_structural_overrides
+
+        apply_structural_overrides(intended, structural_overrides)
+        applied += len(structural_overrides)
     intended_assets = asset_references(intended)
-    if intended_assets != base_assets:
-        raise RuntimeError("Candidate overlay changed a base preset asset reference")
 
     metadata = branded_serum2_metadata(base["metadata"], name=output_name)
 
@@ -442,9 +446,9 @@ def write_serum2_preset(
     ).hexdigest():
         output_path.unlink(missing_ok=True)
         raise RuntimeError("Written Serum 2 preset has an invalid payload hash")
-    if asset_references(parsed.data) != base_assets:
+    if asset_references(parsed.data) != intended_assets:
         output_path.unlink(missing_ok=True)
-        raise RuntimeError("Written Serum 2 preset did not retain base asset references")
+        raise RuntimeError("Written Serum 2 preset did not retain intended asset references")
     return Serum2WriteResult(
         path=output_path,
         mode="optimized-overlay",

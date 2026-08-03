@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -301,7 +303,13 @@ def run_match_file(
             decoded.mono,
             decoded.sample_rate,
             synth_hint=target_synth,
-            config=BUDGETS[budget],
+            config=replace(
+                BUDGETS[budget],
+                structural_search=(
+                    os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0").strip()
+                    == "1"
+                ),
+            ),
             target_embedding=embedding,
             progress_callback=search_progress,
         )
@@ -339,8 +347,11 @@ def run_match_file(
             )
         settings, base_vector = _candidate_payload(matcher, result.best)
         modified = (
-            not result.best.exact_base
-            and vector_was_modified(result.best.vector, base_vector, result.best.mask)
+            bool(result.best.structural_overrides)
+            or (
+                not result.best.exact_base
+                and vector_was_modified(result.best.vector, base_vector, result.best.mask)
+            )
         )
         winner_path = session / "winner.wav"
         if result.best.waveform is None:
@@ -358,6 +369,9 @@ def run_match_file(
             vector=np.asarray(result.best.vector, dtype=np.float32),
             mask=np.asarray(result.best.mask, dtype=np.bool_),
             base_vector=base_vector,
+            structural_overrides_json=np.asarray(
+                json.dumps(result.best.structural_overrides, sort_keys=True)
+            ),
         )
         no_confident = result.best.clap_cosine < 0.65
         payload = {
@@ -412,6 +426,7 @@ def run_match_file(
                 "winner_audio_path": str(winner_path),
                 "candidate_path": str(candidate_path),
                 "settings": settings,
+                "structural_overrides": result.best.structural_overrides,
                 "objective_trace": result.objective_trace,
             },
         }

@@ -59,10 +59,16 @@ def _generated_key_from_candidate(
     with np.load(candidate_path) as stored:
         vector = np.ascontiguousarray(stored["vector"], dtype=np.float32)
         mask = np.ascontiguousarray(stored["mask"], dtype=np.bool_)
+        structural = (
+            str(stored["structural_overrides_json"].item())
+            if "structural_overrides_json" in stored.files
+            else "{}"
+        )
     digest = hashlib.sha256()
     digest.update(str(recommendation.get("synth", "")).encode("ascii", errors="ignore"))
     digest.update(vector.tobytes())
     digest.update(mask.tobytes())
+    digest.update(structural.encode("utf-8"))
     return GENERATED_PREFIX + digest.hexdigest()
 
 

@@ -1,0 +1,10 @@
+{
+  "adopted_estimators": [],
+  "decision_rule": "drop when held-out top-1 does not beat the training-set most-common-value baseline",
+  "estimators": {
+    "fx_type": {"heldout_samples": 140, "classes": 16, "top1": 0.17857142857142858, "top5": 0.5714285714285714, "common_top1": 0.20714285714285716, "common_top5": 0.7285714285714285, "adopted": false},
+    "mod_route": {"heldout_samples": 140, "classes": 204, "top1": 0.07857142857142857, "top5": 0.19285714285714287, "common_top1": 0.11428571428571428, "common_top5": 0.2571428571428571, "adopted": false},
+    "noise_sample": {"heldout_samples": 115, "classes": 102, "top1": 0.40869565217391307, "top5": 0.6521739130434783, "common_top1": 0.6, "common_top5": 0.6869565217391305, "adopted": false},
+    "wavetable": {"heldout_samples": 119, "classes": 173, "top1": 0.13445378151260504, "top5": 0.37815126050420167, "common_top1": 0.35294117647058826, "common_top5": 0.5126050420168067, "adopted": false}
+  }
+}

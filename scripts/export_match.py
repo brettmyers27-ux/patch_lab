@@ -156,6 +156,11 @@ def main() -> int:
                         recommendation["clap_similarity"]
                     ),
                     name=generated_preset_name(str(recommendation["synth"])),
+                    structural_overrides=(
+                        json.loads(str(candidate["structural_overrides_json"].item()))
+                        if "structural_overrides_json" in candidate.files
+                        else dict(recommendation.get("structural_overrides") or {})
+                    ),
                 )
                 warning = None
                 if not verified.passed:

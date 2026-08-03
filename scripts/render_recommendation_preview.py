@@ -47,6 +47,11 @@ def render_recommendation(
         raise RuntimeError("The match has no generated recommendation")
     candidate_path = resolve_result_path(result_path, recommendation["candidate_path"])
     stored = np.load(candidate_path)
+    structural_overrides = (
+        json.loads(str(stored["structural_overrides_json"].item()))
+        if "structural_overrides_json" in stored.files
+        else dict(recommendation.get("structural_overrides") or {})
+    )
     candidate = Candidate(
         synth=str(recommendation["synth"]),
         base_preset_id=int(recommendation["base_preset_id"]),
@@ -54,6 +59,7 @@ def render_recommendation(
         mask=np.asarray(stored["mask"], dtype=np.bool_),
         origin="audition-preview",
         exact_base=not bool(recommendation.get("meaningfully_modified", False)),
+        structural_overrides=structural_overrides,
     )
     resolved_key = cache_key or recommendation_cache_key(
         result_path, recommendation

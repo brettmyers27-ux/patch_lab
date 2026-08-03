@@ -1,0 +1,13 @@
+{
+  "hard_gate_passed": true,
+  "per_category": {
+    "embedded_wavetable": {"attempted": 10, "loaded": 10, "audibly_changed": 10, "directionally_correct": 4, "median_spectral_distance": 0.07084483280777931},
+    "fx_type": {"attempted": 10, "loaded": 10, "audibly_changed": 10, "directionally_correct": 10, "median_spectral_distance": 0.07951506227254868},
+    "mod_route": {"attempted": 10, "loaded": 10, "audibly_changed": 10, "directionally_correct": 10, "median_spectral_distance": 0.08631466329097748},
+    "noise_sample": {"attempted": 10, "loaded": 10, "audibly_changed": 10, "directionally_correct": 4, "median_spectral_distance": 0.05901188589632511},
+    "wavetable": {"attempted": 10, "loaded": 10, "audibly_changed": 10, "directionally_correct": 9, "median_spectral_distance": 0.09654560685157776}
+  },
+  "total_attempted": 50,
+  "total_audibly_changed": 50,
+  "total_loaded": 50
+}

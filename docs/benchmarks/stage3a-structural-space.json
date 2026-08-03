@@ -1,0 +1,21 @@
+{
+  "definition_of_complete": "reachability_not_enumeration",
+  "installed_serum2_root": "platform-resolved; personal absolute path excluded",
+  "preset_count": 710,
+  "value_counts": {
+    "embedded_wavetable_observed_hashes": 55,
+    "fx_types_observed": 16,
+    "mod_destinations_named_observed": 139,
+    "mod_routes_observed": 4906,
+    "mod_sources_observed": 271,
+    "noise_samples_union": 230,
+    "noise_samples_observed": 102,
+    "wavetables_union": 330,
+    "wavetables_observed": 241
+  },
+  "limitations": [
+    "FX and modulation structural choices expose no readable host-automation value strings; observed preset values are lower bounds.",
+    "The legal custom-wavetable payload domain is open-ended; 55 observed payload hashes are a lower bound.",
+    "Arbitrary caller-supplied structural values remain writable; the vocabulary is a prior, not an allow-list."
+  ]
+}

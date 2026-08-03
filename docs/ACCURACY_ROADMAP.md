@@ -18,7 +18,8 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
   search/refinement. Serum 1 params fully mapped via the VST automation surface.
   Serum 2: ~40% weighted parameter coverage via mapped automation
   (`core/serum2_mapping.py`); FX topology and mod-matrix source/dest are **structurally
-  unreachable** through automation (confirmed by exhaustive surface investigation,
+  unreachable through automation**, but Stage 3A proved them writable through reconstructed
+  state and native export (confirmed by exhaustive surface investigation,
   `data/models/serum2_surface_investigation.json`). Serum 2 rendering uses reconstructed
   two-chunk `.vstpreset` states (`core/serum2_state_reconstruct.py`,
   `data/models/serum2_render_states/`), which the DSP engine honors even though host
@@ -123,6 +124,15 @@ Nothing may be silently dropped.
   verification of winners (research-frontier: cf. Sound2Synth/DiffMoog); (b) **layer
   decomposition** — match dominant layer, subtract, match residual, output a preset
   *stack*; this is what closes the gap on dense production sounds.
+- **Stage 3A — Serum 2 structural reachability** (completed, not adopted, Windows RTX 5070,
+  2026-08-03): direct reconstructed-state evaluation cost 3.3041× automation and sustained
+  2,856.90 evaluations/minute. All 50/50 one-field mutation states loaded and changed audio.
+  The vocabulary covers 330 WT paths, 230 noise paths, 16 FX types, 271 modulation sources,
+  139 named destinations, and arbitrary caller-supplied structural overrides. However all
+  four audio-only estimators failed their most-common baselines, and the identical 99-file
+  gate regressed BAM 0.784226 → **0.780600** while retrieval/invariance stayed unchanged.
+  Structural search remains opt-in; Stage 2B remains production. Better learned structural
+  guidance is a prerequisite before retesting this path.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

@@ -1,0 +1,10 @@
+{
+  "automation_median_seconds": 0.01802060000045458,
+  "decision": "direct-shortlist-search-viable",
+  "four_process_evaluations_per_minute": 2856.902469209276,
+  "four_process_failures": 0,
+  "same_instance_state_reload": true,
+  "structural_median_seconds": 0.05954179999389453,
+  "structural_to_automation_ratio": 3.304096422560434,
+  "trials_per_path": 50
+}

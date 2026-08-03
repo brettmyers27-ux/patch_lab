@@ -64,6 +64,10 @@ class SearchConfig:
     clap_weight: float = 0.65
     random_seed: int = 2026
     adaptive_preprocessing: bool = True
+    # Stage 3A measured a BAM regression (0.784226 -> 0.780600), so the
+    # validated capability remains opt-in until guidance beats its baseline.
+    structural_search: bool = False
+    structural_top_k: int = 2
 
 
 @dataclass(slots=True)
@@ -79,6 +83,7 @@ class Candidate:
     stft_loss: float = math.inf
     clap_cosine: float = -1.0
     waveform: np.ndarray | None = field(default=None, repr=False)
+    structural_overrides: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -383,6 +388,13 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
         template = decode_host_template(
             _state_file(assets, candidate.base_preset_id).read_bytes()
         )
+        if candidate.structural_overrides:
+            from core.serum2_structural_space import apply_existing_structural_overrides
+
+            apply_existing_structural_overrides(
+                (template.component.data, template.controller.data),
+                candidate.structural_overrides,
+            )
         graph = decode_vector(candidate.vector, _RENDER["schema"], candidate.mask)
         decoded = Serum2Preset(
             path=_state_file(assets, candidate.base_preset_id),
@@ -463,6 +475,11 @@ class AnalysisBySynthesisMatcher:
                 dtype=np.bool_,
             ),
         }
+        from core.structural_search import load_vocabulary
+
+        self.structural_vocabulary = load_vocabulary(
+            PROJECT_ROOT / "data" / "models" / "serum2_structural_space.json"
+        )
 
     def close(self) -> None:
         self.pool.close()
@@ -774,6 +791,76 @@ class AnalysisBySynthesisMatcher:
                     "generation": 0,
                 }
             )
+        if config.structural_search and self.structural_vocabulary:
+            from core.structural_search import (
+                SEARCH_ORDER,
+                discover_structural_fields,
+                staged_proposals,
+            )
+
+            serum2_seeds = [
+                item for item in candidates if item.synth == "serum2" and not item.exact_base
+            ]
+            if serum2_seeds:
+                structural_seed = min(serum2_seeds, key=lambda item: item.objective)
+                from core.serum2_state_reconstruct import decode_host_template
+
+                base_template = decode_host_template(
+                    _state_file(self.assets, structural_seed.base_preset_id).read_bytes()
+                )
+                fields = discover_structural_fields(base_template.component.data)
+                proposals = staged_proposals(
+                    self.structural_vocabulary,
+                    top_k=config.structural_top_k,
+                    fields=fields,
+                )
+                for category in SEARCH_ORDER:
+                    remaining = config.max_evaluations - evaluations
+                    if remaining <= 0 or time.monotonic() - started >= config.max_seconds:
+                        break
+                    stage_candidates: list[Candidate] = []
+                    for proposal in proposals.get(category, [])[:remaining]:
+                        overrides = dict(structural_seed.structural_overrides)
+                        overrides.update(proposal.overrides)
+                        stage_candidates.append(
+                            Candidate(
+                                structural_seed.synth,
+                                structural_seed.base_preset_id,
+                                structural_seed.vector.copy(),
+                                structural_seed.mask.copy(),
+                                f"structural-{category}-{proposal.priority + 1}",
+                                midi_note=structural_seed.midi_note,
+                                structural_overrides=overrides,
+                            )
+                        )
+                    if not stage_candidates:
+                        continue
+                    self._evaluate(
+                        stage_candidates,
+                        midi_note,
+                        duration,
+                        target,
+                        objective_embedding,
+                        config,
+                    )
+                    evaluations += len(stage_candidates)
+                    candidates.extend(stage_candidates)
+                    viable = [item for item in stage_candidates if np.isfinite(item.objective)]
+                    if viable:
+                        winner = min(viable, key=lambda item: item.objective)
+                        if winner.objective < structural_seed.objective:
+                            structural_seed = winner
+                    trace.append(
+                        {
+                            "stage": f"structural-{category}",
+                            "evaluations": evaluations,
+                            "best_objective": structural_seed.objective,
+                            "stft_loss": structural_seed.stft_loss,
+                            "clap_cosine": structural_seed.clap_cosine,
+                            "midi_note": structural_seed.midi_note,
+                            "top_k": config.structural_top_k,
+                        }
+                    )
         # Exact in-library retrieval needs no numerical refinement.
         if candidates[0].clap_cosine < 0.999 or candidates[0].stft_loss > 1e-4:
             for seed_rank, seed in enumerate(candidates[:3]):
@@ -819,6 +906,7 @@ class AnalysisBySynthesisMatcher:
                                 seed.mask,
                                 "cma",
                                 midi_note=seed.midi_note,
+                                structural_overrides=dict(seed.structural_overrides),
                             )
                         )
                     self._evaluate(

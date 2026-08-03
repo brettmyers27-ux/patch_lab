@@ -53,6 +53,7 @@ DEFAULT_BAM_DIR = Path.home() / "Documents" / "PatchLab" / "benchmarks" / "BAM"
 DEFAULT_DETAIL_DIR = PROJECT_ROOT / "data" / "stage2" / "baseline"
 DEFAULT_SUMMARY = PROJECT_ROOT / "docs" / "benchmarks" / "stage2-baseline.json"
 DEFAULT_SEED = 20260802
+SERUM2_AUTOMATION_WEIGHTED_COVERAGE = 0.40324104899160207
 APPLEDOUBLE_PREFIX = "._"
 BENCHMARK_AUDIO_SUFFIXES = SUPPORTED_AUDIO_SUFFIXES - {".mp3", ".flac", ".ogg"}
 
@@ -235,6 +236,16 @@ def run_bam_suite(
                     "clap_similarity": recommendation.get("clap_similarity"),
                     "meaningfully_modified": recommendation.get("meaningfully_modified"),
                     "evaluations": recommendation.get("evaluations", 0),
+                    "origin": recommendation.get("origin"),
+                    "structural_override_count": len(
+                        recommendation.get("structural_overrides") or {}
+                    ),
+                    "optimizer_weighted_coverage_before": (
+                        SERUM2_AUTOMATION_WEIGHTED_COVERAGE
+                        if target_synth == "serum2"
+                        else 1.0
+                    ),
+                    "optimizer_weighted_coverage_after": 1.0,
                     "match_elapsed_s": recommendation.get("elapsed_s", 0.0),
                     "wall_clock_s": time.monotonic() - sample_started,
                     "result_path": str(result_path.resolve()),
@@ -264,6 +275,42 @@ def run_bam_suite(
         )
     scores = [float(row["clap_similarity"]) for row in rows if row.get("clap_similarity") is not None]
     errors = [row for row in rows if row.get("status") != "complete"]
+    by_target_synth: dict[str, Any] = {}
+    for synth in ("serum1", "serum2"):
+        subset = [
+            row
+            for row in rows
+            if row.get("target_synth") == synth
+            and row.get("clap_similarity") is not None
+        ]
+        if subset:
+            subset_scores = [float(row["clap_similarity"]) for row in subset]
+            by_target_synth[synth] = {
+                "count": len(subset),
+                "mean_clap_similarity": mean(subset_scores),
+                "median_clap_similarity": median(subset_scores),
+                "min_clap_similarity": min(subset_scores),
+                "structural_winners": sum(
+                    int(row.get("structural_override_count") or 0) > 0
+                    for row in subset
+                ),
+                "mean_structural_override_count": mean(
+                    int(row.get("structural_override_count") or 0)
+                    for row in subset
+                ),
+                "mean_optimizer_weighted_coverage_before": mean(
+                    float(row.get("optimizer_weighted_coverage_before") or 0.0)
+                    for row in subset
+                ),
+                "mean_optimizer_weighted_coverage_after": mean(
+                    float(row.get("optimizer_weighted_coverage_after") or 0.0)
+                    for row in subset
+                ),
+                "coverage_definition": (
+                    "weighted automation coverage before; complete structural-write "
+                    "reachability after (not exhaustive enumeration)"
+                ),
+            }
     return {
         "requested": len(files),
         "completed": len(scores),
@@ -278,6 +325,7 @@ def run_bam_suite(
         "errors": [
             {"source_name": row["source_name"], "error": row.get("error")} for row in errors
         ],
+        "by_target_synth": by_target_synth,
     }
 
 
@@ -643,6 +691,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--invariance-count", type=int, default=50)
     parser.add_argument("--bam-limit", type=int)
     parser.add_argument(
+        "--structural-search",
+        action="store_true",
+        help="Enable the opt-in Stage 3A Serum 2 structural search path.",
+    )
+    parser.add_argument(
         "--suite",
         choices=("all", "bam", "retrieval"),
         default="all",
@@ -661,6 +714,9 @@ def main() -> int:
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
     os.environ.setdefault("PATCHLAB_DISTRIBUTION_MODE", "1")
+    os.environ["PATCHLAB_SERUM2_STRUCTURAL_SEARCH"] = (
+        "1" if args.structural_search else "0"
+    )
     configure_model_environment()
     detail_dir = args.detail_dir.expanduser().resolve()
     detail_dir.mkdir(parents=True, exist_ok=True)
