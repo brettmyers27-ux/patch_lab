@@ -26,11 +26,13 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 - Serum 2 preset files are fully *decoded* (XferJson/zstd/CBOR, `core/serum2_preset.py`) —
   we can read every setting including the mod matrix; we just can't push all of it through
   the automation surface.
-- Current Windows Stage 2 ladder (99 user-authorized BAM files): pinned production stack
-  BAM mean **0.770395**, median 0.774904, minimum 0.460627; factory retrieval@1 0.560
-  and @5 0.770; rhythm/codec/pitch/loudness invariance retrieval@1 0.256667 and @5
-  0.503333. The experimental retrained-predictor stack scored BAM mean 0.771230, but
-  factory retrieval@1 fell to 0.555 and invariance@1 did not move, so it was not adopted.
+- Current Windows Stage 2B ladder (99 user-authorized BAM files): the adopted fine-tuned
+  encoder + complete v2 indexes + shipped predictors scores BAM mean **0.784226**, median
+  0.793119, minimum 0.541550; factory retrieval@1 **0.785** and @5 0.895;
+  rhythm/codec/pitch/loudness invariance retrieval@1 **0.403333** and @5 0.596667.
+  The previous pinned production stack scored BAM mean 0.770395, retrieval@1 0.560, and
+  invariance@1 0.256667. The fine-tuned + retrained-predictor alternative scored BAM mean
+  0.780465 and retrieval@1 0.775, so the shipped predictors remain production.
   Historical macOS figures (~0.99 in-library, ~0.87 lightly disguised, ~0.82 forced
   rebuild, ~0.68 BAM) remain historical rather than current acceptance claims.
 - UI: PySide6, 16:9 proportionally-scaled canvas (QGraphicsScene at 1920×1080 design size).
@@ -107,15 +109,15 @@ Nothing may be silently dropped.
 - **Stage 1 — Smarter ears** (Mac only, no new hardware): implements A1–A8, B9–B16,
   C17–C20, D21, E23–E25. Prompt: `docs/codex-stage1-smarter-ears.md`. Expected: the
   largest single jump on the real-sample benchmark; makes every later stage measurable.
-- **Stage 2 — Smarter brain** (completed on the user's RTX 5070 PC, 2026-08-03): built
-  30,000 base clips and 390,000 prediction pairs, fine-tuned CLAP with synth invariance
-  positives, and retrained both predictors. The fine-tuned encoder passed its 115-preset
-  held-out gate (augmented retrieval@1 0.486957 → 0.608696; clean 0.530435 →
-  0.634783), but 4,412 missing Serum 1 source presets made a complete atomic index rebuild
-  impossible. The pinned-encoder/retrained-predictor partial stack then failed the final
-  adoption gate (no material BAM gain, retrieval@1 down 0.005, invariance unchanged).
-  No Stage 2 model artifact is adopted; the reusable data, fine-tuning, rebuild-preflight,
-  predictor-training, and deterministic A/B pipelines are the accepted deliverable.
+- **Stage 2 — Smarter brain / Stage 2B completion** (completed on the user's RTX 5070 PC,
+  2026-08-03): built 30,000 base clips and 390,000 prediction pairs, fine-tuned CLAP with
+  synth-invariance positives, and retrained both predictors. Stage 2B supplied all missing
+  Serum 1 presets, rendered all 5,579 presets / 39,053 note rows, and rebuilt the embedding
+  world atomically. On the identical final gate, the fine-tuned encoder + v2 indexes +
+  shipped predictors improved BAM mean 0.770395 → **0.784226**, factory retrieval@1
+  0.560 → **0.785**, and invariance@1 0.256667 → **0.403333**, with no benchmark errors.
+  That encoder/index stack is adopted; shipped predictors remain adopted, while both
+  Stage 2 retrained predictors remain experimental and are not relay candidates.
 - **Stage 3 — Our own algorithm**: (a) neural Serum surrogate (params → predicted audio
   embedding) enabling millions of virtual experiments per minute with real-synth
   verification of winners (research-frontier: cf. Sound2Synth/DiffMoog); (b) **layer

@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
+PINNED_CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
+# Stage 2B adopted the fine-tuned audio tower together with its atomically
+# rebuilt indexes. The original checkpoint remains available to the installer
+# for bootstrapping the offline Hugging Face runtime, but matching must default
+# to the adopted encoder so it cannot silently mix embedding worlds.
+CLAP_CHECKPOINT_NAME = "patchlab_clap_ft_v1.pt"
 MIN_CHECKPOINT_BYTES = 1_000_000_000
 MIN_FINETUNED_CHECKPOINT_BYTES = 750_000_000
 TOKENIZER_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -138,7 +143,7 @@ def validate_model_assets(
         and not _is_patchlab_finetuned_checkpoint(resolved_checkpoint)
     ):
         problems.append(
-            "the pinned CLAP checkpoint is missing or incomplete at "
+            "the adopted CLAP checkpoint is missing or incomplete at "
             f"{resolved_checkpoint}"
         )
 

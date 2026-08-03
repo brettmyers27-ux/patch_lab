@@ -10,6 +10,7 @@ import torch
 
 from core.build_info import assert_packaged_commit, current_build_info
 from core.model_assets import (
+    CLAP_CHECKPOINT_NAME,
     MIN_CHECKPOINT_BYTES,
     TOKENIZER_REQUIREMENTS,
     ModelAssetsError,
@@ -50,6 +51,19 @@ def test_shared_model_resolution_and_validation(
     assert os.environ["TRANSFORMERS_CACHE"] == str(
         cache.resolve() / "transformers"
     )
+
+
+def test_default_model_resolution_uses_adopted_stage2b_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PATCHLAB_CLAP_CHECKPOINT", raising=False)
+    monkeypatch.setattr(model_assets, "runtime_root", lambda: tmp_path)
+
+    assets = model_assets.resolve_model_assets()
+
+    assert CLAP_CHECKPOINT_NAME == "patchlab_clap_ft_v1.pt"
+    assert assets.checkpoint == (tmp_path / "data" / "models" / CLAP_CHECKPOINT_NAME)
 
 
 def test_missing_assets_error_is_actionable(

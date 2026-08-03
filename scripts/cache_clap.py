@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Download and validate the pinned LAION-CLAP music checkpoint and HF assets."""
+"""Bootstrap the pinned LAION-CLAP checkpoint and offline HF assets.
+
+The authenticated relay installs PatchLab's adopted fine-tuned checkpoint
+after this bootstrap step. Keeping this command explicitly pinned prevents
+the public LAION file from ever being saved under the fine-tuned filename.
+"""
 
 from __future__ import annotations
 
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -12,16 +18,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.model_assets import configure_model_environment  # noqa: E402
+from core.model_assets import (  # noqa: E402
+    PINNED_CLAP_CHECKPOINT_NAME,
+    configure_model_environment,
+    runtime_root,
+)
 
 
+os.environ["PATCHLAB_CLAP_CHECKPOINT"] = str(
+    runtime_root() / "data" / "models" / PINNED_CLAP_CHECKPOINT_NAME
+)
 MODEL_ASSETS = configure_model_environment()
 MODEL_DIR = MODEL_ASSETS.model_dir
 HF_DIR = MODEL_ASSETS.cache_dir
 CHECKPOINT = MODEL_ASSETS.checkpoint
 CHECKPOINT_URL = (
     "https://huggingface.co/lukewys/laion_clap/resolve/main/"
-    "music_audioset_epoch_15_esc_90.14.pt"
+    f"{PINNED_CLAP_CHECKPOINT_NAME}"
 )
 
 

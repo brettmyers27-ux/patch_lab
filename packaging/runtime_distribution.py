@@ -13,5 +13,5 @@ os.environ.setdefault(
 )
 os.environ.setdefault(
     "PATCHLAB_CLAP_CHECKPOINT",
-    str(model_dir / "music_audioset_epoch_15_esc_90.14.pt"),
+    str(model_dir / "patchlab_clap_ft_v1.pt"),
 )

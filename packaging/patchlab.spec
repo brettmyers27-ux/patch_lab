@@ -68,7 +68,7 @@ datas = [
 for source, destination in (
     (ROOT / "data" / "dist" / "factory_bundle.sqlite", "data/dist"),
     (
-        ROOT / "data" / "models" / "music_audioset_epoch_15_esc_90.14.pt",
+        ROOT / "data" / "models" / "patchlab_clap_ft_v1.pt",
         "data/models",
     ),
     # Analysis-by-synthesis inputs. Without these the packaged app can only
@@ -77,6 +77,7 @@ for source, destination in (
     (ROOT / "data" / "features" / "preset_index.npy", "data/features"),
     (ROOT / "data" / "features" / "note_index.npy", "data/features"),
     (ROOT / "data" / "features" / "similarity_manifest.npz", "data/features"),
+    (ROOT / "data" / "features" / "delta_neighbors.npz", "data/features"),
     (ROOT / "data" / "features" / "serum2_targets.npz", "data/features"),
     (ROOT / "data" / "models" / "serum2_target_schema.json", "data/models"),
     (ROOT / "data" / "models" / "param_model.pt", "data/models"),

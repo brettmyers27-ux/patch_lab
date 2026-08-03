@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "stage": "2B",
+  "decision": "Adopt the fine-tuned encoder and its complete v2 embedding world with the shipped parameter predictors.",
+  "adopted_stack": "stage2b-finetuned-shipped-predictors",
+  "adopted_artifacts": [
+    {
+      "filename": "patchlab_clap_ft_v1.pt",
+      "byte_size": 800729534,
+      "sha256": "fbaf3a305704890450ec4604fe9a1ab806515b68827ec44a73f500c06c042baf",
+      "install_destination": "data/models/patchlab_clap_ft_v1.pt"
+    },
+    {
+      "filename": "preset_index.npy",
+      "byte_size": 11425920,
+      "sha256": "e053e847267f5919bf4f6b18f1e3bf8d1b07142698754841dd8de64ca1f8ffc4",
+      "install_destination": "data/features/preset_index.npy"
+    },
+    {
+      "filename": "note_index.npy",
+      "byte_size": 79980672,
+      "sha256": "5dc7024bac041fcc6cd6ca58dea8b0f760c67b311ff45896b0320b2b3bf84560",
+      "install_destination": "data/features/note_index.npy"
+    },
+    {
+      "filename": "similarity_manifest.npz",
+      "byte_size": 20447,
+      "sha256": "0cbf7718a193762281a47a1a1af9f1b4802d7f379483e185cd97ae917ab3709a",
+      "install_destination": "data/features/similarity_manifest.npz"
+    },
+    {
+      "filename": "delta_neighbors.npz",
+      "byte_size": 21726,
+      "sha256": "24cbf38541e241273432490722caa7b4c7a69cb5418e6ae835f1026b28915427",
+      "install_destination": "data/features/delta_neighbors.npz"
+    },
+    {
+      "filename": "factory_bundle.sqlite",
+      "byte_size": 79048704,
+      "sha256": "d87d07ff235598cd17520e7f30e77c019fad60e369f8bb38c1cd6db2b4e65ed1",
+      "install_destination": "data/dist/factory_bundle.sqlite"
+    }
+  ],
+  "retained_shipped_artifacts": [
+    "data/models/param_model.pt",
+    "data/models/delta_param_model.pt"
+  ],
+  "rejected_experimental_artifacts": [
+    "param_model_stage2.pt",
+    "delta_param_model_stage2.pt"
+  ],
+  "relay_action": "Mac publishes the adopted artifacts from this manifest; the Windows Stage 2B run did not access or modify the relay."
+}
