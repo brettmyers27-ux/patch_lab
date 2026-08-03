@@ -7,6 +7,7 @@ import argparse
 import json
 import multiprocessing as mp
 import os
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -115,6 +116,28 @@ def _open_array(path: Path, shape: tuple[int, ...], dtype: str) -> np.memmap:
     return np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
 
 
+def _copy_runtime_targets(source_features: Path, output: Path) -> None:
+    """Carry forward non-embedding inputs required by the v2 predictor runtime."""
+
+    source = source_features / "serum2_targets.npz"
+    if not source.is_file():
+        raise RuntimeError(f"Missing Serum 2 runtime targets in source features: {source}")
+    destination = output / source.name
+    temporary = destination.with_name(destination.name + ".tmp")
+    shutil.copyfile(source, temporary)
+    temporary.replace(destination)
+
+
+def _close_memmaps(*arrays: np.memmap) -> None:
+    """Release Windows file handles before child tools replace index files."""
+
+    for array in arrays:
+        array.flush()
+        mapping = getattr(array, "_mmap", None)
+        if mapping is not None:
+            mapping.close()
+
+
 def _build_preset_level(
     output: Path,
     preset_ids: np.ndarray,
@@ -200,6 +223,7 @@ def main() -> int:
 
     output = args.output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    _copy_runtime_targets(source_features, output)
     np.savez_compressed(
         output / "note_manifest.npz",
         preset_ids=preset_ids,
@@ -261,6 +285,9 @@ def main() -> int:
     finally:
         scratch.cleanup()
     _build_preset_level(output, preset_ids, synths, note_embeddings, note_features)
+    # NumPy keeps memmap file handles open.  On Windows a child process cannot
+    # atomically replace an index file while its source mmap is still open.
+    _close_memmaps(note_embeddings, note_features, complete)
     python = str(Path(os.sys.executable).resolve())
     _run([python, "scripts/build_similarity_index.py", "--feature-dir", str(output), "--report", str(output / "similarity-report.json")])
     _run([python, "scripts/build_delta_neighbors.py", "--feature-dir", str(output), "--output", str(output / "delta_neighbors.npz"), "--report", str(output / "delta-neighbor-report.json")])

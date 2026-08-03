@@ -4,7 +4,13 @@ import json
 import sqlite3
 from pathlib import Path
 
-from scripts.stage2_rebuild_embeddings import renderability_inventory
+import numpy as np
+
+from scripts.stage2_rebuild_embeddings import (
+    _close_memmaps,
+    _copy_runtime_targets,
+    renderability_inventory,
+)
 
 
 def test_renderability_inventory_reports_missing_catalog_rows(tmp_path: Path, monkeypatch) -> None:
@@ -66,3 +72,28 @@ def test_renderability_inventory_reads_transferred_mapping_without_overwriting_i
 
     assert result["available"] == 1
     assert json.loads(mapping.read_text(encoding="utf-8"))["local_paths_by_hash"]["abc"] == str(preset)
+
+
+def test_rebuild_copies_serum2_runtime_targets(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    output.mkdir()
+    payload = b"runtime targets"
+    (source / "serum2_targets.npz").write_bytes(payload)
+
+    _copy_runtime_targets(source, output)
+
+    assert (output / "serum2_targets.npz").read_bytes() == payload
+
+
+def test_rebuild_closes_memmaps_before_windows_child_processes(tmp_path: Path) -> None:
+    path = tmp_path / "mapped.npy"
+    mapped = np.lib.format.open_memmap(path, mode="w+", dtype="float32", shape=(4,))
+    mapped[:] = 1.0
+
+    _close_memmaps(mapped)
+
+    replacement = np.full(4, 2.0, dtype=np.float32)
+    np.save(path, replacement)
+    assert np.array_equal(np.load(path), replacement)
