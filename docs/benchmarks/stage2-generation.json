@@ -1,0 +1,34 @@
+{
+  "audit": {
+    "all_audio_headers_valid": true,
+    "all_embeddings_and_features_finite": true,
+    "exact_patch_groups": 10000,
+    "missing_audio_files": 0,
+    "status": "PASS",
+    "temporary_files": 0
+  },
+  "base_clips": 30000,
+  "distinct_source_presets": 1152,
+  "elapsed_seconds": 35239.964,
+  "notes_per_patch": 3,
+  "processes": 4,
+  "raw_audio_bytes": 23042520000,
+  "render_coverage": {
+    "maximum": 1.0,
+    "mean": 0.971712092017127,
+    "minimum": 0.8516320474777448
+  },
+  "render_retries": 540,
+  "schema_version": 2,
+  "seed": 20260802,
+  "serum1_base_clips": 21042,
+  "serum2_automation_coverage_limit": "approximately 40%; structural",
+  "serum2_base_clips": 8958,
+  "shard_bytes": 1370758580,
+  "shards": 1000,
+  "status": "complete",
+  "throughput_base_clips_per_second": 0.8513061078829584,
+  "total_corpus_bytes": 24413278580,
+  "training_pairs": 390000,
+  "variants_per_clip": 13
+}
