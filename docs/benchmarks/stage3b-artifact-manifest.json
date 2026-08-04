@@ -1,0 +1,13 @@
+{
+  "adopted_artifacts": [],
+  "experimental_artifacts": [
+    {
+      "byte_size": 2074056,
+      "filename": "serum2_structural_fingerprints.npz",
+      "install_destination": "data/models/serum2_structural_fingerprints.npz",
+      "sha256": "843c33fcd628cb69c2a6cf977d1d559cd4040322f6f756467cfda105dc92e606",
+      "status": "complete controlled index; no estimator passed, do not publish"
+    }
+  ],
+  "notes": "No Stage 3B artifact is adopted. Do not touch the relay."
+}

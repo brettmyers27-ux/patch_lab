@@ -78,15 +78,25 @@ def staged_proposals(
     *,
     top_k: int = 2,
     fields: Mapping[str, list[str]] | None = None,
+    ranked_ids: Mapping[str, list[str]] | None = None,
+    enabled_categories: set[str] | frozenset[str] | None = None,
 ) -> dict[str, list[StructuralProposal]]:
     """Return measured-prior proposals while preserving full API reachability."""
 
     categories = vocabulary.get("categories", {})
     result: dict[str, list[StructuralProposal]] = {}
     for category in SEARCH_ORDER:
+        if enabled_categories is not None and category not in enabled_categories:
+            result[category] = []
+            continue
         entries = list(categories.get(category, {}).get("entries", []))
+        rank = {
+            identifier: index
+            for index, identifier in enumerate((ranked_ids or {}).get(category, ()))
+        }
         entries.sort(
             key=lambda item: (
+                rank.get(str(item.get("id", "")), len(rank)),
                 -int(item.get("observed_count", 0)),
                 str(item.get("id", "")),
             )

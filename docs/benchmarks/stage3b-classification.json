@@ -1,0 +1,9 @@
+{
+  "cause": "Unmarked filenames fell through to an unconditional serum2 default.",
+  "correction": "Explicit [S1]/[S2] and Serum 1/2 markers remain authoritative. For the fixed BAM corpus, .aif/.aiff identifies its original Serum 1 bounce batch and .wav identifies its later Serum 2 bounce batch.",
+  "membership_changed": false,
+  "scoring_changed": false,
+  "total": 99,
+  "serum1": 47,
+  "serum2": 52
+}

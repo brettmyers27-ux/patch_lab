@@ -49,3 +49,19 @@ def test_discovers_every_slot_in_a_base_graph() -> None:
     assert fields["wavetable"] == ["Oscillator0.WTOsc0.relativePathToWT"]
     assert fields["fx_type"] == ["FXRack0.FX.0.type", "FXRack0.FX.1.type"]
     assert fields["mod_route"] == ["ModSlot0", "ModSlot1"]
+
+
+def test_controlled_ranking_reorders_and_gates_categories() -> None:
+    vocabulary = {"categories": {name: {"entries": []} for name in SEARCH_ORDER}}
+    vocabulary["categories"]["wavetable"]["entries"] = [
+        {"id": "common", "value": "Common.wav", "observed_count": 10},
+        {"id": "measured", "value": "Measured.wav", "observed_count": 1},
+    ]
+    result = staged_proposals(
+        vocabulary,
+        top_k=1,
+        ranked_ids={"wavetable": ["measured"]},
+        enabled_categories=frozenset({"wavetable"}),
+    )
+    assert result["wavetable"][0].stable_id == "measured"
+    assert result["fx_type"] == []

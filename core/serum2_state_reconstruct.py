@@ -116,6 +116,16 @@ def decode_host_template(vstpreset: bytes) -> HostStateTemplate:
     )
 
 
+def encode_host_template(template: HostStateTemplate) -> bytes:
+    """Encode a complete two-chunk VST3 state after controlled graph edits."""
+
+    return build_vstpreset(
+        encode_xfer_state(template.component),
+        template.class_id,
+        controller_state=encode_xfer_state(template.controller),
+    )
+
+
 def _kind(value: Any) -> type[Any]:
     return type(value)
 

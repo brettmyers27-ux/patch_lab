@@ -1,6 +1,7 @@
 import numpy as np
 
 from core.structural_estimators import (
+    ControlledFingerprintIndex,
     NearestStructuralEstimator,
     deterministic_split,
     evaluate_estimator,
@@ -28,3 +29,21 @@ def test_split_is_stable_by_preset_id() -> None:
     train, test = deterministic_split([1, 2, 5, 6, 10])
     assert train.tolist() == [0, 1, 3]
     assert test.tolist() == [2, 4]
+
+
+def test_controlled_index_round_trips_without_pickle(tmp_path) -> None:
+    index = ControlledFingerprintIndex(
+        {"wavetable": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)},
+        {"wavetable": ["wt-a", "wt-b"]},
+        {"wavetable": ["A.wav", "B.wav"]},
+        adopted={"wavetable"},
+        metadata={"schema_version": 1},
+    )
+    path = tmp_path / "fingerprints.npz"
+    index.save(path)
+    loaded = ControlledFingerprintIndex.load(path)
+    ranked = loaded.rank_descriptor(
+        "wavetable", np.asarray([0.0, 1.0], dtype=np.float32), top_k=1
+    )
+    assert ranked[0].value == "wt-b"
+    assert loaded.adopted == frozenset({"wavetable"})

@@ -31,10 +31,11 @@ def test_benchmark_audio_files_keeps_real_aiff_and_wav_only(tmp_path: Path) -> N
     ]
 
 
-def test_target_synth_defaults_to_serum2_and_honors_filename_marker() -> None:
-    assert target_synth_for_name("Dill Bass 1.aif") == "serum2"
+def test_target_synth_uses_bam_source_format_and_honors_filename_marker() -> None:
+    assert target_synth_for_name("Dill Bass 1.aif") == "serum1"
+    assert target_synth_for_name("Later target.wav") == "serum2"
     assert target_synth_for_name("Example [S1].wav") == "serum1"
-    assert target_synth_for_name("Example Serum 2.wav") == "serum2"
+    assert target_synth_for_name("Example Serum 2.aif") == "serum2"
 
 
 def test_musical_gate_is_deterministic_and_changes_amplitude() -> None:

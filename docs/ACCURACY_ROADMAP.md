@@ -36,6 +36,9 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
   0.780465 and retrieval@1 0.775, so the shipped predictors remain production.
   Historical macOS figures (~0.99 in-library, ~0.87 lightly disguised, ~0.82 forced
   rebuild, ~0.68 BAM) remain historical rather than current acceptance claims.
+- Stage 3B corrected the fixed BAM corpus split to 47 Serum 1 AIFF files and 52 Serum 2 WAV
+  files without changing membership or scores. The adopted Stage 2B Serum 2 subset has BAM
+  mean **0.794525**, median 0.804774, and minimum 0.647449.
 - UI: PySide6, 16:9 proportionally-scaled canvas (QGraphicsScene at 1920×1080 design size).
   UI gates: `scripts/verify_visual_redesign.py` and `scripts/verify_milestone4_ui.py` must
   keep passing after any change. (`scripts/verify_milestone7_ui_fixes.py` is stale/superseded.)
@@ -133,6 +136,13 @@ Nothing may be silently dropped.
   gate regressed BAM 0.784226 → **0.780600** while retrieval/invariance stayed unchanged.
   Structural search remains opt-in; Stage 2B remains production. Better learned structural
   guidance is a prerequisite before retesting this path.
+- **Stage 3B — controlled structural fingerprints** (completed, not adopted, Windows RTX
+  5070, 2026-08-03): rendered the complete controlled set of 16 FX types, 330 wavetables,
+  4,906 observed routes, and 230 noise samples with zero failures. Against the identical
+  Stage 3A holdout, FX tied rather than beat its common baseline (0.207143), while wavetable
+  scored 0.008403, route 0.000000, and noise 0.000000; all four were dropped. With zero
+  passing estimators the gated B arm was correctly skipped. The isolated-choice-to-full-patch
+  domain gap remains the guidance blocker; Stage 2B and opt-in structural search are unchanged.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

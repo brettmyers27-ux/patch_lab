@@ -125,7 +125,12 @@ def target_synth_for_name(name: str) -> str:
         return "serum1"
     if any(marker in folded for marker in serum2_markers):
         return "serum2"
-    return "serum2"
+    # This fixed 99-file user-authorized corpus was assembled in two source
+    # batches: the original 47 Serum 1 AIFF bounces and 52 later Serum 2 WAV
+    # bounces.  Keep explicit markers authoritative for future files, then use
+    # that preserved source-format provenance instead of classifying every
+    # unmarked filename as Serum 2.
+    return "serum1" if Path(name).suffix.casefold() in {".aif", ".aiff"} else "serum2"
 
 
 def _detail_name(path: Path) -> str:

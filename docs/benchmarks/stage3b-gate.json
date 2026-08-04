@@ -1,0 +1,35 @@
+{
+  "seed": 20260802,
+  "arm_a": {
+    "source": "Stage 2B adopted stack; recorded result reused as required",
+    "whole": {
+      "bam_count": 99,
+      "bam_mean": 0.7842257950041029,
+      "bam_median": 0.793119490146637,
+      "bam_minimum": 0.5415499806404114,
+      "retrieval_count": 200,
+      "retrieval_at_1": 0.785,
+      "retrieval_at_5": 0.895,
+      "invariance_count": 300,
+      "invariance_at_1": 0.4033333333333333,
+      "invariance_at_5": 0.5966666666666667
+    },
+    "serum2_subset": {
+      "bam_count": 52,
+      "bam_mean": 0.794524624943733,
+      "bam_median": 0.804773509502411,
+      "bam_minimum": 0.6474489569664,
+      "retrieval_count": 128,
+      "retrieval_at_1": 0.8125,
+      "retrieval_at_5": 0.8984375,
+      "invariance_count": 204,
+      "invariance_at_1": 0.46078431372549,
+      "invariance_at_5": 0.612745098039216
+    }
+  },
+  "arm_b": {
+    "status": "not_run",
+    "reason": "Zero controlled estimators beat their fixed Stage 3A most-common-value top-1 baseline; Stage 3B explicitly forbids rerunning the failed structural-search arm in this case."
+  },
+  "decision": "not_adopted; structural search remains opt-in and disabled by default"
+}

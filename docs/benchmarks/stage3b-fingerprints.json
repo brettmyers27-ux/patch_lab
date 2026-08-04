@@ -1,0 +1,36 @@
+{
+  "artifact": {
+    "byte_size": 2074056,
+    "filename": "serum2_structural_fingerprints.npz",
+    "sha256": "843c33fcd628cb69c2a6cf977d1d559cd4040322f6f756467cfda105dc92e606",
+    "status": "experimental; no estimator passed, do not publish"
+  },
+  "neutral_patch": {
+    "fx_type": "Preset 4423, fixed one-slot FXRack0 carrier; only the slot-0 integer type changes.",
+    "mod_route": "Fixed depth 32 in ModSlot0. Serum validates destination topology, so 333 deterministic neutralized carriers cover mutually exclusive destination module type/ID pairs.",
+    "noise_sample": "Preset 699, noise at unity, Osc0/1/2 silent, dry and unmodulated; only the noise path changes.",
+    "shared": "C4 (MIDI 60), 1.0 second, filter disabled except for route destinations, modulation depths zero except the measured route. Wavetable/noise use an empty FX topology; FX/route carriers retain a fixed validated topology because Serum rejects topology-list rewrites.",
+    "wavetable": "Preset 699, dry Osc0 at unity, Osc1/2/noise silent and unmodulated; only the Osc0 wavetable path changes."
+  },
+  "phase1": {
+    "fx_type": {"enumerated": 16, "rendered": 16, "failed": 0, "wall_clock_s": 1.8018516000011005, "median_render_s": 0.03377390000241576},
+    "wavetable": {"enumerated": 330, "rendered": 330, "failed": 0, "wall_clock_s": 12.057866000002832, "median_render_s": 0.03545740000845399},
+    "mod_route": {"enumerated": 4906, "rendered": 4906, "failed": 0, "wall_clock_s": 548.1347416000062, "median_render_s": 0.0784328999943682},
+    "noise_sample": {"enumerated": 230, "rendered": 230, "failed": 0, "wall_clock_s": 15.987379600002896, "median_render_s": 0.06599229999119416}
+  },
+  "phase2": {
+    "heldout_split": "Same Stage 3A preset_id modulo 5; zero is held out.",
+    "ground_truth_rendered": 710,
+    "ground_truth_failures": 0,
+    "ground_truth_wall_clock_s": 126.41766560000542,
+    "estimators": {
+      "fx_type": {"heldout_samples": 140, "classes": 16, "top1": 0.20714285714285716, "top5": 0.7285714285714285, "common_top1": 0.20714285714285716, "common_top5": 0.7285714285714285, "adopted": false},
+      "wavetable": {"heldout_samples": 119, "classes": 173, "top1": 0.008403361344537815, "top5": 0.01680672268907563, "common_top1": 0.35294117647058826, "common_top5": 0.5126050420168067, "adopted": false},
+      "mod_route": {"heldout_samples": 140, "classes": 204, "top1": 0.0, "top5": 0.007142857142857143, "common_top1": 0.11428571428571428, "common_top5": 0.2571428571428571, "adopted": false},
+      "noise_sample": {"heldout_samples": 115, "classes": 102, "top1": 0.0, "top5": 0.0, "common_top1": 0.6, "common_top5": 0.6869565217391305, "adopted": false}
+    },
+    "adopted_estimators": []
+  },
+  "full_run_wall_clock_s": 749.1643528999994,
+  "status": "complete"
+}
