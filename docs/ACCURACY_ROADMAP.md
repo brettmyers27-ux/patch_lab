@@ -44,6 +44,11 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
   1,224/4,906 modulation routes and 10/230 noise samples. Route measurements include
   131 zero descriptors; 2,528 route rows fall into near-duplicate clusters at cosine
   distance `1e-4`. No candidate sweep or A/B was run, and Stage 2B remains production.
+- Stage 3D repaired noise to 220 and routes to 2,485 unambiguous candidates; both
+  pass exhaustive self-retrieval with zero clusters through distance `1e-4`.
+  FX+wavetable+noise in-context search improved the Serum 2 BAM mean 0.794525 to
+  **0.796935** and whole-set mean 0.784226 to **0.785492**, but current-machine
+  retrieval@1 measured 0.780 below the 0.785 adoption gate. It is not adopted.
 - UI: PySide6, 16:9 proportionally-scaled canvas (QGraphicsScene at 1920×1080 design size).
   UI gates: `scripts/verify_visual_redesign.py` and `scripts/verify_milestone4_ui.py` must
   keep passing after any change. (`scripts/verify_milestone7_ui_fixes.py` is stale/superseded.)
@@ -156,6 +161,17 @@ Nothing may be silently dropped.
   candidates were searched, deep mode was not implemented, and the 99-file A/B was not
   run. The immediate blocker is fingerprint integrity/resource distinguishability, not
   yet evidence that search, guidance, or the scoring objective is the final limit.
+- **Stage 3D — fingerprint repair and resumed in-context search** (completed, not
+  adopted, Windows RTX 5070, 2026-08-12): all ten noise failures were duplicate
+  aliases with available, audio-equivalent resources; eight representative samples
+  from the 131 zero-descriptor routes proved inactive in their controlled carriers.
+  Deduplication yielded 220 noise and
+  2,485 route candidates, both passing exhaustive integrity gates. The 52-file Serum
+  2 arm searched FX, wavetable, and noise; route narrowing retained 605–1,847 choices
+  and routes were skipped. BAM improved to 0.796935 on Serum 2 and 0.785492 overall,
+  but retrieval@1 reran at 0.780 below the 0.785 gate, so deep search remains opt-in
+  and Stage 2B remains production. Search is now measured as useful; route guidance
+  and the upstream retrieval gate remain the blockers, not a proven scoring limit.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

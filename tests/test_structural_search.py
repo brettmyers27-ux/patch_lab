@@ -1,4 +1,12 @@
-from core.structural_search import SEARCH_ORDER, discover_structural_fields, staged_proposals
+import numpy as np
+
+from core.structural_search import (
+    SEARCH_ORDER,
+    discover_structural_fields,
+    measure_periodic_movement,
+    narrow_mod_route_ids,
+    staged_proposals,
+)
 
 
 def test_staged_proposals_use_fixed_order_and_observed_frequency() -> None:
@@ -65,3 +73,51 @@ def test_controlled_ranking_reorders_and_gates_categories() -> None:
     )
     assert result["wavetable"][0].stable_id == "measured"
     assert result["fx_type"] == []
+
+
+def test_exhaustive_proposals_respect_repaired_allow_list() -> None:
+    vocabulary = {"categories": {name: {"entries": []} for name in SEARCH_ORDER}}
+    vocabulary["categories"]["fx_type"]["entries"] = [
+        {"id": "zero", "value": 0},
+        {"id": "one", "value": 1},
+        {"id": "two", "value": 2},
+    ]
+    result = staged_proposals(
+        vocabulary,
+        top_k=None,
+        enabled_categories=frozenset({"fx_type"}),
+        allowed_ids={"fx_type": frozenset({"zero", "two"})},
+    )
+    assert [proposal.stable_id for proposal in result["fx_type"]] == ["two", "zero"]
+
+
+def test_periodic_route_narrowing_uses_measured_axis() -> None:
+    sample_rate = 48_000
+    time = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+    carrier = np.sin(2.0 * np.pi * 220.0 * time)
+    audio = carrier * (0.6 + 0.4 * np.sin(2.0 * np.pi * 4.0 * time))
+    movement = measure_periodic_movement(audio, sample_rate)
+    assert movement["amplitude"] is True
+    entries = [
+        {
+            "id": "gain",
+            "value": {
+                "destination": {
+                    "destModuleParamName": "kParamGain",
+                    "destModuleTypeString": "FXComp",
+                }
+            },
+        },
+        {
+            "id": "pitch",
+            "value": {
+                "destination": {
+                    "destModuleParamName": "kParamPitch",
+                    "destModuleTypeString": "WTOsc",
+                }
+            },
+        },
+    ]
+    retained, report = narrow_mod_route_ids(entries, movement)
+    assert "gain" in retained
+    assert report["input_candidates"] == 2

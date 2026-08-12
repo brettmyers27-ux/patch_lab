@@ -67,11 +67,17 @@ def main() -> int:
     parser.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--sample-count", type=int, default=20)
+    parser.add_argument(
+        "--categories",
+        nargs="+",
+        choices=CATEGORIES,
+        default=list(CATEGORIES),
+    )
     args = parser.parse_args()
     archive = np.load(args.index.expanduser().resolve(), allow_pickle=False)
     categories: dict[str, object] = {}
     hard_gate_passed = True
-    for category in CATEGORIES:
+    for category in args.categories:
         features = np.asarray(archive[f"{category}__features"], dtype=np.float32)
         stable_ids = archive[f"{category}__stable_ids"].tolist()
         sample_indices = deterministic_sample_indices(len(features), args.sample_count)

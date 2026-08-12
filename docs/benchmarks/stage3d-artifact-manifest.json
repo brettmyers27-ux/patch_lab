@@ -1,0 +1,5 @@
+{
+  "adopted_artifacts": [],
+  "experimental_artifacts": [],
+  "notes": "Stage 3D was not adopted because retrieval@1 measured 0.780, below the 0.785 gate. Repaired private fingerprints and policy remain below data/ and must not be published; do not touch the relay."
+}

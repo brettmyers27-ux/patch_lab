@@ -2,6 +2,7 @@ import numpy as np
 
 from core.structural_fingerprint_validation import (
     deterministic_sample_indices,
+    distinctness_components,
     distinctness_clusters,
     self_retrieval,
 )
@@ -34,3 +35,11 @@ def test_deterministic_sample_covers_short_and_long_sets() -> None:
     assert len(selected) == 20
     assert selected[0] == 0
     assert selected[-1] == 99
+
+
+def test_distinctness_components_returns_only_duplicate_groups() -> None:
+    features = np.asarray(
+        [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+        dtype=np.float32,
+    )
+    assert distinctness_components(features, threshold=1e-7) == ((0, 1), (2, 3))

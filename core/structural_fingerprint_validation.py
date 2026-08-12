@@ -26,6 +26,59 @@ class DistinctnessResult:
     singleton_count: int
 
 
+def distinctness_components(
+    features: np.ndarray, *, threshold: float, block_size: int = 256
+) -> tuple[tuple[int, ...], ...]:
+    """Return deterministic non-singleton cosine-distance components."""
+
+    matrix = np.asarray(features, dtype=np.float32)
+    if matrix.ndim != 2:
+        raise ValueError("features must be a matrix")
+    if threshold < 0 or block_size <= 0:
+        raise ValueError("threshold must be non-negative and block_size positive")
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    matrix = matrix / np.maximum(norms, 1e-8)
+    count = len(matrix)
+    parent = np.arange(count, dtype=np.int64)
+    sizes = np.ones(count, dtype=np.int64)
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = int(parent[index])
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root == right_root:
+            return
+        if sizes[left_root] < sizes[right_root]:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        sizes[left_root] += sizes[right_root]
+
+    for start in range(0, count, block_size):
+        similarities = matrix[start : start + block_size] @ matrix.T
+        for local_index, row in enumerate(similarities):
+            index = start + local_index
+            neighbors = (
+                np.flatnonzero((1.0 - row[index + 1 :]) <= threshold)
+                + index
+                + 1
+            )
+            for neighbor in neighbors:
+                union(index, int(neighbor))
+
+    groups: dict[int, list[int]] = {}
+    for index in range(count):
+        groups.setdefault(find(index), []).append(index)
+    return tuple(
+        tuple(members)
+        for _root, members in sorted(groups.items())
+        if len(members) > 1
+    )
+
+
 def deterministic_sample_indices(count: int, requested: int = 20) -> np.ndarray:
     """Return stable, evenly-spaced indices without duplicating short sets."""
 

@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "stage": "3D",
+  "status": "complete_not_adopted",
+  "seed": 20260802,
+  "repair": {
+    "noise_sample": {
+      "input_candidates": 230,
+      "missing_source_overlap": 0,
+      "duplicate_clusters": 10,
+      "duplicate_members": 20,
+      "normalized_path_alias_pairs": 8,
+      "decoded_audio_equivalent_pairs": 10,
+      "retained_candidates": 220,
+      "self_retrieval": "220/220",
+      "near_duplicate_clusters_at_1e-4": 0
+    },
+    "mod_route": {
+      "input_candidates": 4906,
+      "zero_descriptor_candidates": 131,
+      "sampled_zero_rows": 8,
+      "sampled_audio_differences_at_depth_32": 0,
+      "sampled_audio_differences_at_depth_100": 0,
+      "sampled_duplicate_clusters": 8,
+      "sampled_clusters_with_identical_loaded_lfo_macro_settings": 8,
+      "duplicate_clusters": 239,
+      "duplicate_members": 2529,
+      "largest_cluster": 289,
+      "retained_candidates": 2485,
+      "self_retrieval": "2485/2485",
+      "near_duplicate_clusters_at_1e-4": 0
+    }
+  },
+  "deep_mode": {
+    "enabled_by_default": false,
+    "structural_budget": 4096,
+    "structural_time_limit_seconds": 900,
+    "continuous_budget": 300,
+    "coordinate_passes": 1,
+    "second_pass_smoke_changes": "0/2 targets",
+    "embedding_batch_size": 32,
+    "serum2_target_wall_clock_seconds": {
+      "mean": 103.807077,
+      "median": 78.539,
+      "maximum": 328.125,
+      "total": 5397.968
+    },
+    "searched_categories": {
+      "wavetable": {
+        "targets": 52,
+        "candidates_per_target_min": 330,
+        "candidates_per_target_median": 990,
+        "candidates_per_target_max": 990
+      },
+      "fx_type": {
+        "targets": 52,
+        "candidates_per_target_min": 16,
+        "candidates_per_target_median": 104,
+        "candidates_per_target_max": 400
+      },
+      "noise_sample": {
+        "targets": 52,
+        "candidates_per_target_min": 220,
+        "candidates_per_target_median": 220,
+        "candidates_per_target_max": 220
+      }
+    },
+    "mod_route_narrowing": {
+      "targets": 52,
+      "practical_limit": 300,
+      "survivors_min": 605,
+      "survivors_median": 1606,
+      "survivors_max": 1847,
+      "targets_searched": 0
+    }
+  },
+  "ab": {
+    "population": {
+      "whole_set": 99,
+      "serum1_reused_unaffected": 47,
+      "serum2_evaluated": 52
+    },
+    "arm_a": {
+      "whole_mean": 0.784226,
+      "serum2_mean": 0.794525,
+      "serum2_median": 0.804774,
+      "serum2_minimum": 0.647449,
+      "retrieval_at_1": 0.785,
+      "retrieval_at_5": 0.895,
+      "invariance_at_1": 0.403333,
+      "invariance_at_5": 0.596667
+    },
+    "arm_b": {
+      "whole_mean": 0.785491813,
+      "whole_median": 0.806938171,
+      "whole_minimum": 0.541549981,
+      "serum2_mean": 0.796934928,
+      "serum2_median": 0.809768647,
+      "serum2_minimum": 0.636777461,
+      "serum2_structural_winners": 45,
+      "serum2_improved": 28,
+      "serum2_regressed": 24,
+      "serum2_mean_delta": 0.002410303,
+      "retrieval_at_1": 0.78,
+      "retrieval_at_5": 0.89,
+      "invariance_at_1": 0.403333333,
+      "invariance_at_5": 0.596666667,
+      "errors": 0
+    },
+    "adoption_gate": {
+      "serum2_bam_improved": true,
+      "whole_bam_not_regressed": true,
+      "retrieval_at_1_at_least_0_785": false,
+      "invariance_at_1_at_least_0_403333": true,
+      "tests_passed": true,
+      "ui_gates_passed": true,
+      "adopted": false
+    }
+  }
+}

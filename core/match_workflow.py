@@ -439,7 +439,15 @@ def run_match_file(
             {
                 "phase": "complete",
                 "evaluations": result.evaluations,
-                "budget": BUDGETS[budget].max_evaluations,
+                "budget": BUDGETS[budget].max_evaluations
+                + (
+                    BUDGETS[budget].structural_max_evaluations
+                    if os.environ.get(
+                        "PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0"
+                    ).strip()
+                    == "1"
+                    else 0
+                ),
                 "best_clap_cosine": result.best.clap_cosine,
             },
         )

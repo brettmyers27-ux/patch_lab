@@ -53,6 +53,9 @@ DEFAULT_BAM_DIR = Path.home() / "Documents" / "PatchLab" / "benchmarks" / "BAM"
 DEFAULT_DETAIL_DIR = PROJECT_ROOT / "data" / "stage2" / "baseline"
 DEFAULT_SUMMARY = PROJECT_ROOT / "docs" / "benchmarks" / "stage2-baseline.json"
 DEFAULT_SEED = 20260802
+ADOPTED_STAGE2B_BAM_DETAILS = (
+    PROJECT_ROOT / "data" / "stage2" / "stage2b-c-clean" / "bam"
+)
 SERUM2_AUTOMATION_WEIGHTED_COVERAGE = 0.40324104899160207
 APPLEDOUBLE_PREFIX = "._"
 BENCHMARK_AUDIO_SUFFIXES = SUPPORTED_AUDIO_SUFFIXES - {".mp3", ".flac", ".ogg"}
@@ -209,11 +212,47 @@ def run_bam_suite(
             "stack": asdict(stack),
         }
         detail_path = output_dir / _detail_name(source)
-        existing = _load_resumable(detail_path, expected)
-        if existing is not None and existing.get("status") == "complete":
-            row = existing
-            disposition = "resumed"
+        adopted_serum1 = ADOPTED_STAGE2B_BAM_DETAILS / _detail_name(source)
+        if (
+            os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0").strip()
+            == "1"
+            and target_synth == "serum1"
+            and adopted_serum1.is_file()
+        ):
+            baseline = json.loads(adopted_serum1.read_text(encoding="utf-8"))
+            row = {
+                **expected,
+                **{
+                    key: baseline.get(key)
+                    for key in (
+                        "status",
+                        "source",
+                        "source_name",
+                        "clap_similarity",
+                        "meaningfully_modified",
+                        "origin",
+                        "optimizer_weighted_coverage_before",
+                        "optimizer_weighted_coverage_after",
+                    )
+                },
+                "evaluations": 0,
+                "structural_override_count": 0,
+                "match_elapsed_s": 0.0,
+                "wall_clock_s": 0.0,
+                "error": None,
+                "reused_unaffected_arm": "Stage 2B adopted Serum 1 row",
+            }
+            _atomic_json(detail_path, row)
+            disposition = "reused-unaffected"
         else:
+            existing = _load_resumable(detail_path, expected)
+            if existing is not None and existing.get("status") == "complete":
+                row = existing
+                disposition = "resumed"
+            else:
+                row = None
+                disposition = "pending"
+        if disposition == "pending":
             sample_started = time.monotonic()
             print(
                 f"BAM_START={index}/{len(files)} file={source.name} synth={target_synth}",
