@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "stage": "3C",
+  "phase": 0,
+  "hard_gate_passed": false,
+  "decision": "stop before in-context structural search",
+  "self_retrieval_rule": "A fingerprint queried against its production-normalized index must rank its own stable ID first, using the production stable-ID tie break.",
+  "distinctness_rule": "Connected components at cosine-distance thresholds 1e-7, 1e-6, and 1e-4.",
+  "categories": {
+    "fx_type": {
+      "candidates": 16,
+      "descriptor_dimensions": 140,
+      "sampled_self_retrieval": {
+        "passed": 16,
+        "queried": 16
+      },
+      "exhaustive_self_retrieval": {
+        "passed": 16,
+        "queried": 16
+      },
+      "zero_descriptors": 0,
+      "distinctness": {
+        "1e-7": {"pairs": 0, "clusters": 0, "members": 0, "largest_cluster": 1},
+        "1e-6": {"pairs": 0, "clusters": 0, "members": 0, "largest_cluster": 1},
+        "1e-4": {"pairs": 0, "clusters": 0, "members": 0, "largest_cluster": 1}
+      },
+      "hard_gate_passed": true
+    },
+    "wavetable": {
+      "candidates": 330,
+      "descriptor_dimensions": 140,
+      "sampled_self_retrieval": {
+        "passed": 20,
+        "queried": 20
+      },
+      "exhaustive_self_retrieval": {
+        "passed": 330,
+        "queried": 330
+      },
+      "zero_descriptors": 0,
+      "distinctness": {
+        "1e-7": {"pairs": 0, "clusters": 0, "members": 0, "largest_cluster": 1},
+        "1e-6": {"pairs": 0, "clusters": 0, "members": 0, "largest_cluster": 1},
+        "1e-4": {"pairs": 9, "clusters": 5, "members": 12, "largest_cluster": 4}
+      },
+      "hard_gate_passed": true
+    },
+    "mod_route": {
+      "candidates": 4906,
+      "descriptor_dimensions": 108,
+      "sampled_self_retrieval": {
+        "passed": 16,
+        "queried": 20
+      },
+      "exhaustive_self_retrieval": {
+        "passed": 3682,
+        "queried": 4906
+      },
+      "zero_descriptors": 131,
+      "distinctness": {
+        "1e-7": {"pairs": 54229, "clusters": 127, "members": 1232, "largest_cluster": 267},
+        "1e-6": {"pairs": 55508, "clusters": 174, "members": 1411, "largest_cluster": 267},
+        "1e-4": {"pairs": 73474, "clusters": 238, "members": 2528, "largest_cluster": 289}
+      },
+      "hard_gate_passed": false
+    },
+    "noise_sample": {
+      "candidates": 230,
+      "descriptor_dimensions": 140,
+      "sampled_self_retrieval": {
+        "passed": 19,
+        "queried": 20
+      },
+      "exhaustive_self_retrieval": {
+        "passed": 220,
+        "queried": 230
+      },
+      "zero_descriptors": 0,
+      "distinctness": {
+        "1e-7": {"pairs": 9, "clusters": 9, "members": 18, "largest_cluster": 2},
+        "1e-6": {"pairs": 10, "clusters": 10, "members": 20, "largest_cluster": 2},
+        "1e-4": {"pairs": 10, "clusters": 10, "members": 20, "largest_cluster": 2}
+      },
+      "hard_gate_passed": false
+    }
+  },
+  "searched_candidate_counts": {
+    "fx_type": 0,
+    "wavetable": 0,
+    "mod_route": 0,
+    "noise_sample": 0
+  },
+  "deep_mode_wall_clock_seconds": null,
+  "ab_benchmark_run": false,
+  "production_changed": false
+}

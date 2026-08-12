@@ -6,7 +6,7 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 
 ---
 
-## 1. Project facts (verified as of 2026-08-03)
+## 1. Project facts (verified as of 2026-08-12)
 
 - Repo: `~/Documents/PatchLab/soundmatch`, venv at `.venv`, run app via `.venv/bin/python app/main.py`.
 - Rendering: headless VST hosting via DawDreamer (+ Pedalboard for state work). **Never**
@@ -39,6 +39,11 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 - Stage 3B corrected the fixed BAM corpus split to 47 Serum 1 AIFF files and 52 Serum 2 WAV
   files without changing membership or scores. The adopted Stage 2B Serum 2 subset has BAM
   mean **0.794525**, median 0.804774, and minimum 0.647449.
+- Stage 3C stopped at its Phase 0 hard gate before search. Production-normalized
+  self-retrieval passed for all 16 FX and 330 wavetable fingerprints, but failed for
+  1,224/4,906 modulation routes and 10/230 noise samples. Route measurements include
+  131 zero descriptors; 2,528 route rows fall into near-duplicate clusters at cosine
+  distance `1e-4`. No candidate sweep or A/B was run, and Stage 2B remains production.
 - UI: PySide6, 16:9 proportionally-scaled canvas (QGraphicsScene at 1920×1080 design size).
   UI gates: `scripts/verify_visual_redesign.py` and `scripts/verify_milestone4_ui.py` must
   keep passing after any change. (`scripts/verify_milestone7_ui_fixes.py` is stale/superseded.)
@@ -143,6 +148,14 @@ Nothing may be silently dropped.
   scored 0.008403, route 0.000000, and noise 0.000000; all four were dropped. With zero
   passing estimators the gated B arm was correctly skipped. The isolated-choice-to-full-patch
   domain gap remains the guidance blocker; Stage 2B and opt-in structural search are unchanged.
+- **Stage 3C — in-context structural search** (stopped at Phase 0, not adopted, Windows RTX
+  5070, 2026-08-12): the mandatory index-integrity check found rank-1 self-retrieval
+  failures in modulation routes (1,224/4,906) and noise samples (10/230). Distinctness
+  analysis found 131 zero route descriptors and 2,528 route rows in near-duplicate
+  clusters at distance `1e-4`; FX and wavetable passed. Per the hard gate, zero
+  candidates were searched, deep mode was not implemented, and the 99-file A/B was not
+  run. The immediate blocker is fingerprint integrity/resource distinguishability, not
+  yet evidence that search, guidance, or the scoring objective is the final limit.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.
