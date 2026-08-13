@@ -29,7 +29,9 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
   the automation surface.
 - Current Windows Stage 2B ladder (99 user-authorized BAM files): the adopted fine-tuned
   encoder + complete v2 indexes + shipped predictors scores BAM mean **0.784226**, median
-  0.793119, minimum 0.541550; factory retrieval@1 **0.785** and @5 0.895;
+  0.793119, minimum 0.541550. The old per-stage cache measured factory retrieval@1
+  0.785 and @5 0.895; Stage 3F's canonical frozen corpus now measures **0.775** and
+  **0.890** and is the trustworthy forward reference.
   rhythm/codec/pitch/loudness invariance retrieval@1 **0.403333** and @5 0.596667.
   The previous pinned production stack scored BAM mean 0.770395, retrieval@1 0.560, and
   invariance@1 0.256667. The fine-tuned + retrained-predictor alternative scored BAM mean
@@ -181,6 +183,15 @@ Nothing may be silently dropped.
   The Stage 3D adoption decision was not re-adjudicated, production remains
   unchanged, and future retrieval gates should freeze canonical renders or average
   independent render-cache populations.
+- **Stage 3F — frozen retrieval corpus and Stage 3D re-adjudication** (completed,
+  not adopted, Windows RTX 5070, 2026-08-13): froze the deterministic 200-preset
+  selection under the private benchmark cache and committed only its ID/hash
+  manifest. Two reads preserved all WAV hashes and timestamps and returned identical
+  rows at **0.775@1 / 0.890@5**. Fresh isolated renders of IDs 190 and 216 differed
+  from their frozen copies, directly confirming the host-state sensitivity and the
+  need for this corpus. The canonical retrieval@1 misses the 0.785 gate, so Stage
+  3D's FX/wavetable/noise search remains opt-in; routes remain excluded and the
+  relay is unchanged.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "stage": "3F",
+  "date": "2026-08-13",
+  "platform": "Windows 11 / RTX 5070",
+  "seed": 20260802,
+  "factory_count": 200,
+  "frozen_corpus": {
+    "render_count": 200,
+    "frozen_at_commit": "8229b12610d2323866758a8935e746c9648a6b66",
+    "audio_committed": false,
+    "manifest_committed": true,
+    "run_1_retrieval_at_1": 0.775,
+    "run_1_retrieval_at_5": 0.89,
+    "run_2_retrieval_at_1": 0.775,
+    "run_2_retrieval_at_5": 0.89,
+    "per_preset_rows_identical": true,
+    "wav_hashes_and_mtimes_unchanged": true
+  },
+  "fresh_host_checks": {
+    "preset_190": {
+      "byte_identical_to_frozen": false,
+      "clap_cosine_to_frozen": 0.769618729070913
+    },
+    "preset_216": {
+      "byte_identical_to_frozen": false,
+      "clap_cosine_to_frozen": 0.8909117645139286
+    }
+  },
+  "historical_comparison": {
+    "old_reused_cache": {"retrieval_at_1": 0.785, "retrieval_at_5": 0.895},
+    "stage3d_cache": {"retrieval_at_1": 0.78, "retrieval_at_5": 0.89},
+    "stage3e_cache": {"retrieval_at_1": 0.78, "retrieval_at_5": 0.895},
+    "frozen_matches": "neither historical pair; it is one top-1 miss below Stage 3D/3E and matches Stage 3D at top-5"
+  },
+  "stage3d_re_adjudication": {
+    "whole_bam_before": 0.784226,
+    "whole_bam_after": 0.785492,
+    "serum2_bam_before": 0.794525,
+    "serum2_bam_after": 0.796935,
+    "invariance_at_1": 0.403333,
+    "invariance_at_5": 0.596667,
+    "retrieval_at_1_gate": 0.785,
+    "retrieval_at_1_actual": 0.775,
+    "adopted": false,
+    "default_flipped": false,
+    "searched_categories_remaining_opt_in": ["fx_type", "wavetable", "noise_sample"],
+    "mod_routes_excluded": true,
+    "relay_changed": false
+  },
+  "verification": {
+    "tests_passed": 124,
+    "visual_redesign_gate": true,
+    "milestone4_ui_gate": true
+  },
+  "private_details": "The rendered audio, full retrieval rows, and fresh-host diagnostics remain below data/ and are not committed."
+}

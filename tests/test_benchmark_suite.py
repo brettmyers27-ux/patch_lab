@@ -7,6 +7,8 @@ import soundfile as sf
 
 from scripts.benchmark_suite import (
     BenchmarkFactoryPreset,
+    _validate_frozen_corpus_manifest,
+    _write_frozen_corpus_manifest,
     _musical_gate,
     benchmark_audio_files,
     target_synth_for_name,
@@ -64,3 +66,46 @@ def test_benchmark_factory_identity_keeps_bundle_and_catalog_ids_distinct() -> N
 
     assert selected.bundle.id == 12
     assert selected.catalog_id == 712
+
+
+def test_frozen_corpus_manifest_locks_selection_and_audio(tmp_path: Path) -> None:
+    bundle = FactoryPreset(
+        id=12,
+        content_hash="abc",
+        name="Bass",
+        synth="serum2",
+        relative_path="Bass.serumpreset",
+        extension=".serumpreset",
+        searchable=True,
+    )
+    selected = [BenchmarkFactoryPreset(bundle=bundle, catalog_id=712)]
+    cache = tmp_path / "cache"
+    render = cache / "712" / "60.wav"
+    render.parent.mkdir(parents=True)
+    sf.write(render, np.zeros((128, 2), dtype=np.float32), 44_100)
+    manifest = tmp_path / "manifest.json"
+
+    written = _write_frozen_corpus_manifest(
+        path=manifest,
+        cache_root=cache,
+        selected=selected,
+        seed=20260802,
+        frozen_at_commit="abc123",
+    )
+    validated = _validate_frozen_corpus_manifest(
+        path=manifest,
+        cache_root=cache,
+        selected=selected,
+        seed=20260802,
+    )
+
+    assert written == validated
+    assert validated["preset_ids"] == [712]
+    render.write_bytes(b"changed")
+    with np.testing.assert_raises_regex(RuntimeError, "hash mismatch"):
+        _validate_frozen_corpus_manifest(
+            path=manifest,
+            cache_root=cache,
+            selected=selected,
+            seed=20260802,
+        )

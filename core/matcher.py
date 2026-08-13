@@ -64,8 +64,8 @@ class SearchConfig:
     clap_weight: float = 0.65
     random_seed: int = 2026
     adaptive_preprocessing: bool = True
-    # Stage 3A measured a BAM regression (0.784226 -> 0.780600), so the
-    # validated capability remains opt-in until guidance beats its baseline.
+    # Stage 3F's frozen retrieval corpus measured 0.775@1 below the 0.785
+    # adoption gate, so deep structural search remains opt-in.
     structural_search: bool = False
     structural_top_k: int = 2
     structural_exhaustive: bool = True

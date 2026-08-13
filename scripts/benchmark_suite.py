@@ -52,6 +52,12 @@ from core.synthesis_assets import resolve_synthesis_assets
 DEFAULT_BAM_DIR = Path.home() / "Documents" / "PatchLab" / "benchmarks" / "BAM"
 DEFAULT_DETAIL_DIR = PROJECT_ROOT / "data" / "stage2" / "baseline"
 DEFAULT_SUMMARY = PROJECT_ROOT / "docs" / "benchmarks" / "stage2-baseline.json"
+DEFAULT_FACTORY_RENDER_CACHE = (
+    PROJECT_ROOT / "data" / "benchmark-cache" / "factory-renders-by-catalog-id-v2"
+)
+DEFAULT_FROZEN_CORPUS_MANIFEST = (
+    PROJECT_ROOT / "docs" / "benchmarks" / "stage3f-frozen-corpus-manifest.json"
+)
 DEFAULT_SEED = 20260802
 ADOPTED_STAGE2B_BAM_DETAILS = (
     PROJECT_ROOT / "data" / "stage2" / "stage2b-c-clean" / "bam"
@@ -92,6 +98,82 @@ def _atomic_json(path: Path, payload: Any) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _selected_catalog_ids(
+    selected: Sequence[BenchmarkFactoryPreset],
+) -> list[int]:
+    return [int(item.catalog_id) for item in selected]
+
+
+def _write_frozen_corpus_manifest(
+    *,
+    path: Path,
+    cache_root: Path,
+    selected: Sequence[BenchmarkFactoryPreset],
+    seed: int,
+    frozen_at_commit: str,
+) -> dict[str, Any]:
+    renders = []
+    for item in selected:
+        render = cache_root / str(item.catalog_id) / "60.wav"
+        if not render.is_file():
+            raise FileNotFoundError(f"Frozen corpus render is missing: {render}")
+        renders.append(
+            {
+                "preset_id": int(item.catalog_id),
+                "sha256": _sha256(render),
+            }
+        )
+    payload = {
+        "schema_version": 1,
+        "stage": "3F",
+        "seed": int(seed),
+        "midi_note": 60,
+        "render_count": len(renders),
+        "preset_ids": _selected_catalog_ids(selected),
+        "renders": renders,
+        "frozen_at_commit": frozen_at_commit,
+        "audio_location": "data/benchmark-cache/factory-renders-by-catalog-id-v2",
+        "audio_committed": False,
+    }
+    _atomic_json(path, payload)
+    return payload
+
+
+def _validate_frozen_corpus_manifest(
+    *,
+    path: Path,
+    cache_root: Path,
+    selected: Sequence[BenchmarkFactoryPreset],
+    seed: int,
+) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected_ids = _selected_catalog_ids(selected)
+    if int(payload.get("seed", -1)) != int(seed):
+        raise RuntimeError(
+            f"Frozen corpus seed mismatch: {payload.get('seed')} != {seed}"
+        )
+    if payload.get("preset_ids") != expected_ids:
+        raise RuntimeError("Frozen corpus preset selection does not match this benchmark")
+    if int(payload.get("render_count", -1)) != len(expected_ids):
+        raise RuntimeError("Frozen corpus render count does not match its preset IDs")
+    render_rows = payload.get("renders")
+    if not isinstance(render_rows, list) or len(render_rows) != len(expected_ids):
+        raise RuntimeError("Frozen corpus render hashes are incomplete")
+    hashes = {int(row["preset_id"]): str(row["sha256"]) for row in render_rows}
+    for preset_id in expected_ids:
+        render = cache_root / str(preset_id) / "60.wav"
+        if not render.is_file():
+            raise FileNotFoundError(
+                f"Frozen corpus render is missing; refusing to regenerate: {render}"
+            )
+        actual = _sha256(render)
+        if actual != hashes.get(preset_id):
+            raise RuntimeError(
+                f"Frozen corpus render hash mismatch for preset {preset_id}"
+            )
+    return payload
 
 
 def _sha256(path: Path) -> str:
@@ -581,6 +663,9 @@ def run_retrieval_suites(
     factory_count: int,
     invariance_count: int,
     factory_bundle: Path,
+    factory_render_cache: Path = DEFAULT_FACTORY_RENDER_CACHE,
+    frozen_corpus_manifest: Path = DEFAULT_FROZEN_CORPUS_MANIFEST,
+    freeze_factory_corpus: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     assets = resolve_synthesis_assets()
     manifest = np.load(assets.feature_dir / "similarity_manifest.npz")
@@ -598,8 +683,24 @@ def run_retrieval_suites(
         local_paths=verification.local_paths_by_hash,
         indexed_ids={int(value) for value in index_ids},
     )
+    cache_root = factory_render_cache.expanduser().resolve()
+    manifest_path = frozen_corpus_manifest.expanduser().resolve()
+    if manifest_path.is_file():
+        corpus_manifest = _validate_frozen_corpus_manifest(
+            path=manifest_path,
+            cache_root=cache_root,
+            selected=selected,
+            seed=seed,
+        )
+    elif not freeze_factory_corpus:
+        raise FileNotFoundError(
+            f"Frozen factory corpus manifest is missing: {manifest_path}. "
+            "Create it intentionally with --freeze-factory-corpus."
+        )
+    else:
+        corpus_manifest = None
     renderer = FactoryRenderer(
-        detail_dir / "factory-renders-by-catalog-id-v2",
+        cache_root,
         verification.local_paths_by_hash,
     )
     render_rows = []
@@ -648,6 +749,22 @@ def run_retrieval_suites(
             f"Only {len(successful_positions)} factory renders succeeded; need "
             f"{max(factory_count, invariance_count)}"
         )
+    if corpus_manifest is None:
+        try:
+            frozen_at_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=PROJECT_ROOT,
+                text=True,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            frozen_at_commit = "unknown"
+        corpus_manifest = _write_frozen_corpus_manifest(
+            path=manifest_path,
+            cache_root=cache_root,
+            selected=selected,
+            seed=seed,
+            frozen_at_commit=frozen_at_commit,
+        )
     embedder = ClapEmbedder(ENV)
     retrieval_positions = successful_positions[:factory_count]
     clean_embeddings = _embed_in_batches(
@@ -671,6 +788,11 @@ def run_retrieval_suites(
         "retrieval_at_1": mean(row["top1"] for row in clean_rows),
         "retrieval_at_5": mean(row["top5"] for row in clean_rows),
         "seed": seed,
+        "frozen_corpus": {
+            "render_count": int(corpus_manifest["render_count"]),
+            "frozen_at_commit": str(corpus_manifest["frozen_at_commit"]),
+            "manifest": str(manifest_path),
+        },
     }
 
     invariant_positions = successful_positions[:invariance_count]
@@ -729,6 +851,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detail-dir", type=Path, default=DEFAULT_DETAIL_DIR)
     parser.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--factory-bundle", type=Path, default=DEFAULT_FACTORY_BUNDLE)
+    parser.add_argument(
+        "--factory-render-cache", type=Path, default=DEFAULT_FACTORY_RENDER_CACHE
+    )
+    parser.add_argument(
+        "--frozen-corpus-manifest", type=Path, default=DEFAULT_FROZEN_CORPUS_MANIFEST
+    )
+    parser.add_argument(
+        "--freeze-factory-corpus",
+        action="store_true",
+        help="Create the canonical private render corpus and its public hash manifest once.",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--budget", choices=("quick", "balanced", "best"), default="balanced")
     parser.add_argument("--factory-count", type=int, default=200)
@@ -794,6 +927,9 @@ def main() -> int:
                 factory_count=args.factory_count,
                 invariance_count=args.invariance_count,
                 factory_bundle=args.factory_bundle,
+                factory_render_cache=args.factory_render_cache,
+                frozen_corpus_manifest=args.frozen_corpus_manifest,
+                freeze_factory_corpus=args.freeze_factory_corpus,
             )
             summary["library_retrieval"] = retrieval
             summary["rhythm_invariance"] = invariance
