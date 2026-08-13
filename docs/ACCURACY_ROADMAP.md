@@ -172,6 +172,15 @@ Nothing may be silently dropped.
   but retrieval@1 reran at 0.780 below the 0.785 gate, so deep search remains opt-in
   and Stage 2B remains production. Search is now measured as useful; route guidance
   and the upstream retrieval gate remain the blockers, not a proven scoring limit.
+- **Stage 3E — retrieval-regression verification** (completed, diagnosis only,
+  Windows RTX 5070, 2026-08-12): five retrieval-only runs per arm at seed
+  `20260802` produced identical 200-row results in all ten runs: 0.780@1 and
+  0.895@5. The structural-search flag caused zero score, ranking, or identity
+  differences. Cross-cache comparison isolated two Serum 2 presets with render
+  generation/host-state sensitivity; fixed-WAV CLAP embeddings were exactly stable.
+  The Stage 3D adoption decision was not re-adjudicated, production remains
+  unchanged, and future retrieval gates should freeze canonical renders or average
+  independent render-cache populations.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

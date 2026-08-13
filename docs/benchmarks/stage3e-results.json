@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "stage": "3E",
+  "date": "2026-08-12",
+  "platform": "Windows 11 / RTX 5070",
+  "seed": 20260802,
+  "factory_count": 200,
+  "scope": "retrieval-only; BAM and deep structural search were not run",
+  "arm_a": {
+    "structural_search": false,
+    "top1_by_run": [0.78, 0.78, 0.78, 0.78, 0.78],
+    "top5_by_run": [0.895, 0.895, 0.895, 0.895, 0.895],
+    "top1_correct_by_run": [156, 156, 156, 156, 156],
+    "exact_200_row_agreement": true
+  },
+  "arm_b": {
+    "structural_search": true,
+    "top1_by_run": [0.78, 0.78, 0.78, 0.78, 0.78],
+    "top5_by_run": [0.895, 0.895, 0.895, 0.895, 0.895],
+    "top1_correct_by_run": [156, 156, 156, 156, 156],
+    "average_top1": 0.78,
+    "exact_200_row_agreement": true
+  },
+  "cross_arm": {
+    "top1_boolean_differences": 0,
+    "top5_boolean_differences": 0,
+    "retrieved_id_differences": 0,
+    "maximum_score_delta": 0.0,
+    "structural_search_coupling_found": false
+  },
+  "historical_cache_diagnosis": {
+    "stage2b_top1": 0.785,
+    "stage3d_top1": 0.78,
+    "current_top1": 0.78,
+    "nonzero_embedding_drift_presets": 2,
+    "at_risk_presets": 2,
+    "at_risk_preset_ids": [190, 216],
+    "preset_190_max_cosine_distance": 0.22523636413829462,
+    "preset_216_max_cosine_distance": 0.1957695783068104,
+    "fixed_audio_embedding_variance": 0.0,
+    "source": "Serum 2 fresh-host/render-cache generation sensitivity, not CLAP embedding batches"
+  },
+  "recommendation": {
+    "stage3d_adoption_re_adjudicated": false,
+    "production_defaults_changed": false,
+    "relay_changed": false,
+    "next_gate": "Use a frozen canonical render corpus or average independent fresh render-cache populations; do not treat repeated embeddings of one cached render population as independent trials."
+  },
+  "private_details": "All ten complete 200-row retrieval result lists and diagnostic renders remain under data/stage3e and are not committed."
+}
