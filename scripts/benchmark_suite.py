@@ -272,6 +272,7 @@ def run_bam_suite(
     stack: StackConfiguration,
     budget: str,
     limit: int | None,
+    matcher_processes: int = 4,
 ) -> dict[str, Any]:
     files = benchmark_audio_files(bam_dir)
     if limit is not None:
@@ -292,6 +293,8 @@ def run_bam_suite(
             "budget": budget,
             "target_synth": target_synth,
             "stack": asdict(stack),
+            "matcher_processes": matcher_processes,
+            "render_dispatch": "deterministic-dedicated-workers-v1",
         }
         detail_path = output_dir / _detail_name(source)
         adopted_serum1 = ADOPTED_STAGE2B_BAM_DETAILS / _detail_name(source)
@@ -350,6 +353,8 @@ def run_bam_suite(
                     target_synth=target_synth,
                     budget=budget,
                     session_root=session_dir,
+                    matcher_processes=matcher_processes,
+                    deterministic_render_dispatch=True,
                     progress_callback=lambda value, i=index, total=len(files): print(
                         "BAM_PROGRESS="
                         + json.dumps({"sample": i, "total": total, **value}, sort_keys=True),
@@ -872,6 +877,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--invariance-count", type=int, default=50)
     parser.add_argument("--bam-limit", type=int)
     parser.add_argument(
+        "--bam-processes",
+        type=int,
+        default=4,
+        help=(
+            "Dedicated matcher render hosts used per BAM target. Candidate positions "
+            "are pinned deterministically; the default retains four-way throughput."
+        ),
+    )
+    parser.add_argument(
         "--structural-search",
         action="store_true",
         help="Enable the opt-in Stage 3A Serum 2 structural search path.",
@@ -907,6 +921,8 @@ def main() -> int:
         raise ValueError("--invariance-count must be at least 50")
     if args.bam_limit is not None and args.bam_limit <= 0:
         raise ValueError("--bam-limit must be positive")
+    if args.bam_processes <= 0:
+        raise ValueError("--bam-processes must be positive")
     if (
         args.structural_route_probe_evaluations is not None
         and args.structural_route_probe_evaluations <= 0
@@ -954,6 +970,7 @@ def main() -> int:
                 stack=stack,
                 budget=args.budget,
                 limit=args.bam_limit,
+                matcher_processes=args.bam_processes,
             )
         if args.suite in {"all", "retrieval"}:
             retrieval, invariance = run_retrieval_suites(

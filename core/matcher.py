@@ -449,8 +449,55 @@ def _render_candidate(
         return None, 0.0, f"{type(exc).__name__}: {exc}"
 
 
+class _DeterministicRenderPool:
+    """Pin each candidate position to one persistent render host.
+
+    ``multiprocessing.Pool.map`` preserves result order but does not guarantee
+    which worker consumes each chunk. Serum 2 can retain host-local state, so
+    that scheduling freedom makes otherwise seeded benchmark searches choose
+    different winners. Dedicated one-process pools preserve parallelism while
+    giving every evaluation batch the same position-to-host mapping.
+    """
+
+    def __init__(
+        self,
+        context: Any,
+        processes: int,
+        initializer: Callable[..., None],
+        initargs: tuple[Any, ...],
+    ) -> None:
+        self._pools = [
+            context.Pool(1, initializer=initializer, initargs=initargs)
+            for _ in range(processes)
+        ]
+
+    def map(self, function: Callable[[Any], Any], values: Sequence[Any]) -> list[Any]:
+        buckets: list[list[tuple[int, Any]]] = [[] for _ in self._pools]
+        for position, value in enumerate(values):
+            buckets[position % len(self._pools)].append((position, value))
+        jobs = [
+            pool.map_async(function, [value for _position, value in bucket])
+            for pool, bucket in zip(self._pools, buckets, strict=True)
+        ]
+        results: list[Any] = [None] * len(values)
+        for bucket, job in zip(buckets, jobs, strict=True):
+            for (position, _value), result in zip(bucket, job.get(), strict=True):
+                results[position] = result
+        return results
+
+    def close(self) -> None:
+        for pool in self._pools:
+            pool.close()
+
+    def join(self) -> None:
+        for pool in self._pools:
+            pool.join()
+
+
 class AnalysisBySynthesisMatcher:
-    def __init__(self, processes: int = 4) -> None:
+    def __init__(
+        self, processes: int = 4, *, deterministic_render_dispatch: bool = False
+    ) -> None:
         context = mp.get_context("spawn")
         assets = resolve_synthesis_assets()
         self.assets = assets
@@ -458,10 +505,20 @@ class AnalysisBySynthesisMatcher:
         self._scratch = tempfile.TemporaryDirectory(
             prefix="patchlab-match-session-"
         )
-        self.pool = context.Pool(
+        pool_args = (
+            context,
             processes,
-            initializer=_init_render_worker,
-            initargs=(self._scratch.name, assets),
+            _init_render_worker,
+            (self._scratch.name, assets),
+        )
+        self.pool = (
+            _DeterministicRenderPool(*pool_args)
+            if deterministic_render_dispatch
+            else context.Pool(
+                processes,
+                initializer=_init_render_worker,
+                initargs=(self._scratch.name, assets),
+            )
         )
         self.embedder = ClapEmbedder(ENV)
         self.stores = {

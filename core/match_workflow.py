@@ -267,6 +267,8 @@ def run_match_file(
     budget: str = "balanced",
     start_offset_s: float = 0.0,
     session_root: Path = DEFAULT_SESSION_ROOT,
+    matcher_processes: int = 4,
+    deterministic_render_dispatch: bool = False,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     """Decode a user file and persist the complete UI result artifact."""
@@ -287,7 +289,12 @@ def run_match_file(
         return _silence_result(decoded, session, target_synth)
 
     _emit(progress_callback, {"phase": "loading-models", "evaluations": 0})
-    matcher = AnalysisBySynthesisMatcher(processes=4)
+    if matcher_processes <= 0:
+        raise ValueError("matcher_processes must be positive")
+    matcher = AnalysisBySynthesisMatcher(
+        processes=matcher_processes,
+        deterministic_render_dispatch=deterministic_render_dispatch,
+    )
     try:
         embedding = matcher.query_embedding(decoded.mono, decoded.sample_rate)
         retrieval = matcher.retrieve_existing(embedding, 10)

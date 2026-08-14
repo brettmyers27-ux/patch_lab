@@ -41,6 +41,12 @@ alone, without loss of intent.** Read the whole file before writing any stage pr
 - Stage 3B corrected the fixed BAM corpus split to 47 Serum 1 AIFF files and 52 Serum 2 WAV
   files without changing membership or scores. The adopted Stage 2B Serum 2 subset has BAM
   mean **0.794525**, median 0.804774, and minimum 0.647449.
+- Stage 3H proved that historical Stage 2B/3D BAM absolutes were produced under an
+  unreproducible shared render-worker assignment. The trustworthy forward procedure pins
+  candidate positions to four dedicated Serum hosts. Two corrected production-control runs
+  measured Serum 2 means **0.792935** and **0.792653** (span 0.000281) and whole-set means
+  **0.783391** and **0.783243** (span 0.000148). Keep the historical Stage 2B figures as
+  historical adoption evidence, not as forward absolute gates.
 - Stage 3C stopped at its Phase 0 hard gate before search. Production-normalized
   self-retrieval passed for all 16 FX and 330 wavetable fingerprints, but failed for
   1,224/4,906 modulation routes and 10/230 noise samples. Route measurements include
@@ -208,6 +214,23 @@ Nothing may be silently dropped.
   Deep structural search therefore remains opt-in, production remains Stage
   2B, and the next priority is layer decomposition: dominant layer, subtract,
   residual, preset stack.
+- **Stage 3H — BAM reproducibility audit** (completed, structural search not
+  adopted, Windows RTX 5070, 2026-08-14): recalculation confirmed all Stage 3G
+  arithmetic. Five fresh legacy runs on eight diagnostic targets produced 2–5
+  winner states per target and score spans from 0.001414 to 0.120635. The shared
+  process pool preserved output order but not candidate-to-host ownership, so
+  Serum 2 host-local history changed seed/optimizer renders. BAM benchmarks now
+  use four dedicated one-worker pools with candidate positions pinned to hosts;
+  interactive production dispatch is unchanged and no candidate audio is
+  frozen. Two full corrected Arm A runs measured Serum 2 means 0.792935 and
+  0.792653 (span 0.000281) and whole-set means 0.783391 and 0.783243 (span
+  0.000148), establishing the first trustworthy forward BAM procedure. Exact
+  global identity remains impossible on one measured target even with one host.
+  Corrected FX/wavetable/noise Arm B regressed to 0.790873 Serum 2 / 0.782308
+  whole set, with paired delta -0.002062 (24 improved, 28 regressed), so it
+  remains opt-in. Routes remain excluded. Frozen retrieval stayed 0.775/0.890
+  and invariance 0.403333/0.596667. No Mac or relay action is required, and
+  layer decomposition was not started.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.
