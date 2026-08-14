@@ -231,6 +231,21 @@ Nothing may be silently dropped.
   remains opt-in. Routes remain excluded. Frozen retrieval stayed 0.775/0.890
   and invariance 0.403333/0.596667. No Mac or relay action is required, and
   layer decomposition was not started.
+- **Stage 3I — two-layer decomposition feasibility** (pilot failed, not
+  adopted, Windows RTX 5070, 2026-08-14): a fresh Stage 3H production control
+  reproduced exactly at 0.792935 Serum 2 and 0.783391 whole set. A reusable
+  versioned preset stack, aligned STFT-magnitude residual, exact one-layer null,
+  and deterministic gain/timing polish were implemented without changing the
+  production matcher or defaults. On the fixed 12 high-residual pilot targets,
+  residual Arm C improved 0.710088 to 0.753908 and beat compute-matched full-
+  target stacking at 0.751172, selecting Layer 2 on 9/12. The continuation gate
+  nevertheless failed because C selected Layer 2 on 3/4 low-residual controls
+  (maximum allowed 2/4). Per the hard gate, the full 99-file decomposition A/B
+  was not run and no feasibility/adoption claim is made. Frozen retrieval stayed
+  0.775/0.890, invariance 0.403333/0.596667, and all tests/UI gates passed. The
+  next priority is selection calibration against the frozen high/low pilot—an
+  evidence-based residual-significance or complexity threshold—not more layers,
+  joint Serum optimization, UI integration, or a neural surrogate.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.

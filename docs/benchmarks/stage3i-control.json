@@ -1,0 +1,722 @@
+{
+  "by_source_group": {
+    "serum1": {
+      "count": 47,
+      "mean": 0.772831344858129,
+      "median": 0.7732118368148804,
+      "minimum": 0.5415499806404114
+    },
+    "serum2": {
+      "count": 52,
+      "mean": 0.7929349129016583,
+      "median": 0.8122250139713287,
+      "minimum": 0.605371356010437
+    }
+  },
+  "render_dispatch": "deterministic-dedicated-workers-v1",
+  "rows": [
+    {
+      "reused_unaffected": false,
+      "score": 0.8254276514053345,
+      "source_group": "serum2",
+      "source_name": "AC  Free 1.wav",
+      "source_sha256": "6f9e5fbbf5a7241a5f2a15cb85d5ca2b642401531201e76c6d2ac5c843886df7"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8689380288124084,
+      "source_group": "serum2",
+      "source_name": "AC  Free 2.wav",
+      "source_sha256": "3394dee703ec230bd65aebbf911845cabbc9091e8cdffe45aafafef6a0464db7"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8876641988754272,
+      "source_group": "serum1",
+      "source_name": "Dill Bass 1.aif",
+      "source_sha256": "d958f05e3d5e36c7032e74e05d3c5caff0835d33950919081c8502b610dd4ee4"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7464856505393982,
+      "source_group": "serum1",
+      "source_name": "Dill Lead 1.aif",
+      "source_sha256": "71145603b35e981604bbf9508773812e37b10ee87340dcc1eea3b5438424ab87"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8317292928695679,
+      "source_group": "serum1",
+      "source_name": "Dill Lead 2.aif",
+      "source_sha256": "e0fd803014a0828adbe18426301287ab800804b883c88216c06995da84c36df6"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8495845198631287,
+      "source_group": "serum2",
+      "source_name": "Do That 1.wav",
+      "source_sha256": "b9c00c373ba9b6805940c23623f69dad5385a4111ed08ba2af21c84f1b42f8bf"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.846903920173645,
+      "source_group": "serum2",
+      "source_name": "Do That 2.wav",
+      "source_sha256": "b77d9b0ef58b65930dc07f21e53457406c4846398c737305cca796ec807885de"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7066988945007324,
+      "source_group": "serum2",
+      "source_name": "Do That 3.wav",
+      "source_sha256": "f9b182e7d43b496970ab93ac95b6033f9f3a1e790e07289f9a08f4b3a9e3d94b"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8690032958984375,
+      "source_group": "serum2",
+      "source_name": "Do That 4.wav",
+      "source_sha256": "2173815b2a259b1ca0ea45866a6fef1487c4f276b83a35b375013309eb095dd0"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8651870489120483,
+      "source_group": "serum2",
+      "source_name": "Do That 5.wav",
+      "source_sha256": "5691266a2561107cfe4bbef3b98c2e1d7870692f0be550ab9185a55e3fa650f7"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7889585494995117,
+      "source_group": "serum1",
+      "source_name": "Excision Bass 1.aif",
+      "source_sha256": "a96924f1f7dd5d4a7d437c8d94efb899738dce6a070d96031878950ec9672394"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8050350546836853,
+      "source_group": "serum1",
+      "source_name": "Excision Lead 1.aif",
+      "source_sha256": "12d6b4214f4e2411b4b442b1ada8022c1e68b4d5cca6d20cdfcabc88d252c8a3"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.797734797000885,
+      "source_group": "serum2",
+      "source_name": "Grabbitz 1.wav",
+      "source_sha256": "b0d8203f9e185224c05a592e89c93b21050189029fb357a25c0d09f38b6ffaa6"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7176616191864014,
+      "source_group": "serum2",
+      "source_name": "Grabbitz 2.wav",
+      "source_sha256": "8c0b47693dbb1a64c09d8e14fee37b934b3539b5fdefc48d9433ee2c086eeb44"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8655771613121033,
+      "source_group": "serum2",
+      "source_name": "Grabbitz 3.wav",
+      "source_sha256": "1cc018a7ed5d090e9aa4bab0c3e1446a2b95a542314ea3e53c235593f384dc19"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8819084167480469,
+      "source_group": "serum2",
+      "source_name": "Jaenga 1.wav",
+      "source_sha256": "52295b13de3da0fecfde8da86de0409cb1366afd763060e0847a92ef8f829122"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8192806839942932,
+      "source_group": "serum2",
+      "source_name": "Jaenga 2.wav",
+      "source_sha256": "8c6a9a318f8e9bad51be2dc912c5a6a8c8f51d9dda1e5dc0175f299d11ea283d"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8273119926452637,
+      "source_group": "serum2",
+      "source_name": "Jaenga 3.wav",
+      "source_sha256": "2d34402deb10f0944eaa5cf767bbce65b8973dced2fbb546560a2b5625e45066"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7860112190246582,
+      "source_group": "serum2",
+      "source_name": "Jaenga 4.wav",
+      "source_sha256": "2d754c1b8a85465c5ad31d8d6b5418a0547bc74729558aef4b4afe2268437a06"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8235009908676147,
+      "source_group": "serum2",
+      "source_name": "jkyl 1.wav",
+      "source_sha256": "124424106b7f37e7821e7516010898f908e3d1d93b64e34ebf461fbd98982ee6"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.605371356010437,
+      "source_group": "serum2",
+      "source_name": "jkyl 2.wav",
+      "source_sha256": "24a96cea782db6ce41bcfbcfe50750cfd3464d47bc00f1408efe07b5098a9dea"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8573781251907349,
+      "source_group": "serum2",
+      "source_name": "jkyl 3.wav",
+      "source_sha256": "4f48d74cf484d8c06ed65ac55b481407de3dd8d8f31b58a343f0d111eb081e0b"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8486199378967285,
+      "source_group": "serum2",
+      "source_name": "jkyl 4.wav",
+      "source_sha256": "1420e5d79c81b554f39ef7cf22be2ab30dd3fcdba0b69819301837d1844d121c"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8250356912612915,
+      "source_group": "serum2",
+      "source_name": "jkyl 5.wav",
+      "source_sha256": "7e9e02bf26f5dea141d42f88f02622ec10bef217e1171f59db00088177a5b759"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.749994158744812,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 1.wav",
+      "source_sha256": "7a3c4a4b0c4f3b186e3e6f74e20ccb5ab0a1c3df343ebbfafe7264658fe9a64c"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7883186936378479,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 2.wav",
+      "source_sha256": "f4c292e7cb4f8724ef13915bb9ccb8a2984e03c2857de2d06c4ca2412dccd55d"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8484081029891968,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 3.wav",
+      "source_sha256": "f57d33993c33b00581d0117be474b078c328c4c947b0ee92f638d04b4aed1a54"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7597735524177551,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 4.wav",
+      "source_sha256": "32123ab3ed51005bd140919413a76cbdd49e131de15a1f9dee4ceaa0a3338d22"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8585501313209534,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 5.wav",
+      "source_sha256": "d1b3a05ae103b5f2edac7b766e7d656fccc0dfd3d7eee772b788e3ac9cd100a0"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8854838609695435,
+      "source_group": "serum2",
+      "source_name": "LSDREAM 6.wav",
+      "source_sha256": "54ebad39b989baa427103114cf429a9df61c6f438a7986d254bf27d7749f82f8"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8475711345672607,
+      "source_group": "serum1",
+      "source_name": "LSDream Bass 1.aif",
+      "source_sha256": "62301c7aa778a5f294380c6af3f30f3789617272faffc9e6b9e248d342d60608"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7164558172225952,
+      "source_group": "serum1",
+      "source_name": "LSDream Bass 2.aif",
+      "source_sha256": "12ef16c4c6cf65e16a18a999cde71805f7226f0b013f9e4d2cf04650d765f407"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7215042114257812,
+      "source_group": "serum1",
+      "source_name": "LSDream Bass 3.aif",
+      "source_sha256": "009944c68a005d1380a777c1ea4428c2d8bbd60d1ddf693062f2c36122cce6af"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7732118368148804,
+      "source_group": "serum1",
+      "source_name": "LSDream Bass 4.aif",
+      "source_sha256": "f885ed18196117f8483a938f5ede9318939c3c961ec6eaf0781b32bf16f4595f"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7678883671760559,
+      "source_group": "serum1",
+      "source_name": "LSDream Bass 5.aif",
+      "source_sha256": "2586964e54ca1203eee76c6f3726274c26d79d33700641891c02074946a1555d"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.677149772644043,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 1.aif",
+      "source_sha256": "12cd2bc62a6aaa49972e71c890ac2b213ea9543b1bfb06d35b4f70f25221a607"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7357213497161865,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 2.aif",
+      "source_sha256": "528f14ea56bf5d1ae4ee2af661e0612b0716836ed35ef3190a91fdbff3bcf984"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7253814935684204,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 3.aif",
+      "source_sha256": "64ad568183696849723802d0f606eaa226670c74fe4605f2eb8a401160cbddf6"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.638846755027771,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 4.aif",
+      "source_sha256": "2268685fd38843d5e619825581fd714ae4639bcb30011e146aa14dc9af7110e5"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.58319091796875,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 5.aif",
+      "source_sha256": "0c6c6ac966931766fff90b82063f7bcc88f96c7fb57162d319e3a14a5ae5c6fa"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7118638753890991,
+      "source_group": "serum1",
+      "source_name": "LSDream Lead 6.aif",
+      "source_sha256": "cef315fcc4f8cac4bf5547548f7169fdb01127b2b2803623c8114c871aeeb020"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7618408203125,
+      "source_group": "serum1",
+      "source_name": "Mazare Bass 1.aif",
+      "source_sha256": "f5e81cf7d9db0e12a6e1a85282930e94c053beab47dbc08112705fb903ac20f5"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7624841928482056,
+      "source_group": "serum1",
+      "source_name": "Mazare Bass 2.aif",
+      "source_sha256": "28d3888ff251a7825fe275619077dc101199dd30bc0b95907d5e7c6f980f2ae3"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.757314145565033,
+      "source_group": "serum1",
+      "source_name": "Nasty VR Bass 1.aif",
+      "source_sha256": "f243f2bf03650aaa787f932381c483878e2d04b0cebdd13195757177902853e3"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8503895998001099,
+      "source_group": "serum1",
+      "source_name": "Nasty VR Bass 2.aif",
+      "source_sha256": "389eba9eeea04445d3306a3de4748ba0508f2acc150b7e6c3951ceb06f2d9b87"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8824182748794556,
+      "source_group": "serum1",
+      "source_name": "Nasty VR Bass 3.aif",
+      "source_sha256": "5bc54c536de8d491e7ca19848a6e08633430e1be3ac7c131a4beb2463b1dd0e0"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.6923035383224487,
+      "source_group": "serum1",
+      "source_name": "Nasty VR Bass 4.aif",
+      "source_sha256": "3954db684d87b93ce0507dd24a42f347b9ceddb748e47f791f9f7fcc2ae0aab4"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8235496282577515,
+      "source_group": "serum1",
+      "source_name": "Nasty VR Downbeat.aif",
+      "source_sha256": "ba92f0fd11f6c3f03b483ef71d166b25c44fefeeefc158218fa6d0b2a4bf5f41"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7487020492553711,
+      "source_group": "serum1",
+      "source_name": "Skrill Bass 1.aif",
+      "source_sha256": "160148dc7443e85b75081ae1b20f201d3d576180cf2726360f9c1f3aded8bb54"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.9034743309020996,
+      "source_group": "serum1",
+      "source_name": "Skrill Bass 2.aif",
+      "source_sha256": "04594543f51b200b49be1eddeda0d3f3b54ec0e18cbb82224bfc7b582a26ef2b"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8635680079460144,
+      "source_group": "serum1",
+      "source_name": "Skrill Bass 3.aif",
+      "source_sha256": "dd6cee7090e4aaa558b07d81afbc9d5e4d5c878794fbf68912363e04aa0a3a0e"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8332176208496094,
+      "source_group": "serum1",
+      "source_name": "Skrill Bass 4.aif",
+      "source_sha256": "81d995bbb7e8817b08d11fdd95cc0cb4ca0574b5dd4fe8c341710010bb445f7e"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.846345841884613,
+      "source_group": "serum1",
+      "source_name": "Skrill Bass 5.aif",
+      "source_sha256": "e92782db2197e0ca192728bd43ecfd5a426af1168b84ff4a1c4d594b29ee1ec9"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8228201866149902,
+      "source_group": "serum1",
+      "source_name": "Skrill lead 1.aif",
+      "source_sha256": "934b7792f921dddff3f6a8961e32e05a282d5da65f7f897c5a60da6b52224663"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7210921049118042,
+      "source_group": "serum1",
+      "source_name": "Skrill lead 2.aif",
+      "source_sha256": "ed2c3efbf4a876f13d68813a6a8867eb21d6fdcaf2d7aa98d412d3cf5b495e26"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8160691857337952,
+      "source_group": "serum2",
+      "source_name": "Space Laces 1.wav",
+      "source_sha256": "afd8c0b8c2d5961563496ce4b7d2a47c79b39e5e9c25a28115fb0269497dce92"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7122216820716858,
+      "source_group": "serum2",
+      "source_name": "Space Laces 2.wav",
+      "source_sha256": "d2f4e7a0b4c787fc2085701a0d67c78f37e2eca5ca04cee6c0d92c77bfc3cb47"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.6469473242759705,
+      "source_group": "serum2",
+      "source_name": "Space Laces 3.wav",
+      "source_sha256": "b35ebe3d4749b97a250769fee75576bb2f89e1c216e096b8976c6fba8b956f2a"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7536672949790955,
+      "source_group": "serum2",
+      "source_name": "Space Laces 4.wav",
+      "source_sha256": "55f50c7d1eb8988c0c2ead4b3976ff7e1f6b636f37baba7abd3d3f4392ed5996"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8219789862632751,
+      "source_group": "serum2",
+      "source_name": "Space Laces 5.wav",
+      "source_sha256": "8e41a418c128c8437de7a26690ad0ea03fc752a447084789ed54660698758bf0"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7096593379974365,
+      "source_group": "serum2",
+      "source_name": "Space Laces 6.wav",
+      "source_sha256": "7def4cf0c2998a8cf35d4a4b22b266b529196b0b6479051ba07012a3255f5e3e"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7629075050354004,
+      "source_group": "serum2",
+      "source_name": "Space Laces 7.wav",
+      "source_sha256": "86a5e8a01897d5b1ad3795318d0b03927a71bc6d98827b052bd73541bec5923a"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8114795088768005,
+      "source_group": "serum2",
+      "source_name": "Space Laces 8.wav",
+      "source_sha256": "c321e832f739f30da05e06bbc4495ef02cc18a09d693cb940ce72e1fc78fdc46"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7552717924118042,
+      "source_group": "serum2",
+      "source_name": "Sudley 1.wav",
+      "source_sha256": "7cee648403b556558e259db16294ecb77657c95a4b029a2f6f581054dac93b2d"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7273298501968384,
+      "source_group": "serum2",
+      "source_name": "Sully 1.wav",
+      "source_sha256": "454adc6c60071de1cb0611a445443bdda8acd7ea14769af89f4ff48d605f2ca5"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.769618809223175,
+      "source_group": "serum2",
+      "source_name": "Sully 2.wav",
+      "source_sha256": "694dc9a33f56fabe9546e6f381dc7ad0d447090f382d51ea06bdf6b3dc77737a"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8739049434661865,
+      "source_group": "serum2",
+      "source_name": "Sully 3.wav",
+      "source_sha256": "01205ca88c71ef6d8f8eda4019674b291d41fc67c41541343f7ec08feefaf5a0"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7060807347297668,
+      "source_group": "serum2",
+      "source_name": "Sully 4.wav",
+      "source_sha256": "81e960cfd57a2d2e17623bed6f8cbe971de334ca4c2b55d39591cd3f1a9134b5"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8592911958694458,
+      "source_group": "serum2",
+      "source_name": "Sully 5.wav",
+      "source_sha256": "6c7ee44ec66bd22d7564ffc1716ad6ed0861b41b69f1e5110aa1c809371f7d58"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8454566597938538,
+      "source_group": "serum1",
+      "source_name": "VR Bass 1.aif",
+      "source_sha256": "6f4f0f664cbd11bee53c733f703a2444a98cd6faefa83e0710aec44e45538d49"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7332769632339478,
+      "source_group": "serum1",
+      "source_name": "VR Bass 2.aif",
+      "source_sha256": "057569baab26fcd537bfcc7b61a81c6304c9307ebc84f164e44dc6e3f4fda208"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8286198973655701,
+      "source_group": "serum1",
+      "source_name": "VR Bass 3.aif",
+      "source_sha256": "ba4e52fc4b7ca7f096e4e00f8b96fa948fdfb268dc3d01bd2eee48cccc05495b"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8405454754829407,
+      "source_group": "serum1",
+      "source_name": "VR Bass 4.aif",
+      "source_sha256": "f21ff14b049265c00166c28dfd77de7cebb25ac6cb65698649546d01cd8a6307"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8382106423377991,
+      "source_group": "serum1",
+      "source_name": "VR Bass 5.aif",
+      "source_sha256": "4e575820cb1a1745b0298f296688cecf97509079a8fafb4e2c40e982bfebd0b2"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8284995555877686,
+      "source_group": "serum1",
+      "source_name": "VR Bass 6.aif",
+      "source_sha256": "bb3088cfb08f7f92c25a9f8e777e9e7dbcc33c1b9519ee25a9fc306d7afbea4d"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8468689918518066,
+      "source_group": "serum1",
+      "source_name": "VR Bass 7.aif",
+      "source_sha256": "2d301c08547e4b726a3b24f22436d8fb3d6cb8fdf839459dab390bffe5e08d72"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8814804553985596,
+      "source_group": "serum1",
+      "source_name": "VR Bass 8.aif",
+      "source_sha256": "d617802108fe7d064abc797c3d9a9aebe467b567a9d261a78f0aba9488ca7f14"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7835201025009155,
+      "source_group": "serum1",
+      "source_name": "VR Lead 1.aif",
+      "source_sha256": "9c6b54df0d652846d48da259d680d415e51ee27695de81f17d81c24a61779a3d"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.8606746196746826,
+      "source_group": "serum1",
+      "source_name": "VR Lead 2.aif",
+      "source_sha256": "f0d8fb3b126b229108689b8fdced5d3d929bbcf13bebddb0973b3eb55a5232da"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.5415499806404114,
+      "source_group": "serum1",
+      "source_name": "VR vox 1.aif",
+      "source_sha256": "355bf73baa2f3fb6889b3afa0b96560c4dd60eebc65d6e10186e2bac64790018"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.59517902135849,
+      "source_group": "serum1",
+      "source_name": "VR vox 2.aif",
+      "source_sha256": "22ad5980ecd501dbdd77a077cc46f1f4c03037a01b923c51dbe185e6e50929ac"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.5944131016731262,
+      "source_group": "serum1",
+      "source_name": "VR vox 3.aif",
+      "source_sha256": "df15ee9492bb7f9d4f2525065ef4177e09e4b49d51a504f4af2d94621686dfaa"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7682806253433228,
+      "source_group": "serum1",
+      "source_name": "X Bass 1.aif",
+      "source_sha256": "ba0852099f2f5ae913ba57421fffce78f7d7acd8a86d2918659eea00fdfe9c68"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7558069229125977,
+      "source_group": "serum1",
+      "source_name": "X Bass 2.aif",
+      "source_sha256": "00bc7755fd62d14801f9e30ae0199ee4866034479661c16227a2e5b7a0757c37"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.793119490146637,
+      "source_group": "serum1",
+      "source_name": "X Bass 3.aif",
+      "source_sha256": "062a3e51da5fb6f0dec9476407835dc5f27d7b4c4ca42dc719d33a4e2c53069a"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7810197472572327,
+      "source_group": "serum2",
+      "source_name": "YDG 1.wav",
+      "source_sha256": "34109f1d7fb1b3a11cf29c779f3118062431fbbdb088b985d126876fc3c7f086"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8599311113357544,
+      "source_group": "serum2",
+      "source_name": "YDG 2.wav",
+      "source_sha256": "3713a2248d4f6d1717b322905880f380037c95bfe70f8c1836bb2e3e0b65d39c"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.6920430064201355,
+      "source_group": "serum2",
+      "source_name": "YDG 3.wav",
+      "source_sha256": "b223fedf4f87c1db46a0cd2e33164bbbcebeeec286f88809ac3eb549d1b0cfa1"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8899582624435425,
+      "source_group": "serum2",
+      "source_name": "YDG 4.wav",
+      "source_sha256": "7e0dc2fb46354cfa30c1d1e79739b0e08c3389a81bdeea23d8ee9fa9d8ae5ab3"
+    },
+    {
+      "reused_unaffected": true,
+      "score": 0.7593920826911926,
+      "source_group": "serum1",
+      "source_name": "ZD Bass 1.aif",
+      "source_sha256": "aff6b62872d1d29c1d96da0ec6cf46c852b700fb0e04ad9b216a92807211a4c7"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8747778534889221,
+      "source_group": "serum2",
+      "source_name": "Zomboy 1.wav",
+      "source_sha256": "cfdd726625ab83b0c49c9b9582afb39601e7081fd0bba7a5371db8cc0116fc8e"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7853543162345886,
+      "source_group": "serum2",
+      "source_name": "Zomboy 2.wav",
+      "source_sha256": "a7d99759547d97ae4538f00c17b8603d0b200f3337a11395b74a0312a3b9e57a"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8349189758300781,
+      "source_group": "serum2",
+      "source_name": "Zomboy 3.wav",
+      "source_sha256": "61b1151cfd509ef6972d8d880ef271d248e922b62b340f47ac7eb6bf895ccee9"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.8129705190658569,
+      "source_group": "serum2",
+      "source_name": "Zomboy 4.wav",
+      "source_sha256": "50ae63d0383cbb53daeeb08fc9781344f2e5c205896db832541d7112113aed23"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7399698495864868,
+      "source_group": "serum2",
+      "source_name": "Zomboy 5.wav",
+      "source_sha256": "285248a6d8b4d6e420a0fb29dc7a1f6e3899e30a7042e4267e8db1f90d2f9b4f"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.684986412525177,
+      "source_group": "serum2",
+      "source_name": "Zomboy 6.wav",
+      "source_sha256": "5b2965b20d0003608f735a50ce07c3a7d1fd55f5ca310896157cc14c5561c0a4"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.809920072555542,
+      "source_group": "serum2",
+      "source_name": "Zomboy 7.wav",
+      "source_sha256": "4b6d79a076a546bc9d81c20b6a683de2ea204518c7886497f3f5abbd6aad0e25"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.648996114730835,
+      "source_group": "serum2",
+      "source_name": "Zomboy 8.wav",
+      "source_sha256": "4b3fc2eb6974f5467d9d5e9951f32f2d73ca951b15967b7ba79b5f1bff966b2f"
+    },
+    {
+      "reused_unaffected": false,
+      "score": 0.7136772274971008,
+      "source_group": "serum2",
+      "source_name": "Zomboy 9.wav",
+      "source_sha256": "cbcf4394786d1b52ff470cdd64387ae39348dec526687b81daec0f84db0f8ea7"
+    }
+  ],
+  "schema_version": 1,
+  "seed": 20260802,
+  "stage": "3I",
+  "structural_search": false,
+  "whole_set": {
+    "count": 99,
+    "mean": 0.7833907947395787,
+    "median": 0.793119490146637,
+    "minimum": 0.5415499806404114
+  }
+}
