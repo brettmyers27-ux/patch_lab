@@ -3,6 +3,7 @@ import numpy as np
 from core.structural_search import (
     SEARCH_ORDER,
     discover_structural_fields,
+    fit_mod_route_ids,
     measure_periodic_movement,
     narrow_mod_route_ids,
     staged_proposals,
@@ -121,3 +122,72 @@ def test_periodic_route_narrowing_uses_measured_axis() -> None:
     retained, report = narrow_mod_route_ids(entries, movement)
     assert "gain" in retained
     assert report["input_candidates"] == 2
+
+
+def test_route_budget_uses_full_set_when_it_fits() -> None:
+    entries = [
+        {
+            "id": f"route-{index}",
+            "observed_count": 1,
+            "value": {
+                "destination": {
+                    "destModuleID": 0,
+                    "destModuleParamID": 1,
+                    "destModuleParamName": "kParamGain",
+                    "destModuleTypeString": "FXComp",
+                }
+            },
+        }
+        for index in range(3)
+    ]
+    retained, report = fit_mod_route_ids(
+        entries,
+        {"amplitude": True, "amplitude_strength": 0.8},
+        field_count=2,
+        non_route_evaluations=100,
+    )
+    assert set(retained) == {"route-0", "route-1", "route-2"}
+    assert report["selected_structural_evaluations"] == 106
+    assert report["structural_budget"] == 4096
+    assert report["hierarchical_fallback"] is False
+
+
+def test_route_budget_preserves_complete_destination_groups() -> None:
+    entries = []
+    for destination, count, observed in (
+        ("gain", 3, 10),
+        ("level", 3, 5),
+        ("mix", 1, 1),
+    ):
+        for index in range(count):
+            entries.append(
+                {
+                    "id": f"{destination}-{index}",
+                    "observed_count": observed,
+                    "value": {
+                        "destination": {
+                            "destModuleID": 0,
+                            "destModuleParamID": {
+                                "gain": 1,
+                                "level": 2,
+                                "mix": 3,
+                            }[destination],
+                            "destModuleParamName": f"kParam{destination.title()}",
+                            "destModuleTypeString": "FXComp",
+                        }
+                    },
+                }
+            )
+    retained, report = fit_mod_route_ids(
+        entries,
+        {"amplitude": True, "amplitude_strength": 0.8},
+        field_count=2,
+        non_route_evaluations=4,
+        standard_limit=8,
+        maximum_limit=10,
+    )
+    assert set(retained) == {"gain-0", "gain-1", "gain-2"}
+    assert report["hierarchical_fallback"] is True
+    assert report["destination_groups_before"] == 3
+    assert report["destination_groups_after"] == 1
+    assert report["selected_structural_evaluations"] == 10

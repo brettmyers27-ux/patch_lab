@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "stage": "3G",
+  "seed": 20260802,
+  "frozen_corpus": {
+    "render_count": 200,
+    "manifest_sha256": "2a0b6fe07ac62671cb3531b22c98bb47817546b07ed82a515d49c1a654378181",
+    "all_wav_hashes_unchanged": true,
+    "hard_gate_0_wav_timestamps_unchanged": true,
+    "regenerated_wavs": 0
+  },
+  "arms": {
+    "a_production": {
+      "retrieval_at_1": 0.775,
+      "retrieval_at_1_count": 155,
+      "retrieval_at_5": 0.890,
+      "retrieval_at_5_count": 178,
+      "invariance_at_1": 0.4033333333333333,
+      "invariance_at_5": 0.5966666666666667
+    },
+    "b_fx_wavetable_noise": {
+      "retrieval_at_1": 0.775,
+      "retrieval_at_1_count": 155,
+      "retrieval_at_5": 0.890,
+      "retrieval_at_5_count": 178,
+      "invariance_at_1": 0.4033333333333333,
+      "invariance_at_5": 0.5966666666666667
+    },
+    "c_fx_wavetable_noise_routes": {
+      "retrieval_at_1": 0.775,
+      "retrieval_at_1_count": 155,
+      "retrieval_at_5": 0.890,
+      "retrieval_at_5_count": 178,
+      "invariance_at_1": 0.4033333333333333,
+      "invariance_at_5": 0.5966666666666667
+    }
+  },
+  "exact_row_equality": {
+    "retrieval_rows": 200,
+    "invariance_rows": 300,
+    "a_equals_b": true,
+    "a_equals_c": true,
+    "retrieval_details_sha256": "4a1f7ef7ede398f3e9e2a4f01dea8527266a58890104a76cfe46653422bd43d1",
+    "invariance_details_sha256": "a39e34f0c56639c745280d965e7330a53f956b9bb38b73cf7096bacfbe0a9e61"
+  }
+}

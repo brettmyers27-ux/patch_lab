@@ -309,6 +309,15 @@ def run_match_file(
                     os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0").strip()
                     == "1"
                 ),
+                structural_routes=(
+                    os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_ROUTES", "0").strip()
+                    == "1"
+                ),
+                structural_route_probe_evaluations=(
+                    int(os.environ["PATCHLAB_SERUM2_ROUTE_PROBE_EVALUATIONS"])
+                    if os.environ.get("PATCHLAB_SERUM2_ROUTE_PROBE_EVALUATIONS")
+                    else None
+                ),
             ),
             target_embedding=embedding,
             progress_callback=search_progress,
@@ -441,7 +450,14 @@ def run_match_file(
                 "evaluations": result.evaluations,
                 "budget": BUDGETS[budget].max_evaluations
                 + (
-                    BUDGETS[budget].structural_max_evaluations
+                    (
+                        BUDGETS[budget].structural_max_evaluations_ceiling
+                        if os.environ.get(
+                            "PATCHLAB_SERUM2_STRUCTURAL_ROUTES", "0"
+                        ).strip()
+                        == "1"
+                        else BUDGETS[budget].structural_max_evaluations
+                    )
                     if os.environ.get(
                         "PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0"
                     ).strip()

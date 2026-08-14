@@ -13,7 +13,8 @@ import numpy as np
 
 SEARCH_ORDER = ("wavetable", "fx_type", "noise_sample", "mod_route")
 CLEAN_STAGE3C_CATEGORIES = frozenset({"wavetable", "fx_type"})
-PERIODIC_ROUTE_LIMIT = 300
+STANDARD_STRUCTURAL_LIMIT = 4096
+MAX_STRUCTURAL_LIMIT = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,7 @@ class StructuralProposal:
     overrides: dict[str, Any]
     provenance: tuple[str, ...]
     priority: int
+    group_key: tuple[Any, ...] | None = None
 
 
 def load_vocabulary(path: Path) -> dict[str, Any]:
@@ -146,6 +148,11 @@ def staged_proposals(
                         _overrides(category, value, field_path),
                         tuple(entry.get("provenance", [])),
                         priority,
+                        (
+                            route_destination_key(value)
+                            if category == "mod_route"
+                            else None
+                        ),
                     )
                 )
                 priority += 1
@@ -266,7 +273,136 @@ def narrow_mod_route_ids(
         "active_axes": sorted(active_axes),
         "input_candidates": len(entries),
         "surviving_candidates": len(retained),
-        "practical_limit": PERIODIC_ROUTE_LIMIT,
-        "searchable": 0 < len(retained) <= PERIODIC_ROUTE_LIMIT,
+        "searchable": bool(retained),
         "movement": dict(movement),
+    }
+
+
+def route_destination_key(value: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return the stable identity used for destination-first route grouping."""
+
+    destination = value.get("destination", {})
+    return tuple(
+        destination.get(key)
+        for key in (
+            "destModuleID",
+            "destModuleParamID",
+            "destModuleParamName",
+            "destModuleTypeString",
+        )
+    )
+
+
+def fit_mod_route_ids(
+    entries: list[Mapping[str, Any]],
+    movement: Mapping[str, float | bool],
+    *,
+    field_count: int,
+    non_route_evaluations: int,
+    standard_limit: int = STANDARD_STRUCTURAL_LIMIT,
+    maximum_limit: int = MAX_STRUCTURAL_LIMIT,
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    """Fit compatible routes using complete destination groups when necessary."""
+
+    retained, initial = narrow_mod_route_ids(entries, movement)
+    compatible = [
+        entry for entry in entries if str(entry.get("id", "")) in retained
+    ]
+    full_route_evaluations = len(compatible) * field_count
+    full_total = non_route_evaluations + full_route_evaluations
+    if field_count <= 0 or not compatible:
+        return (), {
+            **initial,
+            "searchable": False,
+            "field_count": field_count,
+            "non_route_evaluations": non_route_evaluations,
+            "full_route_evaluations": full_route_evaluations,
+            "full_structural_evaluations": full_total,
+            "selected_route_ids": 0,
+            "selected_route_evaluations": 0,
+            "selected_structural_evaluations": non_route_evaluations,
+            "structural_budget": standard_limit,
+            "hierarchical_fallback": False,
+            "destination_groups_before": 0,
+            "destination_groups_after": 0,
+        }
+    if full_total <= maximum_limit:
+        budget = standard_limit if full_total <= standard_limit else full_total
+        ordered_ids = tuple(
+            str(entry.get("id", ""))
+            for entry in sorted(
+                compatible,
+                key=lambda entry: (
+                    -int(entry.get("observed_count", 0)),
+                    str(entry.get("id", "")),
+                ),
+            )
+        )
+        return ordered_ids, {
+            **initial,
+            "field_count": field_count,
+            "non_route_evaluations": non_route_evaluations,
+            "full_route_evaluations": full_route_evaluations,
+            "full_structural_evaluations": full_total,
+            "selected_route_ids": len(retained),
+            "selected_route_evaluations": full_route_evaluations,
+            "selected_structural_evaluations": full_total,
+            "structural_budget": budget,
+            "hierarchical_fallback": False,
+            "destination_groups_before": len(
+                {route_destination_key(entry.get("value", {})) for entry in compatible}
+            ),
+            "destination_groups_after": len(
+                {route_destination_key(entry.get("value", {})) for entry in compatible}
+            ),
+        }
+
+    grouped: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+    for entry in compatible:
+        grouped.setdefault(route_destination_key(entry.get("value", {})), []).append(
+            entry
+        )
+    strengths = {
+        axis: float(movement.get(f"{axis}_strength", 0.0))
+        for axis in ("amplitude", "brightness", "pitch")
+    }
+
+    def group_rank(item: tuple[tuple[Any, ...], list[Mapping[str, Any]]]) -> tuple[Any, ...]:
+        key, values = item
+        axes = route_destination_axis(values[0].get("value", {}))
+        compatibility = max((strengths[axis] for axis in axes), default=0.0)
+        observed = sum(int(value.get("observed_count", 0)) for value in values)
+        return (-compatibility, -observed, tuple(str(value) for value in key))
+
+    route_capacity = max(0, (maximum_limit - non_route_evaluations) // field_count)
+    selected: list[Mapping[str, Any]] = []
+    selected_groups = 0
+    ranked_groups = sorted(grouped.items(), key=group_rank)
+    skipped_oversize_groups = 0
+    for group_index, (_key, values) in enumerate(ranked_groups):
+        if len(selected) + len(values) <= route_capacity:
+            selected.extend(values)
+            selected_groups += 1
+        else:
+            skipped_oversize_groups = len(ranked_groups) - group_index
+            break
+    selected_ids = tuple(str(entry.get("id", "")) for entry in selected)
+    selected_route_evaluations = len(selected_ids) * field_count
+    return selected_ids, {
+        **initial,
+        "field_count": field_count,
+        "non_route_evaluations": non_route_evaluations,
+        "full_route_evaluations": full_route_evaluations,
+        "full_structural_evaluations": full_total,
+        "selected_route_ids": len(selected_ids),
+        "selected_route_evaluations": selected_route_evaluations,
+        "selected_structural_evaluations": (
+            non_route_evaluations + selected_route_evaluations
+        ),
+        "structural_budget": maximum_limit,
+        "hierarchical_fallback": True,
+        "destination_groups_before": len(grouped),
+        "destination_groups_after": selected_groups,
+        "route_capacity": route_capacity,
+        "skipped_oversize_groups": skipped_oversize_groups,
     }

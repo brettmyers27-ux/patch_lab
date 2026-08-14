@@ -296,8 +296,12 @@ def run_bam_suite(
         detail_path = output_dir / _detail_name(source)
         adopted_serum1 = ADOPTED_STAGE2B_BAM_DETAILS / _detail_name(source)
         if (
-            os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0").strip()
-            == "1"
+            (
+                os.environ.get("PATCHLAB_SERUM2_STRUCTURAL_SEARCH", "0").strip()
+                == "1"
+                or os.environ.get("PATCHLAB_REUSE_ADOPTED_SERUM1", "0").strip()
+                == "1"
+            )
             and target_synth == "serum1"
             and adopted_serum1.is_file()
         ):
@@ -873,6 +877,21 @@ def parse_args() -> argparse.Namespace:
         help="Enable the opt-in Stage 3A Serum 2 structural search path.",
     )
     parser.add_argument(
+        "--structural-routes",
+        action="store_true",
+        help="Include Stage 3G modulation routes in deep structural search.",
+    )
+    parser.add_argument(
+        "--structural-route-probe-evaluations",
+        type=int,
+        help="Bound route evaluations for a Stage 3G throughput probe only.",
+    )
+    parser.add_argument(
+        "--reuse-adopted-serum1",
+        action="store_true",
+        help="Reuse the unaffected adopted Stage 2B Serum 1 rows.",
+    )
+    parser.add_argument(
         "--suite",
         choices=("all", "bam", "retrieval"),
         default="all",
@@ -888,12 +907,29 @@ def main() -> int:
         raise ValueError("--invariance-count must be at least 50")
     if args.bam_limit is not None and args.bam_limit <= 0:
         raise ValueError("--bam-limit must be positive")
+    if (
+        args.structural_route_probe_evaluations is not None
+        and args.structural_route_probe_evaluations <= 0
+    ):
+        raise ValueError("--structural-route-probe-evaluations must be positive")
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
     os.environ.setdefault("PATCHLAB_DISTRIBUTION_MODE", "1")
     os.environ["PATCHLAB_SERUM2_STRUCTURAL_SEARCH"] = (
         "1" if args.structural_search else "0"
     )
+    os.environ["PATCHLAB_SERUM2_STRUCTURAL_ROUTES"] = (
+        "1" if args.structural_routes else "0"
+    )
+    os.environ["PATCHLAB_REUSE_ADOPTED_SERUM1"] = (
+        "1" if args.reuse_adopted_serum1 else "0"
+    )
+    if args.structural_route_probe_evaluations is None:
+        os.environ.pop("PATCHLAB_SERUM2_ROUTE_PROBE_EVALUATIONS", None)
+    else:
+        os.environ["PATCHLAB_SERUM2_ROUTE_PROBE_EVALUATIONS"] = str(
+            args.structural_route_probe_evaluations
+        )
     configure_model_environment()
     detail_dir = args.detail_dir.expanduser().resolve()
     detail_dir.mkdir(parents=True, exist_ok=True)

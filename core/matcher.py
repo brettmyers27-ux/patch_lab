@@ -64,16 +64,21 @@ class SearchConfig:
     clap_weight: float = 0.65
     random_seed: int = 2026
     adaptive_preprocessing: bool = True
-    # Stage 3F's frozen retrieval corpus measured 0.775@1 below the 0.785
-    # adoption gate, so deep structural search remains opt-in.
+    # Stage 3G's current fixed BAM rerun did not reproduce the required
+    # Stage 3D absolute quality thresholds, so deep search remains opt-in.
     structural_search: bool = False
+    structural_routes: bool = False
     structural_top_k: int = 2
     structural_exhaustive: bool = True
     structural_max_evaluations: int = 4096
+    structural_max_evaluations_ceiling: int = 8192
     structural_max_seconds: float = 900.0
+    structural_time_reserve_seconds: float = 60.0
     # Stage 3D timing showed the second coordinate pass changed 0/2 smoke
     # targets while almost doubling structural cost, so it is intentionally one.
     structural_passes: int = 1
+    structural_batch_size: int = 128
+    structural_route_probe_evaluations: int | None = None
     embedding_batch_size: int = 32
 
 
@@ -810,7 +815,15 @@ class AnalysisBySynthesisMatcher:
                 {
                     "evaluations": evaluations,
                     "budget": config.max_evaluations
-                    + (config.structural_max_evaluations if config.structural_search else 0),
+                    + (
+                        (
+                            config.structural_max_evaluations_ceiling
+                            if config.structural_routes
+                            else config.structural_max_evaluations
+                        )
+                        if config.structural_search
+                        else 0
+                    ),
                     "best_clap_cosine": candidates[0].clap_cosine,
                     "best_objective": candidates[0].objective,
                     "generation": 0,
@@ -820,8 +833,8 @@ class AnalysisBySynthesisMatcher:
             from core.structural_search import (
                 SEARCH_ORDER,
                 discover_structural_fields,
+                fit_mod_route_ids,
                 measure_periodic_movement,
-                narrow_mod_route_ids,
                 staged_proposals,
             )
 
@@ -839,6 +852,8 @@ class AnalysisBySynthesisMatcher:
                 enabled_categories = set(
                     self.structural_policy.get("enabled_categories", ())
                 )
+                if not config.structural_routes:
+                    enabled_categories.discard("mod_route")
                 allowed_ids = {
                     str(category): {str(value) for value in values}
                     for category, values in self.structural_policy.get(
@@ -859,9 +874,29 @@ class AnalysisBySynthesisMatcher:
                             for entry in route_entries
                             if str(entry.get("id", "")) in permitted_routes
                         ]
-                    narrowed, route_narrowing = narrow_mod_route_ids(
+                    non_route_proposals = staged_proposals(
+                        self.structural_vocabulary,
+                        top_k=(
+                            None
+                            if config.structural_exhaustive
+                            else config.structural_top_k
+                        ),
+                        fields=fields,
+                        enabled_categories=frozenset(
+                            enabled_categories - {"mod_route"}
+                        ),
+                        allowed_ids=allowed_ids,
+                    )
+                    non_route_evaluations = sum(
+                        len(values) for values in non_route_proposals.values()
+                    )
+                    narrowed, route_narrowing = fit_mod_route_ids(
                         route_entries,
                         measure_periodic_movement(target, CLAP_SAMPLE_RATE),
+                        field_count=len(fields.get("mod_route", ())),
+                        non_route_evaluations=non_route_evaluations,
+                        standard_limit=config.structural_max_evaluations,
+                        maximum_limit=config.structural_max_evaluations_ceiling,
                     )
                     if not route_narrowing["searchable"]:
                         enabled_categories.discard("mod_route")
@@ -879,15 +914,118 @@ class AnalysisBySynthesisMatcher:
                     fields=fields,
                     enabled_categories=frozenset(enabled_categories),
                     allowed_ids=allowed_ids,
+                    ranked_ids={"mod_route": list(narrowed)}
+                    if route_narrowing is not None
+                    else None,
+                )
+                target_structural_budget = int(
+                    (route_narrowing or {}).get(
+                        "structural_budget", config.structural_max_evaluations
+                    )
                 )
                 structural_started = time.monotonic()
                 for pass_index in range(max(1, config.structural_passes)):
                     for category in SEARCH_ORDER:
                         category_proposals = proposals.get(category, [])
+                        full_category_count = len(category_proposals)
+                        if (
+                            category == "mod_route"
+                            and config.structural_route_probe_evaluations is not None
+                        ):
+                            category_proposals = category_proposals[
+                                : config.structural_route_probe_evaluations
+                            ]
+                        time_projection: dict[str, Any] | None = None
+                        if (
+                            category == "mod_route"
+                            and config.structural_route_probe_evaluations is None
+                        ):
+                            measured_stages = [
+                                item
+                                for item in trace
+                                if str(item.get("stage", "")).startswith("structural-")
+                                and item.get("stage")
+                                not in (
+                                    "structural-mod-route-narrowing",
+                                    "structural-mod_route",
+                                )
+                                and float(item.get("elapsed_s", 0.0)) > 0.0
+                                and int(item.get("evaluated_count", 0)) > 0
+                            ]
+                            measured_rate = min(
+                                (
+                                    float(item["evaluations_per_minute"])
+                                    for item in measured_stages
+                                ),
+                                default=float("inf"),
+                            )
+                            elapsed_structural = time.monotonic() - structural_started
+                            remaining_seconds = max(
+                                0.0,
+                                config.structural_max_seconds
+                                - config.structural_time_reserve_seconds
+                                - elapsed_structural,
+                            )
+                            time_capacity = (
+                                int(measured_rate * remaining_seconds / 60.0)
+                                if np.isfinite(measured_rate)
+                                else len(category_proposals)
+                            )
+                            if len(category_proposals) > time_capacity:
+                                grouped: dict[
+                                    tuple[Any, ...] | None,
+                                    list[Any],
+                                ] = {}
+                                for proposal in category_proposals:
+                                    grouped.setdefault(
+                                        proposal.group_key, []
+                                    ).append(proposal)
+                                fitted: list[Any] = []
+                                groups_before = len(grouped)
+                                groups_after = 0
+                                for values in grouped.values():
+                                    if len(fitted) + len(values) <= time_capacity:
+                                        fitted.extend(values)
+                                        groups_after += 1
+                                    else:
+                                        break
+                                category_proposals = fitted
+                            else:
+                                groups_before = len(
+                                    {
+                                        proposal.group_key
+                                        for proposal in category_proposals
+                                    }
+                                )
+                                groups_after = groups_before
+                            time_projection = {
+                                "measured_non_route_evaluations_per_minute": measured_rate,
+                                "elapsed_non_route_structural_s": elapsed_structural,
+                                "remaining_structural_s": remaining_seconds,
+                                "time_candidate_capacity": time_capacity,
+                                "time_hierarchical_fallback": len(category_proposals)
+                                < full_category_count,
+                                "destination_groups_before": groups_before,
+                                "destination_groups_after": groups_after,
+                            }
                         if not category_proposals:
+                            if time_projection is not None:
+                                trace.append(
+                                    {
+                                        "stage": f"structural-{category}",
+                                        "pass": pass_index + 1,
+                                        "searched": False,
+                                        "reason": "no complete destination group fits remaining time",
+                                        "candidate_count": 0,
+                                        "full_candidate_count": full_category_count,
+                                        "time_projection": time_projection,
+                                        "evaluated_count": 0,
+                                        "complete": True,
+                                    }
+                                )
                             continue
                         remaining = (
-                            config.structural_max_evaluations - structural_evaluations
+                            target_structural_budget - structural_evaluations
                         )
                         if len(category_proposals) > remaining:
                             trace.append(
@@ -904,6 +1042,7 @@ class AnalysisBySynthesisMatcher:
                         if (
                             time.monotonic() - structural_started
                             >= config.structural_max_seconds
+                            - config.structural_time_reserve_seconds
                         ):
                             trace.append(
                                 {
@@ -915,50 +1054,111 @@ class AnalysisBySynthesisMatcher:
                                 }
                             )
                             continue
-                        stage_candidates: list[Candidate] = []
-                        for proposal in category_proposals:
-                            overrides = dict(structural_seed.structural_overrides)
-                            overrides.update(proposal.overrides)
-                            stage_candidates.append(
-                                Candidate(
-                                    structural_seed.synth,
-                                    structural_seed.base_preset_id,
-                                    structural_seed.vector.copy(),
-                                    structural_seed.mask.copy(),
-                                    f"structural-{category}-{proposal.priority + 1}",
-                                    midi_note=structural_seed.midi_note,
-                                    structural_overrides=overrides,
-                                )
-                            )
+                        category_started = time.monotonic()
+                        category_seed = structural_seed
                         before = structural_seed.objective
-                        self._evaluate(
-                            stage_candidates,
-                            midi_note,
-                            duration,
-                            target,
-                            objective_embedding,
-                            config,
-                        )
-                        structural_evaluations += len(stage_candidates)
-                        candidates.extend(stage_candidates)
-                        viable = [
-                            item
-                            for item in stage_candidates
-                            if np.isfinite(item.objective)
-                        ]
-                        if viable:
-                            winner = min(viable, key=lambda item: item.objective)
-                            if winner.objective < structural_seed.objective:
-                                structural_seed = winner
+                        category_winner: Candidate | None = None
+                        category_evaluations = 0
+                        category_batch_size = config.structural_batch_size
+                        if category == "mod_route" and time_projection is not None:
+                            batch_rate = float(
+                                time_projection[
+                                    "measured_non_route_evaluations_per_minute"
+                                ]
+                            )
+                            if np.isfinite(batch_rate):
+                                category_batch_size = min(
+                                    category_batch_size,
+                                    max(
+                                        1,
+                                        int(
+                                            batch_rate
+                                            * config.structural_time_reserve_seconds
+                                            / 60.0
+                                        ),
+                                    ),
+                                )
+                        for start in range(
+                            0, len(category_proposals), category_batch_size
+                        ):
+                            if (
+                                time.monotonic() - structural_started
+                                >= config.structural_max_seconds
+                                - config.structural_time_reserve_seconds
+                            ):
+                                break
+                            batch_proposals = category_proposals[
+                                start : start + category_batch_size
+                            ]
+                            stage_candidates: list[Candidate] = []
+                            for proposal in batch_proposals:
+                                overrides = dict(category_seed.structural_overrides)
+                                overrides.update(proposal.overrides)
+                                stage_candidates.append(
+                                    Candidate(
+                                        category_seed.synth,
+                                        category_seed.base_preset_id,
+                                        category_seed.vector.copy(),
+                                        category_seed.mask.copy(),
+                                        f"structural-{category}-{proposal.priority + 1}",
+                                        midi_note=category_seed.midi_note,
+                                        structural_overrides=overrides,
+                                    )
+                                )
+                            self._evaluate(
+                                stage_candidates,
+                                midi_note,
+                                duration,
+                                target,
+                                objective_embedding,
+                                config,
+                            )
+                            category_evaluations += len(stage_candidates)
+                            structural_evaluations += len(stage_candidates)
+                            viable = [
+                                item
+                                for item in stage_candidates
+                                if np.isfinite(item.objective)
+                            ]
+                            if viable:
+                                batch_winner = min(
+                                    viable, key=lambda item: item.objective
+                                )
+                                if (
+                                    category_winner is None
+                                    or batch_winner.objective
+                                    < category_winner.objective
+                                ):
+                                    if category_winner is not None:
+                                        category_winner.waveform = None
+                                    category_winner = batch_winner
                             for item in stage_candidates:
-                                if item is not winner:
+                                if item is not category_winner:
                                     item.waveform = None
+                            candidates.extend(stage_candidates)
+                        if (
+                            category_winner is not None
+                            and category_winner.objective < structural_seed.objective
+                        ):
+                            structural_seed = category_winner
+                        category_elapsed = time.monotonic() - category_started
                         trace.append(
                             {
                                 "stage": f"structural-{category}",
                                 "pass": pass_index + 1,
-                                "searched": True,
-                                "candidate_count": len(stage_candidates),
+                                "searched": category_evaluations > 0,
+                                "candidate_count": len(category_proposals),
+                                "full_candidate_count": full_category_count,
+                                "time_projection": time_projection,
+                                "evaluated_count": category_evaluations,
+                                "complete": category_evaluations
+                                == len(category_proposals),
+                                "elapsed_s": category_elapsed,
+                                "evaluations_per_minute": (
+                                    category_evaluations
+                                    / max(category_elapsed, 1e-9)
+                                    * 60.0
+                                ),
                                 "evaluations": evaluations + structural_evaluations,
                                 "structural_evaluations": structural_evaluations,
                                 "best_objective": structural_seed.objective,
@@ -975,7 +1175,7 @@ class AnalysisBySynthesisMatcher:
                                     "evaluations": evaluations
                                     + structural_evaluations,
                                     "budget": config.max_evaluations
-                                    + config.structural_max_evaluations,
+                                    + target_structural_budget,
                                     "best_clap_cosine": structural_seed.clap_cosine,
                                     "best_objective": structural_seed.objective,
                                     "generation": 0,
@@ -1068,7 +1268,11 @@ class AnalysisBySynthesisMatcher:
                                 "evaluations": evaluations + structural_evaluations,
                                 "budget": config.max_evaluations
                                 + (
-                                    config.structural_max_evaluations
+                                    (
+                                        config.structural_max_evaluations_ceiling
+                                        if config.structural_routes
+                                        else config.structural_max_evaluations
+                                    )
                                     if config.structural_search
                                     else 0
                                 ),

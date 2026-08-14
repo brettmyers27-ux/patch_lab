@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "stage": "3G",
+  "seed": 20260802,
+  "hardware": "Windows 11 / RTX 5070",
+  "probe_route_evaluations": 512,
+  "peak_vram": null,
+  "peak_vram_note": "Unavailable: the existing benchmark diagnostics do not sample peak VRAM.",
+  "initial_bounded_probes": [
+    {
+      "route_count_band": "low",
+      "routes_after_motion_narrowing": 605,
+      "route_fields": 6,
+      "complete_route_evaluations": 3630,
+      "evaluation_fit_route_evaluations": 3630,
+      "complete_structural_evaluations": 4904,
+      "evaluation_fit_structural_evaluations": 4904,
+      "probe_evaluations": 512,
+      "probe_route_wall_clock_s": 23.578,
+      "route_evaluations_per_minute": 1302.909492,
+      "measured_non_route_structural_wall_clock_s": 44.656,
+      "projected_complete_structural_wall_clock_s": 211.820336,
+      "projected_evaluation_fit_structural_wall_clock_s": 211.820336
+    },
+    {
+      "route_count_band": "median",
+      "routes_after_motion_narrowing": 1606,
+      "route_fields": 21,
+      "complete_route_evaluations": 33726,
+      "evaluation_fit_route_evaluations": 6741,
+      "complete_structural_evaluations": 35160,
+      "evaluation_fit_structural_evaluations": 8175,
+      "probe_evaluations": 512,
+      "probe_route_wall_clock_s": 106.312,
+      "route_evaluations_per_minute": 288.960795,
+      "measured_non_route_structural_wall_clock_s": 300.547,
+      "projected_complete_structural_wall_clock_s": 7303.434719,
+      "projected_evaluation_fit_structural_wall_clock_s": 1700.252453
+    },
+    {
+      "route_count_band": "high",
+      "routes_after_motion_narrowing": 1847,
+      "route_fields": 9,
+      "complete_route_evaluations": 16623,
+      "evaluation_fit_route_evaluations": 6912,
+      "complete_structural_evaluations": 17897,
+      "evaluation_fit_structural_evaluations": 8186,
+      "probe_evaluations": 512,
+      "probe_route_wall_clock_s": 20.453,
+      "route_evaluations_per_minute": 1501.980150,
+      "measured_non_route_structural_wall_clock_s": 43.594,
+      "projected_complete_structural_wall_clock_s": 707.637396,
+      "projected_evaluation_fit_structural_wall_clock_s": 319.709500
+    }
+  ],
+  "reserved_time_validation": {
+    "route_count_band": "median",
+    "evaluation_fit_route_evaluations": 6741,
+    "time_fit_route_evaluations": 2541,
+    "route_wall_clock_s": 530.828,
+    "non_route_structural_wall_clock_s": 293.750,
+    "total_structural_wall_clock_s": 824.578,
+    "structural_time_ceiling_s": 900,
+    "continuous_optimizer_and_match_total_wall_clock_s": 902.875,
+    "all_selected_destination_groups_completed": true
+  },
+  "final_arm_c_validation": [
+    {
+      "route_count_band": "low",
+      "routes_after_motion_narrowing": 605,
+      "complete_structural_evaluations": 4904,
+      "evaluation_fit_structural_evaluations": 4904,
+      "route_evaluations_completed": 3630,
+      "route_wall_clock_s": 125.235,
+      "route_evaluations_per_minute": 1739.130435,
+      "time_hierarchical_fallback": false,
+      "destination_groups_before_time_fit": 165,
+      "destination_groups_after_time_fit": 165,
+      "total_structural_wall_clock_s": 161.719
+    },
+    {
+      "route_count_band": "median",
+      "routes_after_motion_narrowing": 1606,
+      "complete_structural_evaluations": 35160,
+      "evaluation_fit_structural_evaluations": 8154,
+      "route_evaluations_completed": 2751,
+      "route_wall_clock_s": 459.813,
+      "route_evaluations_per_minute": 358.972017,
+      "time_hierarchical_fallback": true,
+      "destination_groups_before_time_fit": 10,
+      "destination_groups_after_time_fit": 2,
+      "total_structural_wall_clock_s": 703.782
+    },
+    {
+      "route_count_band": "high",
+      "routes_after_motion_narrowing": 1847,
+      "complete_structural_evaluations": 17897,
+      "evaluation_fit_structural_evaluations": 7898,
+      "route_evaluations_completed": 6624,
+      "route_wall_clock_s": 186.453,
+      "route_evaluations_per_minute": 2131.582758,
+      "time_hierarchical_fallback": false,
+      "destination_groups_before_time_fit": 167,
+      "destination_groups_after_time_fit": 167,
+      "total_structural_wall_clock_s": 224.719
+    }
+  ]
+}

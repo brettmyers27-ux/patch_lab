@@ -192,6 +192,22 @@ Nothing may be silently dropped.
   need for this corpus. The canonical retrieval@1 misses the 0.785 gate, so Stage
   3D's FX/wavetable/noise search remains opt-in; routes remain excluded and the
   relay is unchanged.
+- **Stage 3G — modulation-route search and final structural adjudication**
+  (completed, not adopted, Windows RTX 5070, 2026-08-13): the real workload
+  audit found that existing modulation-slot multiplicity expands the apparent
+  605–1,847 narrowed routes to 896–54,523 structural evaluations (median
+  38,262). Destination-first fitting kept every target at or below 8,192
+  evaluations and 900 seconds; 50/52 targets needed evaluation fitting and
+  12/52 needed additional measured-time fitting. The fixed current rerun gave
+  Arm A 0.787298 Serum 2 / 0.780430 whole-set, Arm B FX/wavetable/noise
+  0.795894 / 0.784945, and Arm C with routes 0.791708 / 0.782747. Routes
+  regressed Arm B by 0.004186 mean (24 improved, 26 regressed, 2 unchanged),
+  so they remain excluded. Arm B also missed the absolute 0.796935 Serum 2 and
+  0.785492 whole-set default-adoption thresholds. Frozen retrieval remained
+  exactly 0.775@1 / 0.890@5 and invariance remained 0.403333@1 / 0.596667@5.
+  Deep structural search therefore remains opt-in, production remains Stage
+  2B, and the next priority is layer decomposition: dominant layer, subtract,
+  residual, preset stack.
 - **Throughout**: vocal-chop targets always asymptote lower — always attempt, always
   output, score honestly. Serum 2's automation cap is structural; state it in reports
   rather than implying more data will fix it.
