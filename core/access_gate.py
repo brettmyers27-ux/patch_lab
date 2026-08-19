@@ -176,7 +176,36 @@ class AccessManager:
         state = self.store.load()
         if state.local_only:
             os.environ["PATCHLAB_DISABLE_RELAY"] = "1"
-        return not state.authenticated_once and not state.local_only
+            return False
+        if not state.authenticated_once:
+            return True
+        return self._revoked_since_authentication()
+
+    def _revoked_since_authentication(self) -> bool:
+        """Re-check a previously-accepted passcode against the live relay.
+
+        Without this, "authenticated once" means "trusted forever" on this
+        machine, and rotating the group passcode to end a beta would do
+        nothing for anyone who already unlocked the app. Only an explicit
+        401/403 from the relay counts as revoked; an unreachable relay or a
+        missing local passcode fails open so offline use still works.
+        """
+
+        if not self.relay_url:
+            return False
+        passcode = self.store.passcode()
+        if not passcode:
+            return False
+        try:
+            self.validator(self.relay_url, passcode)
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                self.store.clear()
+                return True
+            return False
+        except Exception:
+            return False
+        return False
 
     def authenticate(self, passcode: str) -> tuple[bool, str, bool]:
         if not passcode:

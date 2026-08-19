@@ -101,5 +101,55 @@ class AccessGateTest(unittest.TestCase):
             os.environ.pop("PATCHLAB_DISABLE_RELAY", None)
 
 
+    def test_rotated_passcode_locks_out_a_previously_authenticated_machine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            keyring = MemoryKeyring()
+            store = AccessStore(
+                marker_path=root / "access.json", keyring_backend=keyring
+            )
+            accepted = {"value": "old-passcode"}
+
+            def validator(_url: str, value: str) -> str:
+                if value == accepted["value"]:
+                    return "token"
+                raise urllib.error.HTTPError("", 401, "", {}, None)
+
+            manager = AccessManager(
+                store, relay_url="http://relay.invalid", validator=validator
+            )
+            ok, _message, _offline = manager.authenticate("old-passcode")
+            self.assertTrue(ok)
+            self.assertFalse(manager.needs_prompt())
+
+            accepted["value"] = "new-passcode"
+            self.assertTrue(manager.needs_prompt())
+            self.assertIsNone(keyring.get_password(SERVICE, ACCOUNT))
+            self.assertFalse(store.load().authenticated_once)
+
+            ok, _message, _offline = manager.authenticate("new-passcode")
+            self.assertTrue(ok)
+            self.assertFalse(manager.needs_prompt())
+
+    def test_unreachable_relay_does_not_lock_out_an_authenticated_machine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = AccessStore(
+                marker_path=root / "access.json", keyring_backend=MemoryKeyring()
+            )
+            manager = AccessManager(
+                store, relay_url="http://relay.invalid", validator=lambda _u, _v: "token"
+            )
+            ok, _message, _offline = manager.authenticate("correct")
+            self.assertTrue(ok)
+
+            def offline_validator(_url: str, _value: str) -> str:
+                raise OSError("network unreachable")
+
+            manager.validator = offline_validator
+            self.assertFalse(manager.needs_prompt())
+            self.assertTrue(store.load().authenticated_once)
+
+
 if __name__ == "__main__":
     unittest.main()
