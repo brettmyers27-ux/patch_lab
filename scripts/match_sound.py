@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--factory-only", action="store_true")
     parser.add_argument("--factory-mapping", type=Path)
     parser.add_argument("--local-db", type=Path)
+    parser.add_argument("--local-audio-root", type=Path)
     parser.add_argument("--session-root", type=Path)
     args = parser.parse_args()
 
@@ -47,6 +48,7 @@ def main() -> int:
                 start_offset_s=args.offset,
                 mapping_path=args.factory_mapping,
                 local_db_path=args.local_db,
+                local_audio_root=args.local_audio_root,
                 session_root=args.session_root or DEFAULT_FACTORY_SESSION_ROOT,
                 progress_callback=progress,
             )

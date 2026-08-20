@@ -283,6 +283,61 @@ class RenderProcessRunner(_ProcessRunnerBase):
             self.failed.emit(f"Render worker exited with code {exit_code}")
 
 
+class StorageProcessRunner(_ProcessRunnerBase):
+    """Run cross-volume migration/cleanup without blocking Qt's UI thread."""
+
+    log = Signal(str)
+    progress = Signal(dict)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._init_worker_process()
+        self._result: dict[str, object] | None = None
+        self._error: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
+    def start(self, arguments: list[str]) -> None:
+        if self.running:
+            raise RuntimeError("A storage operation is already running")
+        self._buffer = ""
+        self._result = None
+        self._error = None
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
+        self._start_worker("storage", arguments)
+
+    def _read_output(self) -> None:
+        self._buffer += bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        while (line := self._pop_line()) is not None:
+            if self._handle_worker_line(line):
+                continue
+            if line.startswith("STORAGE_PROGRESS="):
+                self.progress.emit(json.loads(line.split("=", 1)[1]))
+            elif line.startswith("STORAGE_RESULT="):
+                self._result = json.loads(line.split("=", 1)[1])
+            elif line.startswith("STORAGE_ERROR="):
+                self._error = line.split("=", 1)[1]
+            if line:
+                self.log.emit(line)
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        if self._finished_before_ready(exit_code):
+            return
+        if exit_code == 0 and self._result is not None:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(
+                self._error or f"Storage worker exited with code {exit_code}"
+            )
+
+
 class AnalyzeProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     progress = Signal(dict)
@@ -395,6 +450,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
         factory_only: bool = False,
         factory_mapping: Path | None = None,
         local_db: Path | None = None,
+        local_audio_root: Path | None = None,
     ) -> None:
         if self.running:
             raise RuntimeError("A sound match is already running")
@@ -419,6 +475,8 @@ class MatchProcessRunner(_ProcessRunnerBase):
             arguments.extend(["--factory-mapping", str(factory_mapping)])
         if local_db is not None:
             arguments.extend(["--local-db", str(local_db)])
+        if local_audio_root is not None:
+            arguments.extend(["--local-audio-root", str(local_audio_root)])
         self._start_worker("match", arguments)
 
     def cancel(self) -> None:

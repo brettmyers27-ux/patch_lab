@@ -132,3 +132,39 @@ def test_live_activity_and_broken_cache_are_explicit(tmp_path: Path) -> None:
         )
     assert broken.match.phase == "needs-action"
     assert broken.match.text == "Tokenizer cache missing · reinstall PatchLab"
+
+
+def test_compact_mode_counts_durable_fingerprints_as_complete(tmp_path: Path) -> None:
+    linked = tmp_path / "Linked"
+    linked.mkdir()
+    database = Database(tmp_path / "app-data" / "library.db")
+    for index in range(2):
+        preset_id, _ = database.insert_preset(
+            path=linked / f"Preset {index}.fxp",
+            name=f"Preset {index}",
+            synth="serum1",
+            content_hash=f"compact-{index}",
+        )
+        database.upsert_fingerprint(
+            preset_id,
+            0,
+            bytes(512 * 4),
+            bytes(10 * 4),
+        )
+        with database.connect() as connection:
+            connection.execute(
+                "UPDATE presets SET status='embedded' WHERE id=?", (preset_id,)
+            )
+
+    with patch("core.workflow_state.validate_model_assets"):
+        state = resolve_workflow_state(
+            privacy=PrivacyChoice(True, str(linked)),
+            local_database_path=database.path,
+            factory_bundle_path=_factory_bundle(tmp_path / "compact-factory.sqlite"),
+            audio_selected=False,
+            compact_mode=True,
+            audio_storage_error="The external drive is disconnected.",
+        )
+
+    assert state.render.phase == "complete"
+    assert state.render.text == "All 2 presets learned · compact storage"

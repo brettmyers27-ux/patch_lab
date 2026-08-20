@@ -26,6 +26,12 @@ from core.preset_scan import (
 from core.render import MIDI_NOTES, render_library, summary_dict
 from core.serum2_preset import parse_serum2_preset
 from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstpreset
+from core.storage import (
+    compact_render_library,
+    configured_audio_root,
+    load_storage_preferences,
+    preview_cache_root,
+)
 
 
 LogCallback = Callable[[str], None]
@@ -61,13 +67,16 @@ class LocalLibrarySummary:
     relay_disabled: int = 0
     relay_disabled_after_failures: int = 0
     audio_bytes_uploaded: int = 0
+    compacted_render_files: int = 0
+    compacted_render_bytes: int = 0
 
 
 def default_local_paths(env: PlatformEnv = ENV) -> dict[str, Path]:
     base = env.app_data_dir
     return {
         "db": base / "library.db",
-        "audio": base / "audio",
+        "audio": configured_audio_root(env),
+        "preview_root": preview_cache_root(env),
         "states": base / "serum2-render-states",
         "matches": base / "match_library",
     }
@@ -162,6 +171,7 @@ def process_linked_folder(
     log: LogCallback = print,
     progress: ProgressCallback | None = None,
     render_processes: int = 4,
+    compact_mode: bool | None = None,
 ) -> LocalLibrarySummary:
     """Always process locally first, then perform storage-only relay dedup."""
 
@@ -169,6 +179,8 @@ def process_linked_folder(
     if not root.is_dir():
         raise NotADirectoryError(root)
     database = Database(db_path)
+    if compact_mode is None:
+        compact_mode = load_storage_preferences(env).compact_mode
     known_factory = FactoryBundle(bundle_path).known_hashes()
     paths = discover_presets(root)
     summary = LocalLibrarySummary(found=len(paths))
@@ -291,78 +303,47 @@ def process_linked_folder(
         for record in database.renderable_presets()
         if record.id in id_to_path
     ]
-    def render_progress(detail: dict[str, Any]) -> None:
-        if progress is None:
-            return
-        current = int(detail.get("completed_note_pairs", 0))
-        total = int(detail.get("total_note_pairs", 0))
-        progress(
-            {
-                **detail,
-                "stage": "render",
-                "current": current,
-                "total": total,
-                "text": f"Rendering {current:,} of {total:,} notes",
-            }
-        )
-
-    if progress is not None:
-        existing_notes = database.existing_render_notes()
-        completed_notes = sum(
-            len(existing_notes.get(preset_id, set()).intersection(MIDI_NOTES))
-            for preset_id in renderable
-        )
-        total_notes = len(renderable) * len(MIDI_NOTES)
-        progress(
-            {
-                "stage": "render",
-                "current": completed_notes,
-                "total": total_notes,
-                "text": (
-                    f"Rendering {completed_notes:,} of {total_notes:,} notes"
-                ),
-            }
-        )
-    render_summary = render_library(
-        db_path=db_path,
-        audio_root=audio_root,
-        state_dir=state_dir,
-        preset_ids=renderable,
-        processes=render_processes,
-        log=log,
-        progress=render_progress,
-    )
-    log("Local render summary: " + json.dumps(summary_dict(render_summary), sort_keys=True))
-
     with database.connect() as connection:
-        audible_ids = {
-            int(row[0])
-            for row in connection.execute(
-                "SELECT id FROM presets WHERE status='rendered'"
-            ).fetchall()
-        }
-        already = {
+        already_fingerprinted = {
             int(row[0])
             for row in connection.execute(
                 "SELECT preset_id FROM fingerprints WHERE midi_note=0"
             ).fetchall()
         }
-    needs_features = [
+    # Compact mode treats fingerprints as the durable result. Re-scanning an
+    # already learned preset must not recreate seven large WAV files merely to
+    # delete them again. Turning compact mode off intentionally restores them.
+    render_targets = (
+        [preset_id for preset_id in renderable if preset_id not in already_fingerprinted]
+        if compact_mode
+        else renderable
+    )
+    feature_targets = {
         preset_id
-        for preset_id in renderable
-        if preset_id in audible_ids and preset_id not in already
-    ]
-    if needs_features:
-        embedder = ClapEmbedder(env)
-        for feature_index, preset_id in enumerate(needs_features, start=1):
+        for preset_id in render_targets
+        if preset_id not in already_fingerprinted
+    }
+    total_notes = len(render_targets) * len(MIDI_NOTES)
+    total_features = len(feature_targets)
+    completed_render_notes = 0
+    completed_features = 0
+    embedder = ClapEmbedder(env) if feature_targets else None
+
+    def fingerprint_batch(preset_ids: list[int]) -> None:
+        nonlocal completed_features
+        for preset_id in preset_ids:
+            if preset_id not in feature_targets:
+                continue
+            assert embedder is not None
             prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
             for note in MIDI_NOTES:
                 wav = Path(audio_root) / str(preset_id) / f"{note}.wav"
                 if not wav.is_file():
                     continue
                 prepared = load_audio_48k_mono(wav)
-                handcrafted = handcrafted_features(prepared.waveform)
-                prepared_rows.append((note, prepared.waveform, handcrafted))
+                prepared_rows.append(
+                    (note, prepared.waveform, handcrafted_features(prepared.waveform))
+                )
             embeddings = (
                 embedder.embed([row[1] for row in prepared_rows])
                 if prepared_rows
@@ -391,17 +372,74 @@ def process_linked_folder(
                 )
                 summary.fingerprints_created += 1
                 log(f"Local fingerprint ready: {id_to_path[preset_id].name}")
+            completed_features += 1
             if progress is not None:
                 progress(
                     {
                         "stage": "analyze",
-                        "current": feature_index,
-                        "total": len(needs_features),
+                        "current": completed_features,
+                        "total": total_features,
                         "text": (
-                            f"Learning {feature_index:,} of "
-                            f"{len(needs_features):,} linked presets"
+                            f"Learning {completed_features:,} of "
+                            f"{total_features:,} linked presets"
                         ),
                     }
+                )
+
+    # Compact mode deliberately limits the temporary render working set. Each
+    # batch is rendered, embedded, and removed before the next one begins, so
+    # a full library never needs tens of gigabytes of free local space.
+    batch_size = 24 if compact_mode else max(len(render_targets), 1)
+    for batch_start in range(0, len(render_targets), batch_size):
+        batch = render_targets[batch_start : batch_start + batch_size]
+
+        def render_progress(detail: dict[str, Any]) -> None:
+            if progress is None:
+                return
+            current = completed_render_notes + int(
+                detail.get("completed_note_pairs", 0)
+            )
+            progress(
+                {
+                    **detail,
+                    "stage": "render",
+                    "current": current,
+                    "total": total_notes,
+                    "text": f"Rendering {current:,} of {total_notes:,} notes",
+                }
+            )
+
+        render_summary = render_library(
+            db_path=db_path,
+            audio_root=audio_root,
+            state_dir=state_dir,
+            preset_ids=batch,
+            processes=render_processes,
+            log=log,
+            progress=render_progress,
+        )
+        log(
+            "Local render batch summary: "
+            + json.dumps(summary_dict(render_summary), sort_keys=True)
+        )
+        completed_render_notes += len(batch) * len(MIDI_NOTES)
+        with database.connect() as connection:
+            audible_ids = {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT id FROM presets WHERE status='rendered'"
+                ).fetchall()
+            }
+        fingerprint_batch([preset_id for preset_id in batch if preset_id in audible_ids])
+        if compact_mode:
+            compacted = compact_render_library(db_path, audio_root, log=log)
+            summary.compacted_render_files += compacted.files
+            summary.compacted_render_bytes += compacted.bytes
+            if compacted.files:
+                log(
+                    "Compact storage retained fingerprints and removed "
+                    f"{compacted.files:,} regenerable WAV files "
+                    f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
                 )
 
     with database.connect() as connection:
@@ -412,7 +450,8 @@ def process_linked_folder(
             ).fetchall()
         }
         presets = connection.execute(
-            "SELECT id,content_hash,is_factory FROM presets WHERE status='rendered' ORDER BY id"
+            "SELECT id,content_hash,is_factory FROM presets "
+            "WHERE status IN ('rendered','embedded') ORDER BY id"
         ).fetchall()
     eligible = [row for row in presets if int(row["id"]) in id_to_path and int(row["id"]) in searchable_ids]
     summary.searchable_local = len(eligible)
@@ -460,6 +499,16 @@ def process_linked_folder(
                     "local preset processing will continue."
                 )
             continue
+    if compact_mode:
+        compacted = compact_render_library(db_path, audio_root, log=log)
+        summary.compacted_render_files += compacted.files
+        summary.compacted_render_bytes += compacted.bytes
+        if compacted.files:
+            log(
+                "Compact storage retained fingerprints and removed "
+                f"{compacted.files:,} regenerable WAV files "
+                f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
+            )
     log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
     return summary
 

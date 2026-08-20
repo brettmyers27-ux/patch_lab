@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSpinBox,
     QSizePolicy,
     QStackedWidget,
     QTabBar,
@@ -70,6 +71,7 @@ from app.workers import (
     PreviewProcessRunner,
     RenderProcessRunner,
     ScanProcessRunner,
+    StorageProcessRunner,
 )
 from core.audio_input import SUPPORTED_AUDIO_SUFFIXES
 from core.branding import display_match_name, generated_preset_name
@@ -98,6 +100,14 @@ from core.preview_cache import (
     unmodified_recommendation_basis_index,
 )
 from core.privacy import PrivacyStore, distribution_mode
+from core.storage import (
+    StoragePreferences,
+    load_storage_preferences,
+    prepare_audio_root,
+    prune_preview_cache,
+    save_storage_preferences,
+    storage_status,
+)
 from core.synthesis_assets import synthesis_readiness
 from core.workflow_state import (
     WorkflowActivity,
@@ -658,6 +668,7 @@ class LegacyMainWindow(QMainWindow):
 
         if not hasattr(self, "hero_cards"):
             return
+        storage = storage_status()
         state = resolve_workflow_state(
             privacy=self.privacy_choice,
             local_database_path=self.local_paths["db"],
@@ -665,6 +676,14 @@ class LegacyMainWindow(QMainWindow):
             match_completed=self._workflow_last_match_complete,
             activities=self._workflow_activities,
             match_prerequisite_error=self._model_asset_error or "",
+            compact_mode=bool(
+                getattr(
+                    self,
+                    "storage_preferences",
+                    load_storage_preferences(),
+                ).compact_mode
+            ),
+            audio_storage_error=storage.reason if not storage.available else "",
         )
         resolved_cards = state.as_dict()
         for key, card in zip(
@@ -734,8 +753,19 @@ class LegacyMainWindow(QMainWindow):
                 "GROUP BY preset_id HAVING COUNT(DISTINCT midi_note)>=7)"
             ).fetchone()[0]
         )
+        fingerprinted = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM fingerprints WHERE midi_note=0"
+            ).fetchone()[0]
+        )
         connection.close()
-        return presets > 0 and rendered >= presets
+        compact_mode = bool(
+            getattr(
+                self, "storage_preferences", load_storage_preferences()
+            ).compact_mode
+        )
+        ready = fingerprinted if compact_mode else rendered
+        return presets > 0 and ready >= presets
 
     def _section(
         self, layout: QVBoxLayout, title: str, description: str, *, enabled: bool
@@ -766,6 +796,16 @@ class LegacyMainWindow(QMainWindow):
                 "then click this card again to link a folder.",
             )
             return
+        storage = storage_status()
+        if not storage.available:
+            QMessageBox.warning(
+                self,
+                "Audio storage is disconnected",
+                f"{storage.reason}\n\nReconnect it or choose a new Audio Storage "
+                "location in Settings. Matching remains available.",
+            )
+            self.append_log(f"Preset processing not started: {storage.reason}")
+            return
         defaults = ENV.existing_preset_roots
         initial = str(defaults[0] if defaults else Path.home())
         selected = QFileDialog.getExistingDirectory(self, "Select Serum preset folder", initial)
@@ -776,8 +816,9 @@ class LegacyMainWindow(QMainWindow):
                 self,
                 "Start local preset-library processing?",
                 "PatchLab will scan and locally render every eligible preset in this "
-                "folder. A large factory library can take 1–4 hours, use several "
-                "gigabytes of storage, and keep four processor workers busy.\n\n"
+                "folder. A large factory library can take 1–4 hours and keep four "
+                "processor workers busy. Compact storage learns presets in small "
+                "batches and removes regenerable WAVs as it proceeds.\n\n"
                 "You can continue matching while it runs, but matching may be "
                 "noticeably slower until library processing finishes.\n\n"
                 "Start the library job now?",
@@ -833,7 +874,9 @@ class LegacyMainWindow(QMainWindow):
                 f"relay failures {summary.get('relay_upload_failed', 0)}, "
                 "relay stopped after failures "
                 f"{summary.get('relay_disabled_after_failures', 0)}, "
-                f"factory uploads skipped {summary.get('factory_skipped_upload', 0)}"
+                f"factory uploads skipped {summary.get('factory_skipped_upload', 0)}, "
+                f"compact renders removed {summary.get('compacted_render_files', 0)} "
+                f"({float(summary.get('compacted_render_bytes', 0)) / (1024 ** 3):.2f} GiB)"
             )
         else:
             text = (
@@ -856,6 +899,15 @@ class LegacyMainWindow(QMainWindow):
         self._refresh_workflow_cards()
 
     def start_render(self) -> None:
+        storage = storage_status()
+        if not storage.available:
+            QMessageBox.warning(
+                self,
+                "Audio storage is disconnected",
+                f"{storage.reason}\n\nReconnect it or choose a new location in Settings.",
+            )
+            self.append_log(f"Render not started: {storage.reason}")
+            return
         self._set_workflow_activity("render", 0, 0, "Starting render workers…")
         self.render_pause_button.setEnabled(True)
         self.render_cancel_button.setEnabled(True)
@@ -1123,6 +1175,12 @@ class LegacyMainWindow(QMainWindow):
                 and bool(self.privacy_choice.use_and_share_own_presets)
                 else None
             ),
+            local_audio_root=(
+                self.local_paths["audio"]
+                if factory_only
+                and bool(self.privacy_choice.use_and_share_own_presets)
+                else None
+            ),
         )
 
     def _match_progress_changed(self, detail: dict) -> None:
@@ -1381,10 +1439,11 @@ class LegacyMainWindow(QMainWindow):
         )
 
     def _preview_cache_root(self) -> Path:
-        # Distribution storage follows PATCHLAB_APP_DATA through local_paths;
-        # source/dev mode keeps the established repository data/audio layout.
+        # Full library renders may live on a removable drive. Previews stay in
+        # the small, capped app-data cache so matching and audition still work
+        # while that drive is disconnected.
         return (
-            Path(self.local_paths["audio"]).parent
+            Path(self.local_paths["preview_root"])
             if self.distribution_mode
             else DEFAULT_DB_PATH.parent
         )
@@ -1593,6 +1652,7 @@ class LegacyMainWindow(QMainWindow):
             self._preview_inflight.pop(target, None)
         silent = request_id in self._preview_silent_requests
         self._preview_silent_requests.discard(request_id)
+        QTimer.singleShot(0, self._prune_preview_cache)
         note = requests[0][2]
         for button, original_text, _note in requests:
             if button is not None:
@@ -1935,6 +1995,7 @@ class MainWindow(LegacyMainWindow):
             / "local"
             / "factory_paths.json"
         )
+        self.storage_preferences = load_storage_preferences()
         self.local_paths = default_local_paths()
         self._ensure_patchlab_export_folders()
         self.runner = ScanProcessRunner(self)
@@ -1967,6 +2028,12 @@ class MainWindow(LegacyMainWindow):
         self.preview_runner.log.connect(self.append_log)
         self.preview_runner.request_completed.connect(self._preview_request_completed)
         self.preview_runner.request_failed.connect(self._preview_request_failed)
+        self.storage_runner = StorageProcessRunner(self)
+        self.storage_runner.log.connect(self.append_log)
+        self.storage_runner.progress.connect(self._storage_progress_changed)
+        self.storage_runner.completed.connect(self._storage_completed)
+        self.storage_runner.failed.connect(self._storage_failed)
+        self._storage_pending: str | None = None
         self._render_paused = False
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
@@ -3346,6 +3413,12 @@ class MainWindow(LegacyMainWindow):
                 and bool(self.privacy_choice.use_and_share_own_presets)
                 else None
             ),
+            local_audio_root=(
+                self.local_paths["audio"]
+                if batch_factory_only
+                and bool(self.privacy_choice.use_and_share_own_presets)
+                else None
+            ),
         )
 
     def _batch_file_completed(self) -> None:
@@ -3437,6 +3510,15 @@ class MainWindow(LegacyMainWindow):
             )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.storage_runner.running:
+            QMessageBox.information(
+                self,
+                "Storage move is still running",
+                "Keep PatchLab open until the verified storage operation finishes. "
+                "This prevents an interrupted move from confusing the current session.",
+            )
+            event.ignore()
+            return
         if self._batch_state is not None:
             self._persist_batch_progress("cancelled")
             self.append_log("Batch marked cancelled because PatchLab is closing")
@@ -3506,6 +3588,173 @@ class MainWindow(LegacyMainWindow):
         title = QLabel("Settings")
         title.setStyleSheet("font-size: 20px; font-weight: 750;")
         layout.addWidget(title)
+        storage_card = QGroupBox("Audio Storage")
+        storage_layout = QVBoxLayout(storage_card)
+        current_storage = storage_status()
+        location = QLabel(str(current_storage.root))
+        location.setWordWrap(True)
+        location.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        location.setObjectName("muted")
+        storage_layout.addWidget(QLabel("Full library render location"))
+        storage_layout.addWidget(location)
+        availability = QLabel(
+            "Available"
+            if current_storage.available
+            else f"Disconnected · {current_storage.reason}"
+        )
+        availability.setObjectName("muted")
+        storage_layout.addWidget(availability)
+        choose_storage = QPushButton("Choose Audio Storage Folder…")
+        choose_storage.setObjectName("compactActionButton")
+        storage_layout.addWidget(choose_storage)
+
+        compact = QCheckBox("Compact storage after learning presets")
+        compact.setChecked(self.storage_preferences.compact_mode)
+        compact.setToolTip(
+            "Keeps fingerprints and settings, then removes large renders that "
+            "PatchLab can regenerate on demand."
+        )
+        storage_layout.addWidget(compact)
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Preview cache limit"))
+        cache_limit = QSpinBox()
+        cache_limit.setRange(128, 4096)
+        cache_limit.setSingleStep(128)
+        cache_limit.setSuffix(" MB")
+        cache_limit.setValue(self.storage_preferences.preview_cache_mb)
+        cache_row.addWidget(cache_limit)
+        cache_row.addStretch(1)
+        storage_layout.addLayout(cache_row)
+        free_space = QPushButton("Free Space Now")
+        free_space.setObjectName("compactActionButton")
+        storage_layout.addWidget(free_space)
+        storage_note = QLabel(
+            "Compact mode keeps the small database, fingerprints, settings, and "
+            "a capped audition cache. Full seven-octave WAVs are removed only "
+            "after learning finishes and can be regenerated later."
+        )
+        storage_note.setObjectName("muted")
+        storage_note.setWordWrap(True)
+        storage_layout.addWidget(storage_note)
+        layout.addWidget(storage_card)
+
+        def persist_storage_controls() -> None:
+            self.storage_preferences = StoragePreferences(
+                self.storage_preferences.audio_root,
+                compact.isChecked(),
+                cache_limit.value(),
+            )
+            save_storage_preferences(self.storage_preferences)
+
+        def choose_storage_location() -> None:
+            if self.storage_runner.running:
+                QMessageBox.information(
+                    dialog,
+                    "Storage job running",
+                    "Wait for the current storage job to finish before changing folders.",
+                )
+                return
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                "Choose PatchLab Audio Storage",
+                str(current_storage.root.parent),
+            )
+            if not selected:
+                return
+            destination = Path(selected).expanduser().resolve()
+            try:
+                prepare_audio_root(destination)
+            except OSError as exc:
+                QMessageBox.critical(dialog, "Folder is not writable", str(exc))
+                return
+            persist_storage_controls()
+            source = Path(self.local_paths["audio"]).expanduser().resolve()
+            if source == destination:
+                return
+            render_rows = 0
+            if Path(self.local_paths["db"]).is_file():
+                import sqlite3
+
+                connection = sqlite3.connect(self.local_paths["db"])
+                render_rows = int(
+                    connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0]
+                )
+                connection.close()
+            if render_rows:
+                answer = QMessageBox.question(
+                    dialog,
+                    "Move existing renders?",
+                    f"PatchLab found {render_rows:,} existing render records. Move "
+                    "them to the selected folder now? Files are checksum-verified "
+                    "before the originals are removed.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                self._storage_pending = "migrate"
+                dialog.accept()
+                self.storage_runner.start(
+                    [
+                        "migrate",
+                        str(source),
+                        str(destination),
+                        "--db",
+                        str(self.local_paths["db"]),
+                    ]
+                )
+                self.append_log(
+                    f"Moving full render storage to {destination}; originals are "
+                    "kept until each copy is verified"
+                )
+                self.statusBar().showMessage("Moving PatchLab audio storage…")
+                return
+            self.storage_preferences = StoragePreferences(
+                str(destination), compact.isChecked(), cache_limit.value()
+            )
+            save_storage_preferences(self.storage_preferences)
+            self.local_paths = default_local_paths()
+            location.setText(str(destination))
+            availability.setText("Available")
+            self.append_log(f"Audio storage location set to {destination}")
+            self._refresh_workflow_cards()
+
+        def free_space_now() -> None:
+            if self.storage_runner.running:
+                QMessageBox.information(
+                    dialog,
+                    "Storage job running",
+                    "Wait for the current storage job to finish.",
+                )
+                return
+            answer = QMessageBox.question(
+                dialog,
+                "Remove regenerable render files?",
+                "This keeps every learned fingerprint and preset setting, but "
+                "removes completed full-library WAV files. Auditions are rendered "
+                "again only when needed.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            persist_storage_controls()
+            self._storage_pending = "compact"
+            dialog.accept()
+            self.storage_runner.start(
+                [
+                    "compact",
+                    "--db",
+                    str(self.local_paths["db"]),
+                    "--audio-root",
+                    str(self.local_paths["audio"]),
+                ]
+            )
+            self.statusBar().showMessage("Freeing PatchLab render space…")
+
+        choose_storage.clicked.connect(choose_storage_location)
+        free_space.clicked.connect(free_space_now)
         if self.distribution_mode:
             toggle = QCheckBox("Use && share my own presets")
             toggle.setChecked(self.share_toggle.isChecked())
@@ -3536,9 +3785,69 @@ class MainWindow(LegacyMainWindow):
         layout.addWidget(detail)
         close = QPushButton("Done")
         close.setObjectName("primaryButton")
-        close.clicked.connect(dialog.accept)
+        def save_and_close() -> None:
+            persist_storage_controls()
+            dialog.accept()
+
+        close.clicked.connect(save_and_close)
         layout.addWidget(close)
         dialog.exec()
+
+    def _storage_progress_changed(self, detail: dict) -> None:
+        current = int(detail.get("current", 0))
+        total = int(detail.get("total", 0))
+        self.statusBar().showMessage(
+            f"Moving audio storage: {current:,} of {total:,} files verified…"
+        )
+
+    def _storage_completed(self, summary: dict) -> None:
+        operation = self._storage_pending or "storage"
+        self._storage_pending = None
+        self.storage_preferences = load_storage_preferences()
+        self.local_paths = default_local_paths()
+        files = int(summary.get("files", 0))
+        bytes_freed = int(summary.get("bytes", 0))
+        if operation == "migrate":
+            message = (
+                f"Audio storage move complete: {files:,} files, "
+                f"{bytes_freed / (1024 ** 3):.2f} GiB verified"
+            )
+        else:
+            message = (
+                f"Compact cleanup complete: {files:,} render files removed, "
+                f"{bytes_freed / (1024 ** 3):.2f} GiB freed"
+            )
+        self.append_log(message)
+        self.statusBar().showMessage(message)
+        self._prune_preview_cache()
+        self._refresh_workflow_cards()
+
+    def _storage_failed(self, error: str) -> None:
+        operation = self._storage_pending or "storage operation"
+        self._storage_pending = None
+        self.append_log(f"{operation.title()} failed safely: {error}")
+        self.statusBar().showMessage(f"Storage unchanged: {error}")
+        QMessageBox.warning(
+            self,
+            "Storage was not changed",
+            "PatchLab kept the existing location and original files. You can "
+            f"retry after correcting this problem:\n\n{error}",
+        )
+
+    def _prune_preview_cache(self) -> None:
+        try:
+            summary = prune_preview_cache(
+                self._preview_cache_root(),
+                self.storage_preferences.preview_cache_mb,
+            )
+        except OSError as exc:
+            self.append_log(f"Preview cache cleanup deferred: {exc}")
+            return
+        if summary.files:
+            self.append_log(
+                f"Preview cache limit removed {summary.files:,} old file(s) "
+                f"({summary.bytes / (1024 ** 2):.1f} MB)"
+            )
 
     def _forget_passcode(self) -> None:
         from core.access_gate import AccessStore

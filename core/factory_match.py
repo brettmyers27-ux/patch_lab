@@ -84,6 +84,7 @@ def _settings_summary(bundle: FactoryBundle, preset_id: int) -> dict[str, dict[s
 
 def _local_search_rows(
     database_path: Path | None,
+    audio_root: Path | None = None,
 ) -> tuple[np.ndarray | None, list[dict[str, Any]]]:
     if database_path is None or not Path(database_path).is_file():
         return None, []
@@ -94,7 +95,8 @@ def _local_search_rows(
         """
         SELECT p.id,p.content_hash,p.name,p.synth,p.path,f.embedding_f32
         FROM presets p JOIN fingerprints f ON f.preset_id=p.id
-        WHERE f.midi_note=0 AND p.is_factory=0 AND p.status='rendered'
+        WHERE f.midi_note=0 AND p.is_factory=0
+          AND p.status IN ('rendered','embedded')
         ORDER BY p.id
         """
     ).fetchall()
@@ -105,20 +107,27 @@ def _local_search_rows(
         [np.frombuffer(row["embedding_f32"], dtype=np.float32).copy() for row in rows]
     )
     matrix /= np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
-    audio_root = database_path.parent / "audio"
-    return matrix, [
-        {
-            "kind": "local",
-            "preset_id": int(row["id"]),
-            "content_hash": str(row["content_hash"]),
-            "name": str(row["name"]),
-            "synth": str(row["synth"]),
-            "path": str(row["path"]),
-            "audition_path": str(audio_root / str(int(row["id"])) / "60.wav"),
-            "database_path": str(database_path),
-        }
-        for row in rows
-    ]
+    audio_root = (
+        Path(audio_root).expanduser().resolve()
+        if audio_root is not None
+        else database_path.parent / "audio"
+    )
+    runtime_rows: list[dict[str, Any]] = []
+    for row in rows:
+        audition = audio_root / str(int(row["id"])) / "60.wav"
+        runtime_rows.append(
+            {
+                "kind": "local",
+                "preset_id": int(row["id"]),
+                "content_hash": str(row["content_hash"]),
+                "name": str(row["name"]),
+                "synth": str(row["synth"]),
+                "path": str(row["path"]),
+                "audition_path": str(audition) if audition.is_file() else None,
+                "database_path": str(database_path),
+            }
+        )
+    return matrix, runtime_rows
 
 
 def _local_parameters(
@@ -171,6 +180,7 @@ def run_factory_match_file(
     bundle_path: Path = DEFAULT_FACTORY_BUNDLE,
     mapping_path: Path | None = None,
     local_db_path: Path | None = None,
+    local_audio_root: Path | None = None,
     session_root: Path = DEFAULT_SESSION_ROOT,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
@@ -212,7 +222,7 @@ def run_factory_match_file(
     runtime: list[dict[str, Any]] = [
         {"kind": "factory", "preset": preset} for preset in presets
     ]
-    local_matrix, local_rows = _local_search_rows(local_db_path)
+    local_matrix, local_rows = _local_search_rows(local_db_path, local_audio_root)
     if local_matrix is not None:
         matrix = np.concatenate([matrix, local_matrix], axis=0)
         runtime.extend(local_rows)

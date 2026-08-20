@@ -34,6 +34,7 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "recommendation-preview": WorkerEntryPoint(
         "scripts.render_recommendation_preview"
     ),
+    "storage": WorkerEntryPoint("scripts.manage_storage"),
     "build-serum2-targets": WorkerEntryPoint("scripts.build_serum2_targets"),
     "analyze-library": WorkerEntryPoint("scripts.analyze_library"),
     "build-similarity-index": WorkerEntryPoint(

@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 from unittest.mock import Mock
 
-from PySide6.QtCore import QCoreApplication, QEventLoop, QProcess, QTimer
+from PySide6.QtCore import QEventLoop, QProcess, QTimer
+from PySide6.QtWidgets import QApplication
 
 import app.workers as workers
 from app.workers import (
@@ -16,8 +17,12 @@ from app.workers import (
     PreviewProcessRunner,
     RenderProcessRunner,
     ScanProcessRunner,
+    StorageProcessRunner,
 )
 from core.worker_runtime import WORKER_FLAG, worker_invocation
+
+
+_TEST_APPLICATION: QApplication | None = None
 
 
 def test_dispatcher_emits_ready_before_worker_usage() -> None:
@@ -60,6 +65,7 @@ def test_every_qprocess_runner_uses_shared_dispatch() -> None:
         ),
         (RenderProcessRunner(), "render-library", (), {}),
         (AnalyzeProcessRunner(), "analyze", (False,), {}),
+        (StorageProcessRunner(), "storage", (["compact"],), {}),
         (
             MatchProcessRunner(),
             "match",
@@ -123,7 +129,9 @@ def test_preview_runner_queues_instead_of_rejecting_a_second_request() -> None:
 def test_missing_handshake_fails_fast_and_kills_process(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    application = QCoreApplication.instance() or QCoreApplication([])
+    global _TEST_APPLICATION
+    _TEST_APPLICATION = QApplication.instance() or QApplication([])
+    application = _TEST_APPLICATION
     monkeypatch.setenv("PATCHLAB_WORKER_STARTUP_TIMEOUT_MS", "100")
     monkeypatch.setattr(
         workers,

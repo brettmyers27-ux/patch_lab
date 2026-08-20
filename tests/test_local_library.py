@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -117,6 +118,98 @@ class LocalRelayResilienceTest(unittest.TestCase):
                 )
             )
             self.assertTrue(messages[-1].startswith("LOCAL_LIBRARY_SUMMARY="))
+
+    def test_compact_mode_renders_fingerprints_and_deletes_in_small_batches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-compact-batches-") as temporary:
+            root = Path(temporary)
+            linked = root / "linked"
+            linked.mkdir()
+            database = Database(root / "library.db")
+            for index in range(25):
+                path = linked / f"Preset {index:02d}.fxp"
+                path.write_bytes(b"CcnK" + bytes([index]) * 32)
+                preset_id, _ = database.insert_preset(
+                    path=path,
+                    name=path.stem,
+                    synth="serum1",
+                    content_hash=sha1_file(path),
+                )
+                database.replace_params(
+                    preset_id,
+                    [ParameterValue(0, "Master", 0.5, "50%")],
+                    "test",
+                )
+
+            batch_sizes: list[int] = []
+
+            def fake_render_library(**kwargs):  # type: ignore[no-untyped-def]
+                preset_ids = list(kwargs["preset_ids"])
+                batch_sizes.append(len(preset_ids))
+                audio_root = Path(kwargs["audio_root"])
+                with database.connect() as connection:
+                    for preset_id in preset_ids:
+                        connection.execute(
+                            "UPDATE presets SET status='rendered' WHERE id=?",
+                            (preset_id,),
+                        )
+                        for note in (24, 36, 48, 60, 72, 84, 96):
+                            wav = audio_root / str(preset_id) / f"{note}.wav"
+                            wav.parent.mkdir(parents=True, exist_ok=True)
+                            wav.write_bytes(b"wav")
+                            connection.execute(
+                                "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+                                (preset_id, note, str(wav), -1.0, -12.0, 5.0),
+                            )
+                return RenderSummary(selected_presets=len(preset_ids))
+
+            class FakeEmbedder:
+                def __init__(self, _env) -> None:  # type: ignore[no-untyped-def]
+                    pass
+
+                def embed(self, waveforms):  # type: ignore[no-untyped-def]
+                    return np.ones((len(waveforms), 512), dtype=np.float32)
+
+            with (
+                patch("core.local_library.FactoryBundle") as factory_bundle,
+                patch("core.local_library.render_library", side_effect=fake_render_library),
+                patch("core.local_library.ClapEmbedder", FakeEmbedder),
+                patch(
+                    "core.local_library.load_audio_48k_mono",
+                    return_value=SimpleNamespace(
+                        waveform=np.ones(128, dtype=np.float32)
+                    ),
+                ),
+                patch(
+                    "core.local_library.handcrafted_features",
+                    return_value=np.ones(10, dtype=np.float32),
+                ),
+            ):
+                factory_bundle.return_value.known_hashes.return_value = set()
+                summary = process_linked_folder(
+                    linked,
+                    db_path=database.path,
+                    audio_root=root / "audio",
+                    state_dir=root / "states",
+                    relay=None,
+                    render_processes=1,
+                    compact_mode=True,
+                    log=lambda _message: None,
+                )
+
+            self.assertEqual(batch_sizes, [24, 1])
+            self.assertEqual(summary.fingerprints_created, 25)
+            self.assertEqual(summary.compacted_render_files, 25 * 7)
+            with database.connect() as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM presets WHERE status='embedded'"
+                    ).fetchone()[0],
+                    25,
+                )
 
 
 if __name__ == "__main__":

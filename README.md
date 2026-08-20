@@ -76,7 +76,7 @@ learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
 machine before library ingestion is enabled.
 
-The current PatchLab application version is **1.0.1**.
+The current PatchLab application version is **1.4.0**.
 
 It runs Serum headlessly through DawDreamer—never by automating a DAW—and
 provides a PySide6 desktop workflow for scanning presets, rendering an audition
@@ -406,16 +406,18 @@ automatically archived in the **Library** tab. The durable entry lives under
 `data/match_library/<match_uid>/` in a developer build, or the platform
 application-data folder in a distribution build. It contains a copied source
 file, the generated winner/candidate data, and a portable `result.json`.
-C1–C7 audition audio uses one durable content-addressed cache at
-`<app-data>/audio/<preset-or-generated-hash>/<midi-note>.wav`; developer builds
-use `data/audio/` with the same layout. `PATCHLAB_APP_DATA` relocates the whole
-distribution store. Database paths are relative to the library root, so moving
-the PatchLab data directory does not invalidate saved history.
+C1–C7 audition audio uses a durable content-addressed cache at
+`<app-data>/preview-cache/audio/<preset-or-generated-hash>/<midi-note>.wav`;
+developer builds use `data/audio/` with the same layout. The installed cache is
+LRU-capped (512 MB by default, configurable from Settings) so audition audio
+cannot grow without limit. `PATCHLAB_APP_DATA` relocates the whole distribution
+store. Database paths are relative to the library root, so moving the PatchLab
+data directory does not invalidate saved history.
 
-Factory and linked-preset preview audio is intentionally retained after a
-history entry is deleted: it is shared, cheap to store, and expensive to
-re-render. A genuinely modified recommendation is keyed by SHA-256 of its exact
-float32 parameter vector, mask, and synth. Its audio is reference-counted
+Factory and linked-preset preview audio is shared across history entries and
+retained until the configured LRU cache limit needs space; missing previews are
+regenerated on demand. A genuinely modified recommendation is keyed by SHA-256
+of its exact float32 parameter vector, mask, and synth. Its audio is reference-counted
 against every Match Library `result.json`; deleting the last entry that refers
 to it removes that generated hash directory. The Delete confirmation states
 this policy and never claims retained preset audio was removed.
@@ -424,6 +426,42 @@ Library rows can replay the archived source, render or replay any generated
 octave, export through the same mandatory round-trip verifier, and reopen the
 complete result with Enter or a double-click. Batch results are grouped under
 their batch name.
+
+### Storage and removable drives
+
+Installed PatchLab keeps its durable database, fingerprints, complete Serum 2
+settings, render states, model cache, and Match Library under the operating
+system's normal application-data folder. Large seven-octave linked-library
+renders have a separate **Audio Storage** location in Settings. It can be any
+writable internal folder or removable drive on both Apple Silicon macOS and
+Windows 11. `PATCHLAB_AUDIO_STORAGE` may supply the same location for managed
+or scripted installations.
+
+**Compact storage after learning presets** is enabled by default. A linked
+library is processed in batches of 24 presets: PatchLab renders a batch,
+creates its fingerprints, and removes those regenerable WAV files before the
+next batch. This bounds temporary audio usage to roughly one batch instead of
+the whole library. Matching keeps using the retained fingerprints and complete
+settings. Auditioning a compacted preset renders only the requested octave into
+the small preview cache. A disconnected removable drive therefore does not
+disable matching or existing cached previews; PatchLab blocks only a new
+link/render job that needs that drive and explains how to reconnect or choose a
+new folder.
+
+Changing Audio Storage runs in a background process. Each file is copied to a
+temporary destination, SHA-256 verified, recorded in SQLite, and only then
+removed from its source. The final storage preference is committed after every
+file succeeds, so an interruption is resumable and never sacrifices the only
+good copy. **Free Space Now** removes only full render rows whose durable
+fingerprints already exist. It preserves preset files, settings, render states,
+models, fingerprints, exports, and Match Library history.
+
+Typical compact user data is the model/runtime data plus the database and the
+chosen preview-cache cap rather than tens of gigabytes of WAVs. Exact installed
+size varies with model artifacts and Match Library history. PatchLab cannot
+guarantee a fixed total when users intentionally retain copied source samples
+or exported presets, but the regenerable render library no longer needs to be
+kept.
 
 **Batch Folder…** processes supported files sequentially with the currently
 selected quality and target synth. Subfolders are opt-in. Presets are written
