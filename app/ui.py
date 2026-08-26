@@ -324,6 +324,7 @@ class LegacyMainWindow(QMainWindow):
         self.preview_runner.request_completed.connect(self._preview_request_completed)
         self.preview_runner.request_failed.connect(self._preview_request_failed)
         self._render_paused = False
+        self._render_failure_detail: str = ""
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
@@ -684,6 +685,11 @@ class LegacyMainWindow(QMainWindow):
                 ).compact_mode
             ),
             audio_storage_error=storage.reason if not storage.available else "",
+            render_failed_detail=(
+                self._render_failure_detail
+                if "render" not in self._workflow_activities
+                else ""
+            ),
         )
         resolved_cards = state.as_dict()
         for key, card in zip(
@@ -913,6 +919,7 @@ class LegacyMainWindow(QMainWindow):
         self.render_cancel_button.setEnabled(True)
         self.render_progress.setValue(0)
         self._render_paused = False
+        self._render_failure_detail = ""
         self.render_pause_button.setText("Pause")
         self.render_stats.setText("Starting four render workers…")
         self.append_log("Starting resumable four-process library render")
@@ -992,10 +999,30 @@ class LegacyMainWindow(QMainWindow):
         self.render_button.setEnabled(True)
         self.render_pause_button.setEnabled(False)
         self.render_cancel_button.setEnabled(False)
+        self._render_failure_detail = error
         self.render_stats.setText(error)
         self.append_log(error)
         self.statusBar().showMessage(error)
         self._refresh_workflow_cards()
+
+    def _render_badge_clicked(self) -> None:
+        """Offer a retry when the render card's status badge is showing failed.
+
+        render_library() already skips notes it previously rendered, so
+        re-running the exact same job resumes rather than starting over —
+        this menu just makes that discoverable at the point of failure.
+        """
+
+        if not self._render_failure_detail or "render" in self._workflow_activities:
+            return
+        badge = self.sender()
+        menu = QMenu(self)
+        action = menu.addAction("Retry rendering")
+        action.triggered.connect(self.start_render)
+        if hasattr(badge, "mapToGlobal") and hasattr(badge, "rect"):
+            menu.exec(badge.mapToGlobal(badge.rect().bottomLeft()))
+        else:
+            menu.exec()
 
     def start_analyze(self) -> None:
         if self.distribution_mode:
@@ -2035,6 +2062,7 @@ class MainWindow(LegacyMainWindow):
         self.storage_runner.failed.connect(self._storage_failed)
         self._storage_pending: str | None = None
         self._render_paused = False
+        self._render_failure_detail: str = ""
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
@@ -2233,6 +2261,8 @@ class MainWindow(LegacyMainWindow):
         self.render_button.clicked.connect(self.start_render)
         self.learn_button.clicked.connect(self.start_analyze)
         self.match_button.clicked.connect(self.choose_match_file)
+        if render_card.step_badge is not None:
+            render_card.step_badge.clicked.connect(self._render_badge_clicked)
         self._refresh_workflow_cards()
 
         control_row = QHBoxLayout()

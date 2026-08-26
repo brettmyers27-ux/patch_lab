@@ -17,7 +17,9 @@ from core.privacy import PrivacyChoice
 from core.render import MIDI_NOTES
 
 
-WorkflowPhase = Literal["needs-action", "in-progress", "complete", "not-required"]
+WorkflowPhase = Literal[
+    "needs-action", "in-progress", "complete", "not-required", "failed"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +181,7 @@ def resolve_workflow_state(
     match_prerequisite_error: str = "",
     compact_mode: bool = False,
     audio_storage_error: str = "",
+    render_failed_detail: str = "",
 ) -> WorkflowState:
     """Resolve every card together from persisted machine state plus live jobs."""
 
@@ -247,6 +250,15 @@ def resolve_workflow_state(
             ),
             ready,
             counts.presets,
+        )
+    elif render_failed_detail:
+        ready = counts.fingerprinted if compact_mode else counts.rendered
+        render = WorkflowCardState(
+            "failed",
+            "Rendering stopped — click the status badge to retry",
+            ready,
+            counts.presets,
+            render_failed_detail,
         )
     else:
         ready = counts.fingerprinted if compact_mode else counts.rendered

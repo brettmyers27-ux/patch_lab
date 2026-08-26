@@ -38,6 +38,7 @@ def _resolve(
     *,
     audio_selected: bool = False,
     activities: dict[str, WorkflowActivity] | None = None,
+    render_failed_detail: str = "",
 ):
     with patch("core.workflow_state.validate_model_assets"):
         return resolve_workflow_state(
@@ -46,6 +47,7 @@ def _resolve(
             factory_bundle_path=_factory_bundle(tmp_path / "factory.sqlite"),
             audio_selected=audio_selected,
             activities=activities,
+            render_failed_detail=render_failed_detail,
         )
 
 
@@ -132,6 +134,58 @@ def test_live_activity_and_broken_cache_are_explicit(tmp_path: Path) -> None:
         )
     assert broken.match.phase == "needs-action"
     assert broken.match.text == "Tokenizer cache missing · reinstall PatchLab"
+
+
+def test_render_failure_surfaces_as_a_distinct_retryable_phase(tmp_path: Path) -> None:
+    linked = tmp_path / "My Presets"
+    linked.mkdir()
+    database = Database(tmp_path / "app-data" / "library.db")
+    ids: list[int] = []
+    for index in range(3):
+        preset_id, _ = database.insert_preset(
+            path=linked / f"Preset {index}.fxp",
+            name=f"Preset {index}",
+            synth="serum1",
+            content_hash=f"linked-{index}",
+        )
+        ids.append(preset_id)
+    with database.connect() as connection:
+        connection.executemany(
+            "INSERT INTO renders(preset_id,midi_note,wav_path,peak_dbfs,rms_dbfs,duration_s) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (ids[0], note, str(tmp_path / f"{note}.wav"), -1.0, -12.0, 5.0)
+                for note in MIDI_NOTES
+            ],
+        )
+
+    state = _resolve(
+        tmp_path,
+        PrivacyChoice(True, str(linked)),
+        render_failed_detail=(
+            "render-library worker did not confirm startup within 90s"
+        ),
+    )
+    assert state.render.phase == "failed"
+    assert state.render.detail == (
+        "render-library worker did not confirm startup within 90s"
+    )
+    # Progress already made before the failure is preserved, not reset to zero.
+    assert (state.render.current, state.render.total) == (1, 3)
+
+    # A live retry in progress must win over a stale failure message.
+    with patch("core.workflow_state.validate_model_assets"):
+        resuming = resolve_workflow_state(
+            privacy=PrivacyChoice(True, str(linked)),
+            local_database_path=tmp_path / "app-data" / "library.db",
+            factory_bundle_path=_factory_bundle(tmp_path / "factory-retry.sqlite"),
+            audio_selected=False,
+            activities={"render": WorkflowActivity(1, 3, "Rendering 1 of 3 presets")},
+            render_failed_detail=(
+                "render-library worker did not confirm startup within 90s"
+            ),
+        )
+    assert resuming.render.phase == "in-progress"
 
 
 def test_compact_mode_counts_durable_fingerprints_as_complete(tmp_path: Path) -> None:

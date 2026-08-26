@@ -30,6 +30,23 @@ from PySide6.QtWidgets import (
 from app import theme
 
 
+class ClickableLabel(QLabel):
+    """A QLabel that emits clicked() without changing its QSS type selector.
+
+    HeroCard's step badge must stay clickable when a job has failed, but the
+    theme targets it as ``QLabel#stepBadge`` — swapping in a QPushButton or
+    QToolButton would silently drop every accent/state color rule in
+    theme.qss. A QLabel subclass still matches those selectors.
+    """
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 ACCENTS = {
     "teal": theme.TEAL,
     "violet": theme.VIOLET,
@@ -212,9 +229,9 @@ class HeroCard(QFrame):
         self.card_layout = QHBoxLayout(self)
         self.card_layout.setContentsMargins(13, 9, 13, 9)
         self.card_layout.setSpacing(11)
-        self.step_badge: QLabel | None = None
+        self.step_badge: ClickableLabel | None = None
         if step is not None:
-            step_badge = QLabel(str(step), self)
+            step_badge = ClickableLabel(str(step), self)
             step_badge.setObjectName("stepBadge")
             step_badge.setProperty("accent", accent)
             step_badge.setFixedSize(20, 20)
@@ -277,11 +294,17 @@ class HeroCard(QFrame):
             "in-progress": "…",
             "complete": "✓",
             "not-required": "—",
+            "failed": "×",
         }.get(phase, "?")
         if self.step_badge is not None:
             self.step_badge.setText(marker)
-            self.step_badge.setToolTip(phase.replace("-", " ").title())
             self.step_badge.setProperty("workflowState", phase)
+            if phase == "failed":
+                self.step_badge.setToolTip(detail or "Click to retry")
+                self.step_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.step_badge.setToolTip(phase.replace("-", " ").title())
+                self.step_badge.setCursor(Qt.CursorShape.ArrowCursor)
         for widget in (self, self.status, self.progress, self.step_badge):
             if widget is not None:
                 widget.style().unpolish(widget)
