@@ -49,6 +49,24 @@ class StorageOperationSummary:
     preset_count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class LegacyAdoptionSummary:
+    """Outcome of reconciling an orphaned legacy render folder against the DB.
+
+    Every count here is a *preset*, not a file, since adoption is decided per
+    preset (all its expected notes must be present and valid) even though the
+    underlying copy happens note by note.
+    """
+
+    presets_adopted: int = 0
+    notes_copied: int = 0
+    bytes_copied: int = 0
+    presets_already_complete: int = 0
+    presets_uncataloged: int = 0
+    presets_partial_conflict: int = 0
+    folders_unclassified: int = 0
+
+
 def settings_path(env: PlatformEnv = ENV) -> Path:
     return Path(env.app_data_dir) / SETTINGS_FILENAME
 
@@ -130,6 +148,26 @@ def storage_status(env: PlatformEnv = ENV) -> StorageStatus:
     if not os.access(root, os.R_OK | os.W_OK):
         return StorageStatus(root, True, False, "The configured audio folder is not writable.")
     return StorageStatus(root, True, True)
+
+
+def audio_root_size(root: Path) -> int:
+    """Approximate on-disk size of everything under an audio root.
+
+    Informational only (Settings display) -- never gates a decision, so an
+    unreadable or still-mounting drive just reports 0 rather than raising.
+    """
+
+    root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        return 0
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def prepare_audio_root(root: Path) -> Path:
@@ -392,3 +430,135 @@ def prune_preview_cache(
         except OSError:
             pass
     return StorageOperationSummary(files=removed, bytes=removed_bytes)
+
+
+def adopt_legacy_renders(
+    legacy_root: Path,
+    *,
+    database_path: Path,
+    audio_root: Path,
+    log: LogCallback = lambda _message: None,
+    progress: ProgressCallback | None = None,
+) -> LegacyAdoptionSummary:
+    """Reconcile an orphaned legacy render folder against the current library.
+
+    Handles a folder the database has never heard of -- e.g. an old manual
+    backup -- as distinct from migrate_audio_storage(), which only relocates
+    renders the database already tracks. Never deletes or modifies anything
+    under legacy_root: this is copy-only, and only for notes the database does
+    not already have. A preset already fully covered internally is left
+    untouched rather than re-copied, so this is safe to re-run.
+
+    Only numeric preset-id folders are adopted -- PatchLab's renderer always
+    names a preset's folder after its integer id (core/render.py's
+    _write_note: `audio_root / str(task.preset_id)`). Any other folder name
+    (e.g. a content-hash-named synthesis-experiment folder) is a different,
+    unverified identity and is reported as unclassified rather than guessed.
+    """
+
+    import numpy as np
+    import soundfile as sf
+
+    from core.db import Database, RenderRecord
+    from core.render import MIDI_NOTES
+    from core.render import _dbfs as render_dbfs
+
+    legacy_root = Path(legacy_root).expanduser().resolve()
+    audio_root = Path(audio_root).expanduser().resolve()
+    database = Database(Path(database_path).expanduser().resolve())
+    with database.connect() as connection:
+        known_ids = {int(row["id"]) for row in connection.execute("SELECT id FROM presets")}
+    existing = database.existing_render_notes()
+
+    summary = {
+        "presets_adopted": 0,
+        "notes_copied": 0,
+        "bytes_copied": 0,
+        "presets_already_complete": 0,
+        "presets_uncataloged": 0,
+        "presets_partial_conflict": 0,
+        "folders_unclassified": 0,
+    }
+    candidates = sorted(
+        p for p in legacy_root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+    for index, folder in enumerate(candidates, start=1):
+        if progress is not None:
+            progress({"phase": "adopt", "current": index, "total": len(candidates)})
+        if not folder.name.isdigit():
+            summary["folders_unclassified"] += 1
+            continue
+        preset_id = int(folder.name)
+        if preset_id not in known_ids:
+            summary["presets_uncataloged"] += 1
+            log(f"Skipped preset {preset_id}: no longer in the catalog")
+            continue
+        have = existing.get(preset_id, set())
+        missing_notes = [note for note in MIDI_NOTES if note not in have]
+        if not missing_notes:
+            summary["presets_already_complete"] += 1
+            continue
+
+        # Validate every missing note before writing anything. A preset is
+        # adopted all-or-nothing so a partial/corrupt legacy folder can never
+        # leave stray copied files with no matching database row.
+        planned: list[tuple[int, Path, Path, np.ndarray, int]] = []
+        valid = True
+        for note in missing_notes:
+            source = folder / f"{note}.wav"
+            if not source.is_file():
+                valid = False
+                log(
+                    f"Skipped preset {preset_id}: legacy folder is missing note "
+                    f"{note}, so nothing was adopted for this preset"
+                )
+                break
+            try:
+                info = sf.info(str(source))
+                if info.frames == 0 or info.samplerate == 0:
+                    raise OSError("empty or zero-rate audio")
+                data, rate = sf.read(str(source), dtype="float32", always_2d=True)
+            except Exception as exc:
+                valid = False
+                log(f"Skipped preset {preset_id}: note {note} is unreadable ({exc})")
+                break
+            destination = audio_root / str(preset_id) / f"{note}.wav"
+            if destination.is_file() and destination.stat().st_size != source.stat().st_size:
+                # Something already occupies this exact slot even though the
+                # database has no row for it -- do not silently overwrite.
+                valid = False
+                log(
+                    f"Skipped preset {preset_id}: an unregistered file already "
+                    f"exists at note {note}'s destination with different content"
+                )
+                break
+            planned.append((note, source, destination, data, rate))
+        if not valid or not planned:
+            summary["presets_partial_conflict"] += 1
+            continue
+
+        rows: list[RenderRecord] = []
+        for note, source, destination, data, rate in planned:
+            if not destination.is_file():
+                _copy_verified(source, destination)
+            peak = float(np.max(np.abs(data))) if data.size else 0.0
+            rms = float(np.sqrt(np.mean(np.square(data, dtype=np.float64)))) if data.size else 0.0
+            rows.append(
+                RenderRecord(
+                    preset_id=preset_id,
+                    midi_note=note,
+                    wav_path=destination,
+                    peak_dbfs=render_dbfs(peak),
+                    rms_dbfs=render_dbfs(rms),
+                    duration_s=data.shape[0] / rate,
+                )
+            )
+        database.upsert_renders(rows)
+        database.finalize_render_status(preset_id, MIDI_NOTES)
+        summary["presets_adopted"] += 1
+        summary["notes_copied"] += len(rows)
+        summary["bytes_copied"] += sum(
+            row.wav_path.stat().st_size for row in rows if row.wav_path.is_file()
+        )
+        log(f"Adopted preset {preset_id}: {len(rows)} note(s) recovered from legacy storage")
+    return LegacyAdoptionSummary(**summary)

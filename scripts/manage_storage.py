@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.platform_env import ENV
 from core.storage import (
+    adopt_legacy_renders,
     compact_render_library,
     configured_audio_root,
     migrate_audio_storage,
@@ -45,6 +46,17 @@ def main() -> int:
     prune.add_argument("--limit-mb", type=int, required=True)
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("destination", type=Path)
+    adopt = subparsers.add_parser(
+        "adopt",
+        help=(
+            "Reconcile a legacy render folder the database has never tracked "
+            "(e.g. an old manual backup) against the current library. "
+            "Copy-only: never deletes or modifies legacy_root."
+        ),
+    )
+    adopt.add_argument("legacy_root", type=Path)
+    adopt.add_argument("--db", type=Path, default=defaults["db"])
+    adopt.add_argument("--audio-root", type=Path, default=defaults["audio"])
     args = parser.parse_args()
 
     def progress(detail: dict[str, int | str]) -> None:
@@ -67,6 +79,14 @@ def main() -> int:
             )
         elif args.command == "prune-previews":
             result = prune_preview_cache(args.root, args.limit_mb)
+        elif args.command == "adopt":
+            result = adopt_legacy_renders(
+                args.legacy_root,
+                database_path=args.db,
+                audio_root=args.audio_root,
+                log=lambda message: print(message, flush=True),
+                progress=progress,
+            )
         else:
             prepare_audio_root(args.destination)
             from core.storage import StorageOperationSummary

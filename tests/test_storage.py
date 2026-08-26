@@ -9,10 +9,15 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+import soundfile as sf
+
 from core.db import Database
 from core.factory_match import _local_search_rows
+from core.render import MIDI_NOTES
 from core.storage import (
     StoragePreferences,
+    adopt_legacy_renders,
+    audio_root_size,
     compact_render_library,
     configured_audio_root,
     load_storage_preferences,
@@ -21,6 +26,13 @@ from core.storage import (
     save_storage_preferences,
     storage_status,
 )
+
+
+def _write_wav(path: Path, *, amplitude: float = 0.5, seconds: float = 0.05) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = max(int(44_100 * seconds), 1)
+    audio = np.full((frames, 2), amplitude, dtype=np.float32)
+    sf.write(path, audio, 44_100, subtype="FLOAT", format="WAV")
 
 
 def _environment(tmp_path: Path):
@@ -194,3 +206,158 @@ def test_compacted_local_match_stays_searchable_without_a_full_render(
     assert rows[0]["name"] == "Real Preset Name"
     assert rows[0]["audition_path"] is None
     assert rows[0]["path"] == str(source)
+
+
+def test_adopt_legacy_renders_recovers_an_uncataloged_but_still_known_preset(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app-data" / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Preset.fxp",
+        name="Recoverable Preset",
+        synth="serum1",
+        content_hash="recoverable-hash",
+    )
+    legacy = tmp_path / "legacy backup" / str(preset_id)
+    for note in MIDI_NOTES:
+        _write_wav(legacy / f"{note}.wav")
+    audio_root = tmp_path / "audio"
+
+    summary = adopt_legacy_renders(
+        legacy.parent, database_path=database.path, audio_root=audio_root
+    )
+
+    assert summary.presets_adopted == 1
+    assert summary.notes_copied == len(MIDI_NOTES)
+    assert summary.bytes_copied > 0
+    for note in MIDI_NOTES:
+        assert (audio_root / str(preset_id) / f"{note}.wav").is_file()
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT midi_note FROM renders WHERE preset_id=? ORDER BY midi_note", (preset_id,)
+        ).fetchall()
+        status = connection.execute(
+            "SELECT status FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()[0]
+    assert [row[0] for row in rows] == sorted(MIDI_NOTES)
+    assert status == "rendered"
+    # The legacy source is untouched -- adoption is copy-only.
+    for note in MIDI_NOTES:
+        assert (legacy / f"{note}.wav").is_file()
+
+
+def test_adopt_legacy_renders_never_touches_an_already_complete_preset(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app-data" / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Preset.fxp",
+        name="Already Rendered",
+        synth="serum1",
+        content_hash="already-rendered-hash",
+    )
+    audio_root = tmp_path / "audio"
+    current = audio_root / str(preset_id)
+    for note in MIDI_NOTES:
+        _write_wav(current / f"{note}.wav", amplitude=0.9)
+    with database.connect() as connection:
+        connection.executemany(
+            "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+            [
+                (preset_id, note, str((current / f"{note}.wav").resolve()), -1.0, -12.0, 0.05)
+                for note in MIDI_NOTES
+            ],
+        )
+        connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+    original_bytes = {
+        note: (current / f"{note}.wav").read_bytes() for note in MIDI_NOTES
+    }
+
+    legacy = tmp_path / "legacy backup" / str(preset_id)
+    for note in MIDI_NOTES:
+        _write_wav(legacy / f"{note}.wav", amplitude=0.1)  # deliberately different content
+
+    summary = adopt_legacy_renders(
+        legacy.parent, database_path=database.path, audio_root=audio_root
+    )
+
+    assert summary.presets_adopted == 0
+    assert summary.presets_already_complete == 1
+    assert summary.notes_copied == 0
+    # The current, already-tracked renders must be byte-for-byte untouched.
+    for note in MIDI_NOTES:
+        assert (current / f"{note}.wav").read_bytes() == original_bytes[note]
+
+
+def test_adopt_legacy_renders_skips_presets_no_longer_in_the_catalog(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app-data" / "library.db")
+    legacy = tmp_path / "legacy backup" / "999999"
+    for note in MIDI_NOTES:
+        _write_wav(legacy / f"{note}.wav")
+
+    summary = adopt_legacy_renders(
+        legacy.parent, database_path=database.path, audio_root=tmp_path / "audio"
+    )
+
+    assert summary.presets_uncataloged == 1
+    assert summary.presets_adopted == 0
+    assert not (tmp_path / "audio" / "999999").exists()
+
+
+def test_adopt_legacy_renders_leaves_non_numeric_folders_unclassified(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app-data" / "library.db")
+    legacy_parent = tmp_path / "legacy backup"
+    _write_wav(legacy_parent / "generated-abc123hash" / "24.wav")
+    _write_wav(legacy_parent / "generated-abc123hash" / "36.wav")
+
+    summary = adopt_legacy_renders(
+        legacy_parent, database_path=database.path, audio_root=tmp_path / "audio"
+    )
+
+    assert summary.folders_unclassified == 1
+    assert summary.presets_adopted == 0
+
+
+def test_adopt_legacy_renders_does_not_partially_register_an_incomplete_folder(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app-data" / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Preset.fxp",
+        name="Partial Preset",
+        synth="serum1",
+        content_hash="partial-hash",
+    )
+    legacy = tmp_path / "legacy backup" / str(preset_id)
+    # Only two of the seven expected notes are present.
+    _write_wav(legacy / f"{MIDI_NOTES[0]}.wav")
+    _write_wav(legacy / f"{MIDI_NOTES[1]}.wav")
+
+    summary = adopt_legacy_renders(
+        legacy.parent, database_path=database.path, audio_root=tmp_path / "audio"
+    )
+
+    assert summary.presets_adopted == 0
+    assert summary.presets_partial_conflict == 1
+    with database.connect() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM renders WHERE preset_id=?", (preset_id,)
+        ).fetchone()[0]
+    assert count == 0
+    assert not (tmp_path / "audio" / str(preset_id)).exists()
+
+
+def test_audio_root_size_sums_real_files_and_tolerates_a_missing_root(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "audio"
+    (audio / "1").mkdir(parents=True)
+    (audio / "1" / "24.wav").write_bytes(b"a" * 1000)
+    (audio / "1" / "36.wav").write_bytes(b"b" * 2000)
+
+    assert audio_root_size(audio) == 3000
+    assert audio_root_size(tmp_path / "does-not-exist") == 0

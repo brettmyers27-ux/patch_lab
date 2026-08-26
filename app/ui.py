@@ -10,8 +10,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -102,6 +102,7 @@ from core.preview_cache import (
 from core.privacy import PrivacyStore, distribution_mode
 from core.storage import (
     StoragePreferences,
+    audio_root_size,
     load_storage_preferences,
     prepare_audio_root,
     prune_preview_cache,
@@ -3634,9 +3635,30 @@ class MainWindow(LegacyMainWindow):
         )
         availability.setObjectName("muted")
         storage_layout.addWidget(availability)
+        if current_storage.available:
+            try:
+                free_bytes = shutil.disk_usage(current_storage.root).free
+                used_bytes = audio_root_size(current_storage.root)
+                usage = QLabel(
+                    f"{used_bytes / 1e9:.1f} GB used here · "
+                    f"{free_bytes / 1e9:.1f} GB free on this drive"
+                )
+            except OSError:
+                usage = QLabel("Size unavailable")
+            usage.setObjectName("muted")
+            storage_layout.addWidget(usage)
+        button_row = QHBoxLayout()
         choose_storage = QPushButton("Choose Audio Storage Folder…")
         choose_storage.setObjectName("compactActionButton")
-        storage_layout.addWidget(choose_storage)
+        button_row.addWidget(choose_storage)
+        open_folder = QPushButton("Open Audio Library Folder")
+        open_folder.setObjectName("compactActionButton")
+        open_folder.setEnabled(current_storage.available)
+        open_folder.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(current_storage.root)))
+        )
+        button_row.addWidget(open_folder)
+        storage_layout.addLayout(button_row)
 
         compact = QCheckBox("Compact storage after learning presets")
         compact.setChecked(self.storage_preferences.compact_mode)
