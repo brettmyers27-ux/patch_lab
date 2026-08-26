@@ -3,8 +3,14 @@
 ## Quick Start — trusted group install
 
 Prerequisites: either an Apple Silicon Mac running macOS 12.3 or newer or a
-64-bit Windows 11 PC, Python 3.11, git, at least 8 GB free, licensed Serum 1
-VST2 and Serum 2 VST3 installations, and the private-group passcode.
+64-bit Windows 11 PC, at least 8 GB free, licensed Serum 1 VST2 and Serum 2
+VST3 installations, and the private-group passcode. On macOS, `install.sh`
+installs Python 3.11 automatically (via Homebrew, installing Homebrew first
+if needed) if it isn't already present. It also requests git via Apple's
+Command Line Tools and waits for that to finish, but that one step needs a
+manual click to accept Apple's license — this cannot be made fully silent.
+On Windows, Python 3.11 and git are still manual prerequisites; see
+`install.ps1`'s troubleshooting entries below.
 
 ### macOS
 
@@ -666,7 +672,9 @@ assets or source-controlled files.
 | Relay unreachable | Check the internet connection and rerun. Installation stops at authentication before large downloads or launcher creation. |
 | Private artifact unavailable | The installer names the failing artifact before downloading CLAP. Retry later or contact the PatchLab operator; existing `.part` files and verified downloads are preserved. |
 | Insufficient disk | Free enough space for the 8 GB preflight requirement, then rerun; verified and partial downloads are preserved. |
-| Python 3.11 missing | Install Python 3.11 so `python3.11` is available. Other minor versions are intentionally refused. |
+| Python 3.11 missing on macOS | `install.sh` installs it automatically via Homebrew (installing Homebrew first if needed). If that fails, install Python 3.11 yourself from https://www.python.org/downloads/ then rerun. Other minor versions are intentionally refused. |
+| git missing on macOS | `install.sh` opens Apple's Command Line Tools installer and waits up to 30 minutes for it to finish. Click Install and accept the license in the window that opens — Apple requires that click, so this one step is not fully silent. If it times out, finish the install and rerun `install.sh`. |
+| Python 3.11 missing on Windows | Install Python 3.11 so `python3.11` is available. Other minor versions are intentionally refused. |
 | Microsoft Store Python opens instead of Python | Install 64-bit Python 3.11 from python.org with “Add python.exe to PATH,” then disable the `python.exe`/`python3.exe` App execution aliases in Windows Settings. |
 | Serum not found on macOS | Install licensed Serum 1 VST2 and Serum 2 VST3 builds in a standard system or user `Audio/Plug-Ins` folder. |
 | Serum 1 VST2 not found on Windows | Install `Serum_x64.dll`, or correct `VSTPluginsPath` under `HKLM`/`HKCU\SOFTWARE\VST`. The installer prints every registry and common-folder location searched. |

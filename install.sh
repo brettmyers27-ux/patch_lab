@@ -41,11 +41,44 @@ if [ "$OS_MAJOR" -lt 12 ] || { [ "$OS_MAJOR" -eq 12 ] && [ "$OS_MINOR" -lt 3 ]; 
     fail "PatchLab requires macOS 12.3 or newer; this Mac reports $OS_VERSION."
 fi
 
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || fail "Python 3.11 is missing. Install Python 3.11, then rerun this installer."
+if ! command -v git >/dev/null 2>&1; then
+    say "git is missing. Requesting the Apple Command Line Tools installer..."
+    xcode-select --install >/dev/null 2>&1 || true
+    say "A macOS window should now be open. Click Install, accept the license, and let it finish -- Apple requires that click and does not allow this step to run silently."
+    say "Waiting for it to finish (checking every 10 seconds, up to 30 minutes)..."
+    GIT_WAITED_S=0
+    while ! command -v git >/dev/null 2>&1; do
+        sleep 10
+        GIT_WAITED_S=$((GIT_WAITED_S + 10))
+        if [ "$GIT_WAITED_S" -ge 1800 ]; then
+            fail "Still waiting for the Command Line Tools install after 30 minutes. Finish it in the window that opened, then run this installer again."
+        fi
+    done
+    say "git is installed. Continuing..."
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    say "Python 3.11 is missing. Installing it automatically via Homebrew..."
+    if ! command -v brew >/dev/null 2>&1; then
+        say "Homebrew is also missing; installing it first. This may ask for your Mac password."
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+            || fail "Could not install Homebrew automatically. Install Python 3.11 yourself from https://www.python.org/downloads/ then rerun this installer."
+        if [ -x /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        fi
+    fi
+    command -v brew >/dev/null 2>&1 \
+        || fail "Homebrew installation did not complete. Install Python 3.11 yourself from https://www.python.org/downloads/ then rerun this installer."
+    brew install python@3.11 \
+        || fail "Could not install Python 3.11 automatically. Install it yourself from https://www.python.org/downloads/ then rerun this installer."
+    PYTHON_BIN="$(brew --prefix python@3.11)/bin/python3.11"
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 \
+        || fail "Python 3.11 still could not be found after installing it via Homebrew."
+    say "Python 3.11 is installed. Continuing..."
+fi
 PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
 PYTHON_SERIES="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 [ "$PYTHON_SERIES" = "3.11" ] || fail "The virtual environment must use Python 3.11.x; $PYTHON_BIN is $PYTHON_VERSION."
-command -v git >/dev/null 2>&1 || fail "git is missing. Install Apple's Command Line Tools with: xcode-select --install"
 
 FREE_KB="$(df -Pk "$HOME" | awk 'NR==2 {print $4}')"
 REQUIRED_KB=$((8 * 1024 * 1024))
