@@ -148,13 +148,27 @@ class ScanProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._summary: dict[str, int] | None = None
 
-    def start(self, root: Path, *, local_library: bool = False) -> None:
+    def start(
+        self,
+        root: Path | None = None,
+        *,
+        local_library: bool = False,
+        fingerprint_only: bool = False,
+    ) -> None:
         if self.process.state() != QProcess.ProcessState.NotRunning:
             raise RuntimeError("Scan worker is already running")
         self._buffer = ""
         self._summary = None
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
-        if local_library:
+        if fingerprint_only:
+            # No folder to scan here: this fingerprints whatever is already
+            # rendered but missing from the fingerprints table, regardless of
+            # which pipeline rendered it. Same LOCAL_LIBRARY_* output protocol
+            # as the local-library worker, so this class's own parsing below
+            # already understands it without any changes.
+            self._start_worker("fingerprint-local", [])
+        elif local_library:
+            assert root is not None
             self._start_worker(
                 "local-library",
                 [
@@ -164,6 +178,7 @@ class ScanProcessRunner(_ProcessRunnerBase):
                 ],
             )
         else:
+            assert root is not None
             self._start_worker("scan", ["--scan", str(root)])
 
     def cancel(self) -> None:

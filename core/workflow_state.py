@@ -276,21 +276,32 @@ def resolve_workflow_state(
         )
     render = _activity_or("render", live, render)
 
-    analyze = WorkflowCardState(
-        "complete",
-        (
-            "Using PatchLab’s trained model · linked presets join search"
-            if linked
-            else "Using PatchLab’s trained model"
-        ),
-        1,
-        1,
-        (
-            "Personal presets are fingerprinted during the linked-folder job and "
-            "added to retrieval. Full model retraining is not incremental in this "
-            "release, so PatchLab never replaces shipped learning with local-only data."
-        ),
+    analyze_detail = (
+        "Full model retraining is not incremental in this release, so "
+        "PatchLab never replaces shipped learning with local-only data."
     )
+    if not linked or counts.rendered == 0:
+        analyze = WorkflowCardState(
+            "complete", "Using PatchLab’s trained model", 1, 1, analyze_detail
+        )
+    elif counts.fingerprinted >= counts.rendered:
+        analyze = WorkflowCardState(
+            "complete",
+            "Using PatchLab’s trained model · linked presets join search",
+            counts.fingerprinted,
+            counts.rendered,
+            analyze_detail,
+        )
+    else:
+        remaining = counts.rendered - counts.fingerprinted
+        analyze = WorkflowCardState(
+            "needs-action",
+            f"{remaining:,} rendered preset(s) still need learning",
+            counts.fingerprinted,
+            counts.rendered,
+            "Click to fingerprint rendered presets and add them to search. "
+            + analyze_detail,
+        )
     analyze = _activity_or("analyze", live, analyze)
 
     prerequisite_error = (

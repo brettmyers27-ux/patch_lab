@@ -27,6 +27,7 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "scan": WorkerEntryPoint("app.workers", "worker_main"),
     "local-library": WorkerEntryPoint("scripts.process_local_library"),
     "render-library": WorkerEntryPoint("scripts.render_library"),
+    "fingerprint-local": WorkerEntryPoint("scripts.fingerprint_pending_presets"),
     "analyze": WorkerEntryPoint("scripts.run_milestone3"),
     "match": WorkerEntryPoint("scripts.match_sound"),
     "export": WorkerEntryPoint("scripts.export_match"),

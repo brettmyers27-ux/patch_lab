@@ -111,6 +111,133 @@ def _store_serum2(
     )
 
 
+def _fingerprint_preset(
+    database: Database,
+    embedder: ClapEmbedder,
+    audio_root: Path,
+    preset_id: int,
+) -> bool:
+    """Embed and store fingerprints for one already-rendered preset.
+
+    Shared by the inline linked-folder pipeline and fingerprint_pending_presets()
+    so both ever compute a preset's fingerprint the same way. Returns False (no
+    database write) if none of the expected notes are on disk yet.
+    """
+
+    prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for note in MIDI_NOTES:
+        wav = Path(audio_root) / str(preset_id) / f"{note}.wav"
+        if not wav.is_file():
+            continue
+        prepared = load_audio_48k_mono(wav)
+        prepared_rows.append(
+            (note, prepared.waveform, handcrafted_features(prepared.waveform))
+        )
+    embeddings = (
+        embedder.embed([row[1] for row in prepared_rows])
+        if prepared_rows
+        else np.empty((0, 512), dtype=np.float32)
+    )
+    rows: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for (note, _waveform, handcrafted), embedding in zip(
+        prepared_rows, embeddings, strict=True
+    ):
+        database.upsert_fingerprint(
+            preset_id,
+            note,
+            np.ascontiguousarray(embedding, dtype=np.float32).tobytes(),
+            np.ascontiguousarray(handcrafted, dtype=np.float32).tobytes(),
+        )
+        rows.append((note, embedding, handcrafted))
+    if not rows:
+        return False
+    mean_embedding = np.mean([row[1] for row in rows], axis=0)
+    mean_embedding /= max(float(np.linalg.norm(mean_embedding)), 1e-12)
+    mean_handcrafted = np.mean([row[2] for row in rows], axis=0)
+    database.upsert_fingerprint(
+        preset_id,
+        0,
+        np.ascontiguousarray(mean_embedding, dtype=np.float32).tobytes(),
+        np.ascontiguousarray(mean_handcrafted, dtype=np.float32).tobytes(),
+    )
+    return True
+
+
+def fingerprint_pending_presets(
+    db_path: Path,
+    audio_root: Path,
+    *,
+    env: PlatformEnv = ENV,
+    log: LogCallback = print,
+    progress: ProgressCallback | None = None,
+    compact_mode: bool | None = None,
+) -> LocalLibrarySummary:
+    """Fingerprint every fully-rendered preset that has no fingerprint yet.
+
+    process_linked_folder() only fingerprints as an inline step of its own
+    render batches, so audio rendered any other way -- a standalone
+    render-library run, a recovered legacy library -- never gets fingerprinted
+    on its own. This is the catch-up path: safe to run any time, independent
+    of how the audio came to exist on disk. Never retrains any model; it only
+    runs the shipped CLAP encoder over audio that already exists.
+    """
+
+    database = Database(Path(db_path).expanduser().resolve())
+    if compact_mode is None:
+        compact_mode = load_storage_preferences(env).compact_mode
+    with database.connect() as connection:
+        already_fingerprinted = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT preset_id FROM fingerprints WHERE midi_note=0"
+            ).fetchall()
+        }
+        rows = connection.execute(
+            "SELECT id,name FROM presets WHERE status IN ('rendered','embedded')"
+        ).fetchall()
+    targets = [
+        (int(row["id"]), str(row["name"]))
+        for row in rows
+        if int(row["id"]) not in already_fingerprinted
+    ]
+    summary = LocalLibrarySummary()
+    total = len(targets)
+    if total == 0:
+        log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
+        return summary
+
+    embedder = ClapEmbedder(env)
+    completed = 0
+    batch_size = 24 if compact_mode else total
+    for batch_start in range(0, total, batch_size):
+        for preset_id, name in targets[batch_start : batch_start + batch_size]:
+            if _fingerprint_preset(database, embedder, audio_root, preset_id):
+                summary.fingerprints_created += 1
+                log(f"Local fingerprint ready: {name}")
+            completed += 1
+            if progress is not None:
+                progress(
+                    {
+                        "stage": "analyze",
+                        "current": completed,
+                        "total": total,
+                        "text": f"Learning {completed:,} of {total:,} rendered presets",
+                    }
+                )
+        if compact_mode:
+            compacted = compact_render_library(db_path, audio_root, log=log)
+            summary.compacted_render_files += compacted.files
+            summary.compacted_render_bytes += compacted.bytes
+            if compacted.files:
+                log(
+                    "Compact storage retained fingerprints and removed "
+                    f"{compacted.files:,} regenerable WAV files "
+                    f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
+                )
+    log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
+    return summary
+
+
 def _fingerprint_payload(database: Database, preset_id: int) -> dict[str, Any]:
     with database.connect() as connection:
         preset = connection.execute(
@@ -335,41 +462,7 @@ def process_linked_folder(
             if preset_id not in feature_targets:
                 continue
             assert embedder is not None
-            prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
-            for note in MIDI_NOTES:
-                wav = Path(audio_root) / str(preset_id) / f"{note}.wav"
-                if not wav.is_file():
-                    continue
-                prepared = load_audio_48k_mono(wav)
-                prepared_rows.append(
-                    (note, prepared.waveform, handcrafted_features(prepared.waveform))
-                )
-            embeddings = (
-                embedder.embed([row[1] for row in prepared_rows])
-                if prepared_rows
-                else np.empty((0, 512), dtype=np.float32)
-            )
-            rows: list[tuple[int, np.ndarray, np.ndarray]] = []
-            for (note, _waveform, handcrafted), embedding in zip(
-                prepared_rows, embeddings, strict=True
-            ):
-                database.upsert_fingerprint(
-                    preset_id,
-                    note,
-                    np.ascontiguousarray(embedding, dtype=np.float32).tobytes(),
-                    np.ascontiguousarray(handcrafted, dtype=np.float32).tobytes(),
-                )
-                rows.append((note, embedding, handcrafted))
-            if rows:
-                mean_embedding = np.mean([row[1] for row in rows], axis=0)
-                mean_embedding /= max(float(np.linalg.norm(mean_embedding)), 1e-12)
-                mean_handcrafted = np.mean([row[2] for row in rows], axis=0)
-                database.upsert_fingerprint(
-                    preset_id,
-                    0,
-                    np.ascontiguousarray(mean_embedding, dtype=np.float32).tobytes(),
-                    np.ascontiguousarray(mean_handcrafted, dtype=np.float32).tobytes(),
-                )
+            if _fingerprint_preset(database, embedder, audio_root, preset_id):
                 summary.fingerprints_created += 1
                 log(f"Local fingerprint ready: {id_to_path[preset_id].name}")
             completed_features += 1

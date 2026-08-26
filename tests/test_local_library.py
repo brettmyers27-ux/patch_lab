@@ -9,10 +9,10 @@ from unittest.mock import patch
 import numpy as np
 
 from core.db import Database
-from core.local_library import process_linked_folder
+from core.local_library import fingerprint_pending_presets, process_linked_folder
 from core.plugin_host import ParameterValue
 from core.preset_scan import sha1_file
-from core.render import RenderSummary
+from core.render import MIDI_NOTES, RenderSummary
 
 
 class FailingRelay:
@@ -210,6 +210,121 @@ class LocalRelayResilienceTest(unittest.TestCase):
                     ).fetchone()[0],
                     25,
                 )
+
+
+class FakeEmbedder:
+    def __init__(self, _env) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    def embed(self, waveforms):  # type: ignore[no-untyped-def]
+        return np.ones((len(waveforms), 512), dtype=np.float32)
+
+
+class FingerprintCatchUpTest(unittest.TestCase):
+    """Covers audio rendered outside process_linked_folder -- e.g. the
+    standalone render-library job, which never fingerprints on its own."""
+
+    def _rendered_preset_with_no_fingerprint(
+        self, database: Database, audio_root: Path, name: str
+    ) -> int:
+        preset_id, _ = database.insert_preset(
+            path=Path(f"/does/not/matter/{name}.fxp"),
+            name=name,
+            synth="serum1",
+            content_hash=f"hash-{name}",
+        )
+        with database.connect() as connection:
+            for note in MIDI_NOTES:
+                wav = audio_root / str(preset_id) / f"{note}.wav"
+                wav.parent.mkdir(parents=True, exist_ok=True)
+                wav.write_bytes(b"wav")
+                connection.execute(
+                    "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+                    (preset_id, note, str(wav), -1.0, -12.0, 5.0),
+                )
+            connection.execute(
+                "UPDATE presets SET status='rendered' WHERE id=?", (preset_id,)
+            )
+        return preset_id
+
+    def test_fingerprints_a_preset_rendered_outside_the_linked_folder_pipeline(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-fingerprint-catchup-") as temporary:
+            root = Path(temporary)
+            audio_root = root / "audio"
+            database = Database(root / "library.db")
+            preset_id = self._rendered_preset_with_no_fingerprint(
+                database, audio_root, "Standalone Render"
+            )
+
+            with (
+                patch("core.local_library.ClapEmbedder", FakeEmbedder),
+                patch(
+                    "core.local_library.load_audio_48k_mono",
+                    return_value=SimpleNamespace(waveform=np.ones(128, dtype=np.float32)),
+                ),
+                patch(
+                    "core.local_library.handcrafted_features",
+                    return_value=np.ones(10, dtype=np.float32),
+                ),
+            ):
+                summary = fingerprint_pending_presets(
+                    database.path, audio_root, log=lambda _m: None, compact_mode=False
+                )
+
+            self.assertEqual(summary.fingerprints_created, 1)
+            with database.connect() as connection:
+                fingerprinted = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT preset_id FROM fingerprints WHERE midi_note=0"
+                    )
+                }
+            self.assertEqual(fingerprinted, {preset_id})
+
+    def test_leaves_an_already_fingerprinted_preset_untouched(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-fingerprint-catchup-") as temporary:
+            root = Path(temporary)
+            audio_root = root / "audio"
+            database = Database(root / "library.db")
+            preset_id = self._rendered_preset_with_no_fingerprint(
+                database, audio_root, "Already Learned"
+            )
+            database.upsert_fingerprint(
+                preset_id,
+                0,
+                np.zeros(512, dtype=np.float32).tobytes(),
+                np.zeros(10, dtype=np.float32).tobytes(),
+            )
+
+            embed_calls: list[int] = []
+
+            class CountingEmbedder(FakeEmbedder):
+                def embed(self, waveforms):  # type: ignore[no-untyped-def]
+                    embed_calls.append(len(waveforms))
+                    return super().embed(waveforms)
+
+            with patch("core.local_library.ClapEmbedder", CountingEmbedder):
+                summary = fingerprint_pending_presets(
+                    database.path, audio_root, log=lambda _m: None, compact_mode=False
+                )
+
+            self.assertEqual(summary.fingerprints_created, 0)
+            self.assertEqual(embed_calls, [])
+
+    def test_nothing_pending_is_a_cheap_no_op(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-fingerprint-catchup-") as temporary:
+            root = Path(temporary)
+            database = Database(root / "library.db")
+
+            with patch("core.local_library.ClapEmbedder") as embedder_cls:
+                summary = fingerprint_pending_presets(
+                    database.path, root / "audio", log=lambda _m: None
+                )
+
+            embedder_cls.assert_not_called()
+            self.assertEqual(summary.fingerprints_created, 0)
 
 
 if __name__ == "__main__":

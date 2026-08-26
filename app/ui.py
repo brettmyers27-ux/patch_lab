@@ -300,6 +300,11 @@ class LegacyMainWindow(QMainWindow):
         self.runner.stage_progress.connect(self._local_library_progress_changed)
         self.runner.completed.connect(self._scan_completed)
         self.runner.failed.connect(self._scan_failed)
+        self.fingerprint_runner = ScanProcessRunner(self)
+        self.fingerprint_runner.log.connect(self.append_log)
+        self.fingerprint_runner.stage_progress.connect(self._local_library_progress_changed)
+        self.fingerprint_runner.completed.connect(self._fingerprint_completed)
+        self.fingerprint_runner.failed.connect(self._fingerprint_failed)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -426,6 +431,7 @@ class LegacyMainWindow(QMainWindow):
         self.analyze_cancel_button = QPushButton("Cancel")
         self.analyze_cancel_button.setEnabled(False)
         self.analyze_cancel_button.clicked.connect(self.analyze_runner.cancel)
+        self.analyze_cancel_button.clicked.connect(self.fingerprint_runner.cancel)
         self.analyze_stats = QLabel("Ready")
         learn_options.addWidget(self.deep_training)
         learn_options.addWidget(self.analyze_cancel_button)
@@ -1027,22 +1033,47 @@ class LegacyMainWindow(QMainWindow):
 
     def start_analyze(self) -> None:
         if self.distribution_mode:
-            QMessageBox.information(
-                self,
-                "Personal learning is automatic",
-                "PatchLab already uses its shipped trained model and factory "
-                "fingerprints. When you link presets, PatchLab renders and "
-                "fingerprints them locally, then adds them to search alongside "
-                "the shipped library.\n\n"
-                "Full parameter-model retraining is not incremental in this "
-                "release, so the installed app does not run a local-only retrain "
-                "that would replace prior learning.",
+            pending = 0
+            db_path = Path(self.local_paths["db"])
+            if db_path.is_file():
+                import sqlite3
+
+                connection = sqlite3.connect(db_path)
+                pending = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM presets WHERE status IN "
+                        "('rendered','embedded') AND id NOT IN "
+                        "(SELECT preset_id FROM fingerprints WHERE midi_note=0)"
+                    ).fetchone()[0]
+                )
+                connection.close()
+            if pending == 0:
+                QMessageBox.information(
+                    self,
+                    "Personal learning is up to date",
+                    "PatchLab already uses its shipped trained model and factory "
+                    "fingerprints. Every rendered preset in your linked library "
+                    "already has a fingerprint and is searchable.\n\n"
+                    "Full parameter-model retraining is not incremental in this "
+                    "release, so the installed app does not run a local-only "
+                    "retrain that would replace prior learning.",
+                )
+                self.append_log(
+                    "Analyze & Learn: shipped training retained; nothing rendered "
+                    "is waiting to be fingerprinted."
+                )
+                self._refresh_workflow_cards()
+                return
+            self._set_workflow_activity(
+                "analyze", 0, pending, f"Learning 0 of {pending:,} rendered presets…"
             )
-            self.append_log(
-                "Analyze & Learn: shipped training retained; linked presets are "
-                "added to retrieval during the linked-folder job."
-            )
-            self._refresh_workflow_cards()
+            self.learn_button.setEnabled(False)
+            self.analyze_cancel_button.setEnabled(True)
+            self.learn_progress.setRange(0, pending)
+            self.learn_progress.setValue(0)
+            self.analyze_stats.setText(f"Learning 0 of {pending:,} rendered presets…")
+            self.statusBar().showMessage("Fingerprinting rendered presets…")
+            self.fingerprint_runner.start(fingerprint_only=True)
             return
         self._set_workflow_activity("analyze", 0, 0, "Starting analysis…")
         self.learn_button.setEnabled(False)
@@ -1052,6 +1083,26 @@ class LegacyMainWindow(QMainWindow):
         self.analyze_stats.setText("Starting target vectorization…")
         self.statusBar().showMessage("Analyzing and learning…")
         self.analyze_runner.start(self.deep_training.isChecked())
+
+    def _fingerprint_completed(self, summary: dict) -> None:
+        self._workflow_activities.pop("analyze", None)
+        self.learn_button.setEnabled(True)
+        self.analyze_cancel_button.setEnabled(False)
+        created = int(summary.get("fingerprints_created", 0))
+        text = f"Learned {created:,} rendered preset(s); now searchable."
+        self.analyze_stats.setText(text)
+        self.append_log(text)
+        self.statusBar().showMessage(text)
+        self._refresh_workflow_cards()
+
+    def _fingerprint_failed(self, error: str) -> None:
+        self._workflow_activities.pop("analyze", None)
+        self.learn_button.setEnabled(True)
+        self.analyze_cancel_button.setEnabled(False)
+        self.analyze_stats.setText(error)
+        self.append_log(error)
+        self.statusBar().showMessage(error)
+        self._refresh_workflow_cards()
 
     def _analyze_progress_changed(self, detail: dict) -> None:
         phase = str(detail.get("phase", "working"))
@@ -2032,6 +2083,11 @@ class MainWindow(LegacyMainWindow):
         self.runner.stage_progress.connect(self._local_library_progress_changed)
         self.runner.completed.connect(self._scan_completed)
         self.runner.failed.connect(self._scan_failed)
+        self.fingerprint_runner = ScanProcessRunner(self)
+        self.fingerprint_runner.log.connect(self.append_log)
+        self.fingerprint_runner.stage_progress.connect(self._local_library_progress_changed)
+        self.fingerprint_runner.completed.connect(self._fingerprint_completed)
+        self.fingerprint_runner.failed.connect(self._fingerprint_failed)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -2114,6 +2170,7 @@ class MainWindow(LegacyMainWindow):
         self.analyze_cancel_button = QPushButton("Cancel")
         self.analyze_cancel_button.setEnabled(False)
         self.analyze_cancel_button.clicked.connect(self.analyze_runner.cancel)
+        self.analyze_cancel_button.clicked.connect(self.fingerprint_runner.cancel)
         self.analyze_stats = QLabel("Ready")
 
         self.match_offset = QDoubleSpinBox()

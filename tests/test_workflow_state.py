@@ -108,6 +108,56 @@ def test_linked_folder_counts_real_remaining_renders(tmp_path: Path) -> None:
     assert (state.render.current, state.render.total) == (1, 3)
 
 
+def test_analyze_card_reflects_rendered_vs_fingerprinted_truthfully(tmp_path: Path) -> None:
+    linked = tmp_path / "My Presets"
+    linked.mkdir()
+    database = Database(tmp_path / "app-data" / "library.db")
+    ids: list[int] = []
+    for index in range(2):
+        preset_id, _ = database.insert_preset(
+            path=linked / f"Preset {index}.fxp",
+            name=f"Preset {index}",
+            synth="serum1",
+            content_hash=f"analyze-{index}",
+        )
+        ids.append(preset_id)
+        with database.connect() as connection:
+            connection.executemany(
+                "INSERT INTO renders(preset_id,midi_note,wav_path,peak_dbfs,rms_dbfs,duration_s) "
+                "VALUES (?,?,?,?,?,?)",
+                [
+                    (preset_id, note, str(tmp_path / f"{preset_id}-{note}.wav"), -1.0, -12.0, 5.0)
+                    for note in MIDI_NOTES
+                ],
+            )
+
+    def resolve_with(bundle_name: str):
+        with patch("core.workflow_state.validate_model_assets"):
+            return resolve_workflow_state(
+                privacy=PrivacyChoice(True, str(linked)),
+                local_database_path=database.path,
+                factory_bundle_path=_factory_bundle(tmp_path / bundle_name),
+                audio_selected=False,
+            )
+
+    # Nothing rendered has been fingerprinted yet -- e.g. it was rendered by
+    # the standalone render-library job, which never fingerprints on its own.
+    state = resolve_with("factory-a.sqlite")
+    assert state.analyze.phase == "needs-action"
+    assert "2 rendered preset(s) still need learning" in state.analyze.text
+    assert (state.analyze.current, state.analyze.total) == (0, 2)
+
+    database.upsert_fingerprint(ids[0], 0, bytes(512 * 4), bytes(10 * 4))
+    state = resolve_with("factory-b.sqlite")
+    assert state.analyze.phase == "needs-action"
+    assert (state.analyze.current, state.analyze.total) == (1, 2)
+
+    database.upsert_fingerprint(ids[1], 0, bytes(512 * 4), bytes(10 * 4))
+    state = resolve_with("factory-c.sqlite")
+    assert state.analyze.phase == "complete"
+    assert "join search" in state.analyze.text
+
+
 def test_live_activity_and_broken_cache_are_explicit(tmp_path: Path) -> None:
     activities = {
         "render": WorkflowActivity(14, 70, "Rendering 14 of 70 notes")
