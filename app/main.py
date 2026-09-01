@@ -129,6 +129,7 @@ def main() -> int:
             ),
         )
     window.show()
+    QTimer.singleShot(0, window.maybe_start_automatic_link_scan)
     return application.exec()
 
 

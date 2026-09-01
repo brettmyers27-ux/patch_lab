@@ -78,7 +78,7 @@ from core.branding import display_match_name, generated_preset_name
 from core.build_info import current_build_info
 from core.db import DEFAULT_DB_PATH, Database
 from core.factory_verify import FactoryVerification
-from core.local_library import default_local_paths
+from core.local_library import auto_scan_due, default_local_paths, record_auto_scan
 from core.match_batch import (
     discover_batch_audio,
     disambiguated_preset_path,
@@ -92,7 +92,7 @@ from core.match_library import (
     resolve_result_path,
     resolved_record_paths,
 )
-from core.platform_env import ENV
+from core.platform_env import ENV, PlatformEnv
 from core.preview_cache import (
     PREVIEW_NOTES,
     preview_cache_path,
@@ -857,6 +857,40 @@ class LegacyMainWindow(QMainWindow):
             else "Scanning and dumping parameters…"
         )
         self.runner.start(Path(selected), local_library=self.distribution_mode)
+
+    def maybe_start_automatic_link_scan(self, *, env: PlatformEnv = ENV) -> None:
+        """Quietly catch up an already-linked folder on launch, at most once a day.
+
+        choose_folder() always confirms with a "1-4 hours" warning because it
+        may be the first time this folder has ever been scanned. This path
+        never shows that dialog or a file picker: process_linked_folder() is
+        already incremental -- it skips every preset it has already seen --
+        so a daily catch-up is normally fast. Its entire purpose is picking
+        up presets someone added since they last opened PatchLab and getting
+        them shared without anyone having to remember to click Link again.
+        """
+
+        if not self.distribution_mode:
+            return
+        if not (
+            self.privacy_choice.use_and_share_own_presets
+            and self.privacy_choice.linked_folder
+        ):
+            return
+        folder = Path(self.privacy_choice.linked_folder)
+        if not folder.is_dir():
+            return
+        if not storage_status().available:
+            return
+        if self.runner.running or "link" in self._workflow_activities:
+            return
+        if not auto_scan_due(env):
+            return
+        record_auto_scan(env)
+        self.append_log(f"Automatic daily check for new presets in {folder}")
+        self._set_workflow_activity("link", 0, 0, "Checking for new presets…")
+        self.statusBar().showMessage("Checking for new presets…")
+        self.runner.start(folder, local_library=True)
 
     def append_log(self, message: str) -> None:
         self.log_pane.appendPlainText(message)

@@ -148,6 +148,10 @@ class ScanProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._summary: dict[str, int] | None = None
 
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
     def start(
         self,
         root: Path | None = None,

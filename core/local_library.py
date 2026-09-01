@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -36,6 +37,53 @@ from core.storage import (
 
 LogCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+AUTO_SCAN_MARKER_FILENAME = "last-auto-link-scan.json"
+DEFAULT_AUTO_SCAN_INTERVAL_HOURS = 24.0
+
+
+def _auto_scan_marker_path(env: PlatformEnv = ENV) -> Path:
+    return Path(env.app_data_dir) / AUTO_SCAN_MARKER_FILENAME
+
+
+def auto_scan_due(
+    env: PlatformEnv = ENV,
+    *,
+    min_interval_hours: float = DEFAULT_AUTO_SCAN_INTERVAL_HOURS,
+) -> bool:
+    """True once enough time has passed since the last automatic linked-folder scan.
+
+    A damaged or missing marker means due -- silently never checking again
+    because of one corrupt file would be worse than an extra scan.
+    """
+
+    path = _auto_scan_marker_path(env)
+    if not path.is_file():
+        return True
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        last = datetime.fromisoformat(str(raw["last_scan_at"]))
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last >= timedelta(hours=min_interval_hours)
+
+
+def record_auto_scan(env: PlatformEnv = ENV, *, at: datetime | None = None) -> None:
+    """Mark that an automatic linked-folder scan is starting now.
+
+    Recorded before the scan runs, not after it finishes, so an interrupted
+    or slow scan can't cause a second one to fire the next time the app
+    happens to launch within the same day.
+    """
+
+    path = _auto_scan_marker_path(env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = at or datetime.now(timezone.utc)
+    path.write_text(
+        json.dumps({"last_scan_at": timestamp.isoformat()}), encoding="utf-8"
+    )
 
 
 class RelayProtocol(Protocol):

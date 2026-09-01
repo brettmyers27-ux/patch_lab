@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,12 @@ from unittest.mock import patch
 import numpy as np
 
 from core.db import Database
-from core.local_library import fingerprint_pending_presets, process_linked_folder
+from core.local_library import (
+    auto_scan_due,
+    fingerprint_pending_presets,
+    process_linked_folder,
+    record_auto_scan,
+)
 from core.plugin_host import ParameterValue
 from core.preset_scan import sha1_file
 from core.render import MIDI_NOTES, RenderSummary
@@ -325,6 +331,34 @@ class FingerprintCatchUpTest(unittest.TestCase):
 
             embedder_cls.assert_not_called()
             self.assertEqual(summary.fingerprints_created, 0)
+
+
+class AutoScanThrottleTest(unittest.TestCase):
+    def test_due_when_no_marker_exists_yet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = SimpleNamespace(app_data_dir=Path(temporary))
+            self.assertTrue(auto_scan_due(env))
+
+    def test_not_due_again_within_the_same_day(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = SimpleNamespace(app_data_dir=Path(temporary))
+            record_auto_scan(env, at=datetime.now(timezone.utc))
+            self.assertFalse(auto_scan_due(env))
+
+    def test_due_again_after_the_interval_elapses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = SimpleNamespace(app_data_dir=Path(temporary))
+            record_auto_scan(
+                env, at=datetime.now(timezone.utc) - timedelta(hours=25)
+            )
+            self.assertTrue(auto_scan_due(env))
+
+    def test_a_corrupt_marker_fails_open_to_due(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = SimpleNamespace(app_data_dir=Path(temporary))
+            marker = Path(temporary) / "last-auto-link-scan.json"
+            marker.write_text("not json", encoding="utf-8")
+            self.assertTrue(auto_scan_due(env))
 
 
 if __name__ == "__main__":
