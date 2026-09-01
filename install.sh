@@ -194,11 +194,13 @@ printf -v INSTALL_ROOT_Q '%q' "$INSTALL_ROOT"
 printf -v PYTHON_PATH_Q '%q' "$INSTALL_ROOT/.venv/bin/python"
 printf -v APP_MAIN_Q '%q' "$INSTALL_ROOT/app/main.py"
 printf -v MODEL_CACHE_Q '%q' "$INSTALL_ROOT/data/models/huggingface"
+printf -v APP_PATH_Q '%q' "$APP_PATH"
 cat > "$LAUNCHER_TMP/Contents/MacOS/PatchLab" <<EOF
 #!/bin/bash
 export PATCHLAB_DISTRIBUTION_MODE=1
 export PATCHLAB_RELAY_URL=$RELAY_URL_Q
 export PATCHLAB_MODEL_CACHE=$MODEL_CACHE_Q
+export PATCHLAB_APP_BUNDLE=$APP_PATH_Q
 cd $INSTALL_ROOT_Q
 exec $PYTHON_PATH_Q $APP_MAIN_Q
 EOF

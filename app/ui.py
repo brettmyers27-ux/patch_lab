@@ -14,6 +14,7 @@ from PySide6.QtCore import QProcess, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -72,6 +73,7 @@ from app.workers import (
     RenderProcessRunner,
     ScanProcessRunner,
     StorageProcessRunner,
+    UpdateCheckProcessRunner,
 )
 from core.audio_input import SUPPORTED_AUDIO_SUFFIXES
 from core.branding import display_match_name, generated_preset_name
@@ -79,6 +81,11 @@ from core.build_info import current_build_info
 from core.db import DEFAULT_DB_PATH, Database
 from core.factory_verify import FactoryVerification
 from core.local_library import auto_scan_due, default_local_paths, record_auto_scan
+from core.update_check import (
+    UpdatePreferences,
+    load_update_preferences,
+    save_update_preferences,
+)
 from core.match_batch import (
     discover_batch_audio,
     disambiguated_preset_path,
@@ -305,6 +312,10 @@ class LegacyMainWindow(QMainWindow):
         self.fingerprint_runner.stage_progress.connect(self._local_library_progress_changed)
         self.fingerprint_runner.completed.connect(self._fingerprint_completed)
         self.fingerprint_runner.failed.connect(self._fingerprint_failed)
+        self.update_check_runner = UpdateCheckProcessRunner(self)
+        self.update_check_runner.log.connect(self.append_log)
+        self.update_check_runner.completed.connect(self._update_check_completed)
+        self.update_check_runner.failed.connect(self.append_log)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -600,15 +611,19 @@ class LegacyMainWindow(QMainWindow):
         dialog.setModal(True)
         dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
-        heading = QLabel("Would you like to use and share your own presets?")
+        heading = QLabel("Would you like to link your preset library to PatchLab?")
         heading.setStyleSheet("font-size: 18px; font-weight: 650;")
         body = QLabel(
-            "If you agree, you can link a preset folder. PatchLab will process every linked "
-            "preset locally so it is searchable on this computer. It will also contribute a "
-            "copy of non-factory preset files and their fingerprints/settings to the developer’s "
-            "shared library. Rendered audio is never uploaded.\n\n"
-            "If you disagree, PatchLab remains fully usable with its built-in factory "
-            "fingerprints. You can change this later with the single Privacy setting."
+            "If enabled, you can designate a local folder for PatchLab to index. "
+            "PatchLab will scan your linked files locally to enable local search "
+            "functionality while synchronizing non-factory preset definitions, "
+            "configuration metadata, and acoustic fingerprints with PatchLab’s "
+            "global database. Rendered audio files remain exclusively on your "
+            "device.\n\n"
+            "If declined, PatchLab will not be able to analyze your presets or "
+            "match uploaded audio to its nearest match in your presets. It will "
+            "only match to closest factory presets. You can update this "
+            "preference anytime in Privacy settings."
         )
         body.setWordWrap(True)
         buttons = QHBoxLayout()
@@ -891,6 +906,80 @@ class LegacyMainWindow(QMainWindow):
         self._set_workflow_activity("link", 0, 0, "Checking for new presets…")
         self.statusBar().showMessage("Checking for new presets…")
         self.runner.start(folder, local_library=True)
+
+    def maybe_check_for_update(self, *, env: PlatformEnv = ENV) -> None:
+        """Quietly ask GitHub whether a newer PatchLab is published.
+
+        Read-only and cheap, so this runs on every launch rather than being
+        throttled like the preset scan -- it's a small network request, not
+        a rendering job. Respects the Settings toggle and never prompts
+        twice for a version the user already dismissed with "Skip".
+        """
+
+        if not self.distribution_mode:
+            return
+        if not load_update_preferences(env).auto_check:
+            return
+        if self.update_check_runner.running:
+            return
+        self.update_check_runner.start()
+
+    def _update_check_completed(self, result: dict, *, env: PlatformEnv = ENV) -> None:
+        remote = result.get("remote_version")
+        if not result.get("update_available") or not remote:
+            return
+        if load_update_preferences(env).skipped_version == remote:
+            return
+        self._prompt_update_available(str(remote), env=env)
+
+    def _prompt_update_available(
+        self, remote_version: str, *, env: PlatformEnv = ENV
+    ) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("Update available")
+        box.setText(
+            f"PatchLab {remote_version} is available. You have {__version__}.\n\n"
+            "Updating replaces PatchLab's app code only. Your linked presets, "
+            "rendered audio, and everything the app has already learned live "
+            "outside the app and are never touched by an update."
+        )
+        update_button = box.addButton("Update Now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Remind Me Later", QMessageBox.ButtonRole.RejectRole)
+        skip_button = box.addButton(
+            "Skip This Version", QMessageBox.ButtonRole.DestructiveRole
+        )
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is update_button:
+            self._apply_update()
+        elif clicked is skip_button:
+            preferences = load_update_preferences(env)
+            save_update_preferences(
+                UpdatePreferences(preferences.auto_check, remote_version), env
+            )
+        # "Remind Me Later" records nothing, so the next launch asks again.
+
+    def _apply_update(self) -> None:
+        import os
+        import subprocess
+
+        install_root = Path(__file__).resolve().parents[1]
+        app_bundle = os.environ.get("PATCHLAB_APP_BUNDLE") or str(
+            Path.home() / "Applications" / "PatchLab.app"
+        )
+        updater = install_root / "scripts" / "apply_update.sh"
+        subprocess.Popen(
+            ["/bin/bash", str(updater), str(os.getpid()), str(install_root), app_bundle],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.append_log(
+            "Update starting; PatchLab will quit and relaunch automatically "
+            "once it finishes."
+        )
+        QApplication.instance().quit()
 
     def append_log(self, message: str) -> None:
         self.log_pane.appendPlainText(message)
@@ -2122,6 +2211,10 @@ class MainWindow(LegacyMainWindow):
         self.fingerprint_runner.stage_progress.connect(self._local_library_progress_changed)
         self.fingerprint_runner.completed.connect(self._fingerprint_completed)
         self.fingerprint_runner.failed.connect(self._fingerprint_failed)
+        self.update_check_runner = UpdateCheckProcessRunner(self)
+        self.update_check_runner.log.connect(self.append_log)
+        self.update_check_runner.completed.connect(self._update_check_completed)
+        self.update_check_runner.failed.connect(self.append_log)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -3781,6 +3874,37 @@ class MainWindow(LegacyMainWindow):
         storage_layout.addWidget(storage_note)
         layout.addWidget(storage_card)
 
+        auto_update_toggle: QCheckBox | None = None
+        if self.distribution_mode:
+            update_card = QGroupBox("Updates")
+            update_layout = QVBoxLayout(update_card)
+            auto_update_toggle = QCheckBox("Automatically check for updates")
+            auto_update_toggle.setChecked(load_update_preferences().auto_check)
+            auto_update_toggle.setToolTip(
+                "Checks GitHub for a newer PatchLab version each time the app "
+                "opens. Updates replace app code only -- your linked presets, "
+                "rendered audio, and everything already learned are never touched."
+            )
+            update_layout.addWidget(auto_update_toggle)
+
+            def check_for_update_now() -> None:
+                if self.update_check_runner.running:
+                    QMessageBox.information(
+                        dialog, "Already checking", "An update check is already running."
+                    )
+                    return
+                self.append_log("Checking for a PatchLab update…")
+                self.update_check_runner.start()
+
+            check_now = QPushButton("Check for Updates Now")
+            check_now.setObjectName("compactActionButton")
+            check_now.clicked.connect(check_for_update_now)
+            update_layout.addWidget(check_now)
+            update_version = QLabel(f"You have v{__version__}")
+            update_version.setObjectName("muted")
+            update_layout.addWidget(update_version)
+            layout.addWidget(update_card)
+
         def persist_storage_controls() -> None:
             self.storage_preferences = StoragePreferences(
                 self.storage_preferences.audio_root,
@@ -3930,6 +4054,13 @@ class MainWindow(LegacyMainWindow):
         close.setObjectName("primaryButton")
         def save_and_close() -> None:
             persist_storage_controls()
+            if auto_update_toggle is not None:
+                save_update_preferences(
+                    UpdatePreferences(
+                        auto_update_toggle.isChecked(),
+                        load_update_preferences().skipped_version,
+                    )
+                )
             dialog.accept()
 
         close.clicked.connect(save_and_close)

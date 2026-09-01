@@ -357,6 +357,53 @@ class StorageProcessRunner(_ProcessRunnerBase):
             )
 
 
+class UpdateCheckProcessRunner(_ProcessRunnerBase):
+    """Read-only version check against GitHub; never blocks the UI thread."""
+
+    log = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._init_worker_process()
+        self._buffer = ""
+        self._result: dict[str, object] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
+    def start(self) -> None:
+        if self.running:
+            raise RuntimeError("An update check is already running")
+        self._buffer = ""
+        self._result = None
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
+        self._start_worker("check-update", [])
+
+    def _read_output(self) -> None:
+        self._buffer += bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        while (line := self._pop_line()) is not None:
+            if self._handle_worker_line(line):
+                continue
+            if line.startswith("UPDATE_CHECK_RESULT="):
+                self._result = json.loads(line.split("=", 1)[1])
+            if line:
+                self.log.emit(line)
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        if self._finished_before_ready(exit_code):
+            return
+        if exit_code == 0 and self._result is not None:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(f"Update check exited with code {exit_code}")
+
+
 class AnalyzeProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     progress = Signal(dict)
