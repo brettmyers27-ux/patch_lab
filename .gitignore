@@ -32,6 +32,8 @@ build/
 dist/
 packaging/build/
 packaging/dist/
+release/
+*.pkg
 *.spec.bak
 *.part
 

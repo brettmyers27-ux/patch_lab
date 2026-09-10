@@ -4,29 +4,47 @@
 
 Prerequisites: either an Apple Silicon Mac running macOS 12.3 or newer or a
 64-bit Windows 11 PC, at least 8 GB free, licensed Serum 1 VST2 and Serum 2
-VST3 installations, and the private-group passcode. On macOS, `install.sh`
-installs Python 3.11 automatically (via Homebrew, installing Homebrew first
-if needed) if it isn't already present. It also requests git via Apple's
-Command Line Tools and waits for that to finish, but that one step needs a
-manual click to accept Apple's license — this cannot be made fully silent.
-On Windows, Python 3.11 and git are still manual prerequisites; see
-`install.ps1`'s troubleshooting entries below.
+VST3 installations, and the private-group passcode. The macOS PKG includes
+PatchLab's Python runtime and does not require Python, Homebrew, or Git. The
+developer-only macOS source bootstrap can install Python 3.11 through Homebrew
+and request Apple's Command Line Tools. On Windows, Python 3.11 and git are
+still manual prerequisites; see `install.ps1`'s troubleshooting entries below.
 
-### macOS
+### macOS — no-Terminal install
 
-The recommended installation is to download and inspect the installer before
-running it:
+Download the private `PatchLab-<version>-macOS.pkg` supplied by PatchLab,
+then double-click it in Finder. The standard macOS Installer places
+**PatchLab.app** in **Applications** and requests an administrator password
+only when macOS requires it. Open PatchLab from Applications or Spotlight.
+There is no Terminal, Python, Homebrew, Git, or manual file movement for the
+member to perform.
+
+The app's existing first-launch license/passcode and preset-linking choice
+appear after installation exactly as they do in the current trusted build. The
+installer does not add a second consent flow, Drive panel, copy progress, or
+backup controls. It also does not alter, move, or delete original presets.
+
+PatchLab is distributed without Apple notarization so that it does not require
+an Apple Developer Program membership. If Gatekeeper blocks the package or
+app, Control-click it in Finder, choose **Open**, then choose **Open** again.
+If macOS still blocks PatchLab after installation, open **System Settings →
+Privacy & Security**, click **Open Anyway** beside the PatchLab message, and
+authenticate when prompted. This is required only for the unsigned build.
+
+To update, download the newer PKG and open it the same way. macOS Installer
+replaces only `/Applications/PatchLab.app`; PatchLab's settings, learned data,
+linked presets, and any existing private relay copies live outside the app
+bundle and remain intact.
+
+### macOS source/bootstrap path (developers only)
+
+The existing source installer remains available for development and diagnostic
+work. It is not needed by ordinary PKG users:
 
 ```bash
 curl -O https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.sh
 less install.sh
 bash install.sh
-```
-
-For a trusted member who wants the one-command form:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/brettmyers27-ux/patch_lab/main/install.sh | bash
 ```
 
 ### Windows 11
@@ -82,7 +100,7 @@ learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
 machine before library ingestion is enabled.
 
-The current PatchLab application version is **1.4.0**.
+The current PatchLab application version is **1.4.7**.
 
 It runs Serum headlessly through DawDreamer—never by automating a DAW—and
 provides a PySide6 desktop workflow for scanning presets, rendering an audition
@@ -578,34 +596,43 @@ cd ../patchlab-relay
 PYTHONPATH=. ../soundmatch/.venv/bin/python tests/test_relay.py
 ```
 
-### Building the macOS app
+### Building the macOS PKG (trusted release operator)
 
-The supported trusted-group delivery is now `install.sh` plus its lightweight
-Finder launcher. The monolithic PyInstaller bundle is not distributed; its
-spec remains available for a future signed and notarized release.
-
-Packaging tools are intentionally separate from runtime dependencies:
+The repeatable Apple Silicon build produces a standard Finder-installable PKG:
 
 ```bash
 pip install -r requirements-dev.txt
-pyinstaller --clean --noconfirm packaging/patchlab.spec
+.venv/bin/python packaging/build_macos_pkg.py --keep-app
+.venv/bin/python scripts/verify_macos_pkg.py
 ```
 
-This creates the one-folder bundle `dist/PatchLab.app`. The runtime hook
-enables distribution mode and points `PATCHLAB_MODEL_CACHE` at the bundle's
-populated offline cache without requiring a terminal or environment toggle.
-The same shared resolver consumes that variable from the macOS launcher,
-Windows launcher, frozen workers, and development mode. The build embeds the
-factory fingerprint bundle, pinned CLAP checkpoint, and required Hugging Face
-tokenizer/model cache when those private/local artifacts are present at their
-documented `data/` paths, but none is committed to Git.
+The artifact is written locally as `release/PatchLab-<version>-macOS.pkg` and
+is intentionally ignored by Git. It includes the licensed runtime assets that
+the existing `packaging/patchlab.spec` selects from the private local build
+data. Do not attach the PKG, models, factory bundle, or any `data/` content to
+a public GitHub Release.
 
-Release builds refuse uncommitted tracked source by default and embed the exact
-Git commit plus UTC build time. PatchLab reports that identity in its activity
-log and About dialog. A packaged build can report it without opening the GUI:
+The builder refuses uncommitted tracked source by default, creates an Apple
+Silicon `PatchLab.app`, and wraps only that app in a PKG targeted at
+`/Applications`. No user data is packaged: settings, learned data, linked
+presets, and private relay copies stay in their existing per-user locations.
+Use a newer versioned PKG for upgrades. `scripts/verify_macos_pkg.py` uses a
+throwaway fixture to validate a clean package, the `/Applications` target,
+launch behavior, and an upgrade that preserves separate user data; it never
+uses the real Applications folder or real PatchLab files.
+
+The frozen runtime keeps the existing first-run access and consent behavior,
+including its already-configured non-secret relay endpoint. It does not add or
+change any Drive/preset-copy operation. Source-checkout auto-update is disabled
+inside the PKG because it invokes `install.sh`; PKG users update by installing
+the next version from Finder.
+
+Release builds embed the exact Git commit plus UTC build time. PatchLab reports
+that identity in its activity log and About dialog. A packaged build can report
+it without opening the GUI:
 
 ```bash
-dist/PatchLab.app/Contents/MacOS/PatchLab --patchlab-build-info
+release/PatchLab.app/Contents/MacOS/PatchLab --patchlab-build-info
 ```
 
 ### Versioning policy
@@ -638,11 +665,11 @@ multi-gigabyte/private assets at runtime. Startup validates the checkpoint and
 all required tokenizer/model snapshots and gives the exact resolved paths plus
 the installer command if anything is incomplete.
 
-The build remains useful for package engineering, but it is currently 3.3 GB
-and is not the tester delivery path. `install.sh` creates a few-kilobyte
-launcher around the source venv instead. Neither launcher is Apple-notarized.
-On first launch, macOS may show an “unidentified developer” warning;
-right-click the app, choose **Open**, and confirm once.
+The standalone bundle is large because it contains the licensed runtime assets
+needed for offline matching. It is the macOS tester delivery path; source
+`install.sh` remains available for developers. The PKG is intentionally
+unsigned/unnotarized, so follow the Finder **Open** procedure above if
+Gatekeeper asks.
 
 ### Fresh clone versus packaged app
 
@@ -656,13 +683,13 @@ development use needs:
 - either a newly scanned and rendered local preset library, or the separately
   distributed `data/dist/factory_bundle.sqlite` fingerprint bundle.
 
-The shortest non-technical path is `install.sh` on macOS or `install.ps1` on
-Windows. Each gets public dependencies from PyPI and Hugging Face, downloads
-the four private artifacts through the authenticated relay, and creates the
-native launcher/shortcuts. Cloning the repository without running the installer
-remains the developer path and requires rebuilding or separately supplying all
-artifacts above. The factory bundle and trained models are never public Release
-assets or source-controlled files.
+The shortest non-technical path is the macOS PKG above or `install.ps1` on
+Windows. The PKG already contains the release's approved private artifacts;
+the Windows installer gets them through the authenticated relay. Cloning the
+repository without running the appropriate installation path remains the
+developer route and requires rebuilding or separately supplying all artifacts.
+The factory bundle and trained models are never public Release assets or
+source-controlled files.
 
 ## Installer troubleshooting
 

@@ -916,7 +916,16 @@ class LegacyMainWindow(QMainWindow):
         twice for a version the user already dismissed with "Skip".
         """
 
-        if not self.distribution_mode:
+        # A flat PKG upgrade is intentionally manual: a user installs the new
+        # package from Finder, which atomically replaces /Applications/PatchLab.app.
+        # The older source-checkout updater invokes install.sh and therefore is
+        # not valid inside the standalone bundle.
+        import os
+
+        if (
+            not self.distribution_mode
+            or os.environ.get("PATCHLAB_PACKAGED_INSTALLER") == "1"
+        ):
             return
         if not load_update_preferences(env).auto_check:
             return
