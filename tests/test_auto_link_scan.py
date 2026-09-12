@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.ui import MainWindow
 from core.privacy import PrivacyStore
+from core.storage import StoragePreferences
 
 
 def _window(
@@ -111,3 +112,23 @@ def test_dev_mode_never_auto_scans(
         status.return_value.available = True
         window.maybe_start_automatic_link_scan(env=env)
     start.assert_not_called()
+
+
+def test_distribution_render_button_uses_bounded_link_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _env = _window(tmp_path, monkeypatch)
+    window.storage_preferences = StoragePreferences(compact_mode=True)
+    with (
+        patch("app.ui.storage_status") as status,
+        patch.object(window.runner, "start") as linked_start,
+        patch.object(window.render_runner, "start") as direct_render_start,
+    ):
+        status.return_value.available = True
+        status.return_value.reason = ""
+        window.start_render()
+
+    linked_start.assert_called_once_with(
+        Path(window.privacy_choice.linked_folder), local_library=True
+    )
+    direct_render_start.assert_not_called()

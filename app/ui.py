@@ -1053,6 +1053,36 @@ class LegacyMainWindow(QMainWindow):
             )
             self.append_log(f"Render not started: {storage.reason}")
             return
+        # The distribution build's linked-folder pipeline is deliberately
+        # render -> fingerprint -> compact in small batches.  Sending this
+        # button straight to render_library() used to bypass that safeguard
+        # and retain the complete WAV library until a separate Analyze click.
+        # Reuse the incremental pipeline here so the visible Render card can
+        # never turn compact storage into a whole-library temporary cache.
+        if self.distribution_mode and self.storage_preferences.compact_mode:
+            linked_folder = self.privacy_choice.linked_folder
+            if not linked_folder or not Path(linked_folder).is_dir():
+                QMessageBox.information(
+                    self,
+                    "Link a preset folder first",
+                    "Link your Serum preset folder first. PatchLab will then "
+                    "render, learn, and remove temporary WAVs in small batches.",
+                )
+                return
+            if self.runner.running:
+                self.append_log("Compact preset processing is already running")
+                return
+            folder = Path(linked_folder)
+            self._set_workflow_activity(
+                "link", 0, 0, "Starting compact preset-library processing…"
+            )
+            self.append_log(
+                "Starting compact linked-folder processing: renders are learned "
+                "and removed in small batches."
+            )
+            self.statusBar().showMessage("Processing your presets locally…")
+            self.runner.start(folder, local_library=True)
+            return
         self._set_workflow_activity("render", 0, 0, "Starting render workers…")
         self.render_pause_button.setEnabled(True)
         self.render_cancel_button.setEnabled(True)

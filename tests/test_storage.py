@@ -158,6 +158,111 @@ def test_compact_cleanup_only_removes_learned_renders_inside_root(
     assert render_ids == {ids[1]}
 
 
+def test_compact_cleanup_reclaims_only_safe_interrupted_and_legacy_residue(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "audio"
+    database = Database(tmp_path / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Preset.fxp",
+        name="Preset",
+        synth="serum1",
+        content_hash="residue-hash",
+    )
+    render = audio / str(preset_id) / "60.wav"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"render")
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+            (preset_id, 60, str(render.resolve()), -1.0, -12.0, 5.0),
+        )
+        connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+    database.upsert_fingerprint(
+        preset_id,
+        0,
+        np.zeros(512, dtype=np.float32).tobytes(),
+        np.zeros(10, dtype=np.float32).tobytes(),
+    )
+    old_temporary = audio / "999" / ".60.123.tmp.wav"
+    old_temporary.parent.mkdir(parents=True)
+    old_temporary.write_bytes(b"interrupted")
+    os.utime(old_temporary, (1, 1))
+    recent_temporary = audio / "999" / ".60.456.tmp.wav"
+    recent_temporary.write_bytes(b"active")
+    legacy_generated = audio / "generated-legacy-preview" / "60.wav"
+    legacy_hash = audio / ("a" * 40) / "60.wav"
+    legacy_generated.parent.mkdir(parents=True)
+    legacy_hash.parent.mkdir(parents=True)
+    legacy_generated.write_bytes(b"preview")
+    legacy_hash.write_bytes(b"preview")
+    unknown_complete = audio / "999" / "60.wav"
+    unknown_complete.write_bytes(b"keep")
+
+    summary = compact_render_library(database.path, audio)
+
+    assert summary.files == 4  # tracked render, old temp, two legacy previews
+    assert not render.exists()
+    assert not old_temporary.exists()
+    assert recent_temporary.exists()
+    assert not legacy_generated.exists()
+    assert not legacy_hash.exists()
+    assert unknown_complete.read_bytes() == b"keep"
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT status FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()[0] == "embedded"
+
+
+def test_compaction_keeps_database_durable_when_wav_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "audio"
+    database = Database(tmp_path / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Preset.fxp",
+        name="Preset",
+        synth="serum1",
+        content_hash="unlink-failure-hash",
+    )
+    render = audio / str(preset_id) / "60.wav"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"render")
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+            (preset_id, 60, str(render.resolve()), -1.0, -12.0, 5.0),
+        )
+        connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+    database.upsert_fingerprint(
+        preset_id,
+        0,
+        np.zeros(512, dtype=np.float32).tobytes(),
+        np.zeros(10, dtype=np.float32).tobytes(),
+    )
+    original_unlink = Path.unlink
+
+    def fail_render_unlink(path: Path, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        if path == render:
+            raise OSError("simulated removable-drive interruption")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_render_unlink)
+    compact_render_library(database.path, audio)
+
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT status FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()[0] == "embedded"
+    assert render.exists()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    compact_render_library(database.path, audio)
+    assert not render.exists()
+
+
 def test_preview_cache_has_a_hard_lru_limit(tmp_path: Path) -> None:
     audio = tmp_path / "preview" / "audio" / "hash"
     audio.mkdir(parents=True)

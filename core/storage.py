@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -21,6 +22,10 @@ MIN_PREVIEW_CACHE_MB = 128
 MAX_PREVIEW_CACHE_MB = 4096
 SETTINGS_FILENAME = "storage-settings.json"
 MARKER_FILENAME = ".patchlab-audio-storage.json"
+PATCHLAB_RENDER_NOTES = frozenset((24, 36, 48, 60, 72, 84, 96))
+_RENDER_TEMPORARY_NAME = re.compile(r"^\.(24|36|48|60|72|84|96)\.\d+\.tmp\.wav$")
+_HASH_CACHE_DIRECTORY = re.compile(r"^[0-9a-f]{40}$")
+_STALE_TEMPORARY_AGE_SECONDS = 60 * 60
 LogCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, int | str]], None]
 
@@ -358,15 +363,11 @@ def compact_render_library(
             continue
         paths_by_preset.setdefault(preset_id, []).append(path)
     preset_ids = sorted(set(paths_by_preset).difference(unsafe_presets))
-    removed_files = 0
-    removed_bytes = 0
-    for preset_id in preset_ids:
-        for path in paths_by_preset[preset_id]:
-            if path.is_file():
-                size = path.stat().st_size
-                path.unlink()
-                removed_files += 1
-                removed_bytes += size
+    # First make the durable database state authoritative.  Every selected
+    # preset already has its mean fingerprint, so a crash after this commit
+    # can at worst leave regenerable WAVs behind; it can never leave database
+    # rows that falsely claim deleted WAVs still exist and therefore block a
+    # future render resume.
     if preset_ids:
         placeholders = ",".join("?" for _ in preset_ids)
         connection.execute(
@@ -378,7 +379,46 @@ def compact_render_library(
             tuple(preset_ids),
         )
     connection.commit()
+    durable_preset_ids = {
+        int(row[0])
+        for row in connection.execute(
+            """
+            SELECT p.id FROM presets p
+            WHERE p.status='embedded'
+              AND EXISTS (
+                SELECT 1 FROM fingerprints f
+                WHERE f.preset_id=p.id AND f.midi_note=0
+              )
+            """
+        ).fetchall()
+    }
     connection.close()
+
+    removed_files = 0
+    removed_bytes = 0
+    for preset_id in preset_ids:
+        for path in paths_by_preset[preset_id]:
+            try:
+                if path.is_file():
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+            except OSError as exc:
+                log(f"Will retry cleanup of regenerable render {path.name}: {exc}")
+
+    # A worker writes to a hidden, per-process temporary name before the
+    # atomic rename.  A forced quit can strand one.  These have no database
+    # row and are never a completed render, so reclaiming only old files with
+    # this exact private name is safe.  Likewise, old releases stored preview
+    # cache folders under audio_root; current releases use preview-cache/.
+    # Restrict the migration cleanup to PatchLab's own generated/hash naming
+    # schemes and never touch numeric folders unless the preset is durable.
+    cleanup_files, cleanup_bytes = _cleanup_stale_audio_residue(
+        audio_root, durable_preset_ids=durable_preset_ids, log=log
+    )
+    removed_files += cleanup_files
+    removed_bytes += cleanup_bytes
     for preset_id in preset_ids:
         directory = audio_root / str(preset_id)
         try:
@@ -391,6 +431,88 @@ def compact_render_library(
         render_rows=sum(len(paths_by_preset[preset_id]) for preset_id in preset_ids),
         preset_count=len(preset_ids),
     )
+
+
+def _cleanup_stale_audio_residue(
+    audio_root: Path,
+    *,
+    durable_preset_ids: set[int],
+    log: LogCallback,
+) -> tuple[int, int]:
+    """Reclaim only provably regenerable residue in PatchLab's audio root.
+
+    This intentionally leaves unknown numeric folders and all non-PatchLab
+    filenames alone.  It is safe to run repeatedly after compacting a batch.
+    """
+
+    if not audio_root.is_dir():
+        return (0, 0)
+    cutoff = time.time() - _STALE_TEMPORARY_AGE_SECONDS
+    removed_files = 0
+    removed_bytes = 0
+
+    def remove_file(path: Path) -> None:
+        nonlocal removed_files, removed_bytes
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            removed_files += 1
+            removed_bytes += size
+        except OSError as exc:
+            log(f"Will retry cleanup of temporary audio {path.name}: {exc}")
+
+    for directory in audio_root.iterdir():
+        if not directory.is_dir():
+            continue
+        # Pre-compact preview layouts: generated recommendations and
+        # content-hash lookup folders.  The current preview cache is a
+        # separate bounded directory, so these legacy copies are unused.
+        if directory.name.startswith("generated-") or _HASH_CACHE_DIRECTORY.fullmatch(
+            directory.name
+        ):
+            for path in directory.rglob("*"):
+                if path.is_file():
+                    remove_file(path)
+            for child in sorted(
+                (path for path in directory.rglob("*") if path.is_dir()),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+            continue
+        if not directory.name.isdigit():
+            continue
+        preset_id = int(directory.name)
+        for path in directory.iterdir():
+            if not path.is_file():
+                continue
+            if _RENDER_TEMPORARY_NAME.fullmatch(path.name):
+                try:
+                    if path.stat().st_mtime <= cutoff:
+                        remove_file(path)
+                except OSError:
+                    continue
+            elif (
+                preset_id in durable_preset_ids
+                and path.stem.isdigit()
+                and int(path.stem) in PATCHLAB_RENDER_NOTES
+                and path.suffix == ".wav"
+            ):
+                # A file can survive a filesystem error after the database
+                # commit above.  It is no longer a required library asset.
+                remove_file(path)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return removed_files, removed_bytes
 
 
 def prune_preview_cache(
