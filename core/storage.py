@@ -339,18 +339,27 @@ def compact_render_library(
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
         """
-        SELECT r.preset_id,r.wav_path
+        SELECT r.preset_id,r.wav_path,p.status,
+          EXISTS (
+            SELECT 1 FROM fingerprints f
+            WHERE f.preset_id=r.preset_id AND f.midi_note=0
+          ) AS has_fingerprint
         FROM renders r
-        WHERE EXISTS (
-          SELECT 1 FROM fingerprints f
-          WHERE f.preset_id=r.preset_id AND f.midi_note=0
-        )
+        JOIN presets p ON p.id=r.preset_id
+        WHERE p.status='failed_silent'
+           OR EXISTS (
+             SELECT 1 FROM fingerprints f
+             WHERE f.preset_id=r.preset_id AND f.midi_note=0
+           )
         """
     ).fetchall()
     paths_by_preset: dict[int, list[Path]] = {}
+    learned_preset_ids: set[int] = set()
     unsafe_presets: set[int] = set()
     for row in rows:
         preset_id = int(row["preset_id"])
+        if bool(row["has_fingerprint"]):
+            learned_preset_ids.add(preset_id)
         path = Path(str(row["wav_path"])).expanduser().resolve()
         try:
             path.relative_to(audio_root)
@@ -363,6 +372,7 @@ def compact_render_library(
             continue
         paths_by_preset.setdefault(preset_id, []).append(path)
     preset_ids = sorted(set(paths_by_preset).difference(unsafe_presets))
+    learned_preset_ids.intersection_update(preset_ids)
     # First make the durable database state authoritative.  Every selected
     # preset already has its mean fingerprint, so a crash after this commit
     # can at worst leave regenerable WAVs behind; it can never leave database
@@ -374,12 +384,15 @@ def compact_render_library(
             f"DELETE FROM renders WHERE preset_id IN ({placeholders})",
             tuple(preset_ids),
         )
-        connection.execute(
-            f"UPDATE presets SET status='embedded',error=NULL WHERE id IN ({placeholders})",
-            tuple(preset_ids),
-        )
+        if learned_preset_ids:
+            learned_placeholders = ",".join("?" for _ in learned_preset_ids)
+            connection.execute(
+                f"UPDATE presets SET status='embedded',error=NULL "
+                f"WHERE id IN ({learned_placeholders})",
+                tuple(sorted(learned_preset_ids)),
+            )
     connection.commit()
-    durable_preset_ids = {
+    cleanupable_preset_ids = {
         int(row[0])
         for row in connection.execute(
             """
@@ -392,6 +405,12 @@ def compact_render_library(
             """
         ).fetchall()
     }
+    cleanupable_preset_ids.update(
+        int(row[0])
+        for row in connection.execute(
+            "SELECT id FROM presets WHERE status='failed_silent'"
+        ).fetchall()
+    )
     connection.close()
 
     removed_files = 0
@@ -415,7 +434,7 @@ def compact_render_library(
     # Restrict the migration cleanup to PatchLab's own generated/hash naming
     # schemes and never touch numeric folders unless the preset is durable.
     cleanup_files, cleanup_bytes = _cleanup_stale_audio_residue(
-        audio_root, durable_preset_ids=durable_preset_ids, log=log
+        audio_root, durable_preset_ids=cleanupable_preset_ids, log=log
     )
     removed_files += cleanup_files
     removed_bytes += cleanup_bytes

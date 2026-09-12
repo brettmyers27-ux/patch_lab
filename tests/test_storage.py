@@ -215,6 +215,43 @@ def test_compact_cleanup_reclaims_only_safe_interrupted_and_legacy_residue(
         ).fetchone()[0] == "embedded"
 
 
+def test_compact_cleanup_discards_failed_silent_wavs_but_keeps_the_failure(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "audio"
+    database = Database(tmp_path / "library.db")
+    preset_id, _ = database.insert_preset(
+        path=tmp_path / "Silent.fxp",
+        name="Silent",
+        synth="serum1",
+        content_hash="silent-hash",
+    )
+    render = audio / str(preset_id) / "60.wav"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"silent-render")
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+            (preset_id, 60, str(render.resolve()), -90.0, -90.0, 5.0),
+        )
+        connection.execute(
+            "UPDATE presets SET status='failed_silent',error='Silent rendered MIDI notes: 60' "
+            "WHERE id=?",
+            (preset_id,),
+        )
+
+    summary = compact_render_library(database.path, audio)
+
+    assert summary.files == 1
+    assert not render.exists()
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        row = connection.execute(
+            "SELECT status,error FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()
+    assert tuple(row) == ("failed_silent", "Silent rendered MIDI notes: 60")
+
+
 def test_compaction_keeps_database_durable_when_wav_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

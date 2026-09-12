@@ -476,7 +476,7 @@ def process_linked_folder(
     renderable = [
         record.id
         for record in database.renderable_presets()
-        if record.id in id_to_path
+        if record.id in id_to_path and record.status != "failed_silent"
     ]
     with database.connect() as connection:
         already_fingerprinted = {

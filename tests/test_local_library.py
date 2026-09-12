@@ -217,6 +217,45 @@ class LocalRelayResilienceTest(unittest.TestCase):
                     25,
                 )
 
+    def test_failed_silent_preset_is_not_rendered_again_on_a_later_link_scan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-silent-no-retry-") as temporary:
+            root = Path(temporary)
+            linked = root / "linked"
+            linked.mkdir()
+            path = linked / "Silent.fxp"
+            path.write_bytes(b"CcnK-silent")
+            database = Database(root / "library.db")
+            preset_id, _ = database.insert_preset(
+                path=path,
+                name=path.stem,
+                synth="serum1",
+                content_hash=sha1_file(path),
+            )
+            database.replace_params(
+                preset_id,
+                [ParameterValue(0, "Master", 0.5, "50%")],
+                "test",
+            )
+            database.mark_failed(preset_id, "failed_silent", "silent at every note")
+
+            with (
+                patch("core.local_library.FactoryBundle") as factory_bundle,
+                patch("core.local_library.render_library") as render_library,
+            ):
+                factory_bundle.return_value.known_hashes.return_value = set()
+                process_linked_folder(
+                    linked,
+                    db_path=database.path,
+                    audio_root=root / "audio",
+                    state_dir=root / "states",
+                    relay=None,
+                    render_processes=1,
+                    compact_mode=True,
+                    log=lambda _message: None,
+                )
+
+            render_library.assert_not_called()
+
 
 class FakeEmbedder:
     def __init__(self, _env) -> None:  # type: ignore[no-untyped-def]
