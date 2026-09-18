@@ -138,6 +138,11 @@ def freeze_app(*, work_root: Path, allow_dirty: bool) -> Path:
 
     _require_tool("xcrun")
     environment = dict(os.environ)
+    # PyInstaller otherwise cleans its shared per-user cache before a build.
+    # A stale cache created by another macOS sandboxed process can be
+    # undeletable, aborting a perfectly valid release build before it reaches
+    # PatchLab. Keep every cache file in this disposable build directory.
+    environment["PYINSTALLER_CONFIG_DIR"] = str(work_root / "pyinstaller-cache")
     if allow_dirty:
         environment["PATCHLAB_ALLOW_DIRTY_BUILD"] = "1"
     _run(
