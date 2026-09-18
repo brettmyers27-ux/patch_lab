@@ -39,7 +39,6 @@ from app.license_dialog import LicenseAgreementDialog  # noqa: E402
 from app.ui import MainWindow  # noqa: E402
 from core.access_gate import AccessManager  # noqa: E402
 from core.audio_lifecycle import cleanup_stale_match_scratch  # noqa: E402
-from core.factory_verify import verify_local_factory_install  # noqa: E402
 from core.launch_gates import run_distribution_gates  # noqa: E402
 from core.model_assets import ModelAssetsError, validate_model_assets  # noqa: E402
 from core.platform_env import ENV  # noqa: E402,F401
@@ -111,9 +110,6 @@ def main() -> int:
         if not allowed:
             return 0
         cleanup_stale_match_scratch()
-        factory_verification = verify_local_factory_install(
-            mapping_path=ENV.app_data_dir / "factory-paths.json"
-        )
         try:
             validate_model_assets()
         except ModelAssetsError as exc:
@@ -129,8 +125,12 @@ def main() -> int:
             ),
         )
     window.show()
+    # Local factory hashing can inspect thousands of files. It improves
+    # audition/export availability but is not needed for factory retrieval or
+    # Serum 2 patch generation, so never hold the first interactive window.
+    QTimer.singleShot(500, window.maybe_verify_factory_install)
     QTimer.singleShot(0, window.maybe_check_for_update)
-    QTimer.singleShot(0, window.maybe_start_automatic_link_scan)
+    QTimer.singleShot(15_000, window.maybe_start_automatic_link_scan)
     return application.exec()
 
 

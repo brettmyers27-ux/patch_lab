@@ -158,6 +158,7 @@ class ScanProcessRunner(_ProcessRunnerBase):
         *,
         local_library: bool = False,
         fingerprint_only: bool = False,
+        workers: int = 4,
     ) -> None:
         if self.process.state() != QProcess.ProcessState.NotRunning:
             raise RuntimeError("Scan worker is already running")
@@ -173,12 +174,14 @@ class ScanProcessRunner(_ProcessRunnerBase):
             self._start_worker("fingerprint-local", [])
         elif local_library:
             assert root is not None
+            if workers < 1:
+                raise ValueError("workers must be positive")
             self._start_worker(
                 "local-library",
                 [
                     str(root),
                     "--workers",
-                    "4",
+                    str(workers),
                 ],
             )
         else:
@@ -402,6 +405,104 @@ class UpdateCheckProcessRunner(_ProcessRunnerBase):
             self.completed.emit(self._result)
         else:
             self.failed.emit(f"Update check exited with code {exit_code}")
+
+
+class FactoryVerificationProcessRunner(_ProcessRunnerBase):
+    """Hash installed factory files without delaying the first usable window."""
+
+    log = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._init_worker_process()
+        self._result: dict[str, object] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._buffer = ""
+        self._result = None
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
+        self._start_worker("factory-verify", [])
+
+    def _read_output(self) -> None:
+        self._buffer += bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        while (line := self._pop_line()) is not None:
+            if self._handle_worker_line(line):
+                continue
+            if line.startswith("FACTORY_VERIFY_RESULT="):
+                self._result = json.loads(line.split("=", 1)[1])
+            elif line:
+                self.log.emit(line)
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        if self._finished_before_ready(exit_code):
+            return
+        if exit_code == 0 and self._result is not None:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(f"Factory preset check exited with code {exit_code}")
+
+
+class BugReportProcessRunner(_ProcessRunnerBase):
+    """Upload a user-approved diagnostics bundle without blocking PatchLab."""
+
+    log = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._init_worker_process()
+        self._result: dict[str, object] | None = None
+        self._error: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
+    def start(self, request_path: Path) -> None:
+        if self.running:
+            raise RuntimeError("A bug report is already being sent")
+        self._buffer = ""
+        self._result = None
+        self._error = None
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
+        self._start_worker("bug-report", ["--request", str(request_path)])
+
+    def _read_output(self) -> None:
+        self._buffer += bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        while (line := self._pop_line()) is not None:
+            if self._handle_worker_line(line):
+                continue
+            if line.startswith("BUG_REPORT_RESULT="):
+                self._result = json.loads(line.split("=", 1)[1])
+            elif line.startswith("BUG_REPORT_ERROR="):
+                self._error = line.split("=", 1)[1]
+            elif line:
+                self.log.emit(line)
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        if self._finished_before_ready(exit_code):
+            return
+        if exit_code == 0 and self._result is not None:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(
+                self._error or f"Bug report worker exited with code {exit_code}"
+            )
 
 
 class AnalyzeProcessRunner(_ProcessRunnerBase):

@@ -12,7 +12,9 @@ from PySide6.QtWidgets import QApplication
 import app.workers as workers
 from app.workers import (
     AnalyzeProcessRunner,
+    BugReportProcessRunner,
     ExportProcessRunner,
+    FactoryVerificationProcessRunner,
     MatchProcessRunner,
     PreviewProcessRunner,
     RenderProcessRunner,
@@ -64,6 +66,8 @@ def test_every_qprocess_runner_uses_shared_dispatch() -> None:
             {"local_library": True},
         ),
         (RenderProcessRunner(), "render-library", (), {}),
+        (FactoryVerificationProcessRunner(), "factory-verify", (), {}),
+        (BugReportProcessRunner(), "bug-report", (Path("/tmp/report.json"),), {}),
         (AnalyzeProcessRunner(), "analyze", (False,), {}),
         (StorageProcessRunner(), "storage", (["compact"],), {}),
         (

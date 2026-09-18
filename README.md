@@ -506,12 +506,12 @@ settings labels. It is 75.39 MiB. It contains no rendered audio, original
 preset file, or developer-owned preset. One classified factory preset was
 excluded because its source row was silent and had no complete fingerprint.
 
-On every distribution launch, Patch Lab hashes the locally installed factory
-preset folders and builds a hash-to-path map. This check takes under a second
-on the accepted macOS catalog and never renders or embeds. A missing or
-different local factory file only disables that preset's audition/export; the
-shipped fingerprint remains searchable. With no Serum factory folders at all,
-the app still launches and clearly reports that local loading is unavailable.
+After the distribution window is already usable, Patch Lab hashes the locally
+installed factory preset folders in a separate background process and builds a
+hash-to-path map. This work never delays Match. A missing or different local
+factory file only disables that preset's audition/export; the shipped
+fingerprint remains searchable. With no Serum factory folders at all, the app
+still launches and can generate a new Serum 2 patch from an uploaded sound.
 
 The first distribution launch keeps three distinct decisions in order:
 
@@ -839,7 +839,11 @@ The four cards always describe the running machine's real state:
    data.
 4. **Match a Sound** validates the checkpoint, tokenizer cache, and factory
    fingerprint database before claiming readiness, then prompts for an audio
-   file and reports live matching progress.
+   file and reports live matching progress. It works immediately with no
+   linked folder, render job, or personal analysis: included factory presets
+   supply the closest matches, and the included synthesis assets create a new
+   recommended patch. Linking personal presets only adds those presets to the
+   closest-match list.
 
 Full parameter-model retraining is not incremental in this release. The
 installed app therefore does not run a local-only retrain that would discard
@@ -854,10 +858,20 @@ Launch the Milestone 1 desktop shell from the project root with:
 python app/main.py
 ```
 
-The folder scan runs in an isolated process, reports progress and activity in
-the window, and commits each preset independently. Distribution builds warn
-before starting local render/index work that a large library can take 1–4
-hours, use several gigabytes, and slow matching while four workers are active.
+The folder scan runs in an isolated process and commits each preset
+independently. A daily automatic linked-folder maintenance check starts only
+after the window is interactive, uses one worker, suppresses per-preset UI
+chatter, and never marks the app busy. Manual library jobs retain their normal
+progress display and use four workers. Distribution builds warn before starting
+local render/index work that a large library can take 1–4 hours and use several
+gigabytes.
+
+**Report a Problem** lives in Help. A description is required and asks for the
+expected result, actual result, and repeatable steps. Sending happens in the
+background and creates one private support ticket with exactly `comments.txt`
+and `logs.txt`; it never sends audio or preset files. If the support service is
+temporarily unavailable, the text-only report stays locally queued so it can be
+sent again later.
 The persisted gate can be rechecked without loading Serum:
 
 ```bash

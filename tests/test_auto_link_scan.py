@@ -45,6 +45,76 @@ def test_starts_a_quiet_scan_when_a_folder_is_already_linked(
     args, kwargs = start.call_args
     assert args[0] == Path(window.privacy_choice.linked_folder)
     assert kwargs.get("local_library") is True
+    assert kwargs.get("workers") == 1
+    assert window._automatic_link_scan_active is True
+    assert "link" not in window._workflow_activities
+    assert "Checking for new presets" not in window.statusBar().currentMessage()
+
+
+def test_automatic_scan_does_not_repaint_progress_or_flood_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, env = _window(tmp_path, monkeypatch)
+    with (
+        patch("app.ui.storage_status") as status,
+        patch.object(window.runner, "start"),
+        patch.object(window, "append_log") as append_log,
+    ):
+        status.return_value.available = True
+        window.maybe_start_automatic_link_scan(env=env)
+        window._local_library_progress_changed(
+            {"stage": "render", "current": 1200, "total": 5000}
+        )
+        window._local_library_log("processed preset 1 of 5000")
+
+    assert "render" not in window._workflow_activities
+    assert window._automatic_log_lines_suppressed == 1
+    # Only the single high-level startup line is allowed through here.
+    assert append_log.call_count == 1
+
+
+def test_unlinked_user_can_start_custom_synthesis_with_factory_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No personal library must never force the retrieval-only fallback."""
+
+    window, _env = _window(tmp_path, monkeypatch, linked=False)
+    window.privacy_choice = window.privacy_store.save(False)
+    window._match_audio_path = tmp_path / "one-shot.wav"
+    window._model_asset_error = None
+    window._workflow_match_error = ""
+    with (
+        patch("app.ui.synthesis_readiness") as readiness,
+        patch.object(window.match_runner, "start") as start,
+    ):
+        readiness.return_value = SimpleNamespace(available=True, reason="")
+        window.start_match()
+
+    start.assert_called_once()
+    _args, kwargs = start.call_args
+    assert kwargs["factory_only"] is False
+    assert kwargs["local_db"] is None
+    assert kwargs["local_audio_root"] is None
+
+
+def test_starting_match_pauses_an_automatic_check_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _env = _window(tmp_path, monkeypatch, linked=False)
+    window._match_audio_path = tmp_path / "one-shot.wav"
+    window._model_asset_error = None
+    window._workflow_match_error = ""
+    window._automatic_link_scan_active = True
+    with (
+        patch("app.ui.synthesis_readiness") as readiness,
+        patch.object(window.match_runner, "start"),
+        patch.object(window.runner, "cancel") as cancel,
+        patch.object(type(window.runner), "running", new=property(lambda self: True)),
+    ):
+        readiness.return_value = SimpleNamespace(available=True, reason="")
+        window.start_match()
+
+    cancel.assert_called_once()
 
 
 def test_does_not_scan_twice_in_the_same_day(

@@ -49,3 +49,34 @@ def test_expired_stored_token_reauthenticates_once(monkeypatch) -> None:
     assert requests[1].full_url.endswith("/auth")
     assert "Authorization" not in requests[1].headers
     assert requests[2].headers["Authorization"] == "Bearer fresh-token"
+
+
+def test_bug_report_posts_only_text_fields_to_private_endpoint(monkeypatch) -> None:
+    requests: list[urllib.request.Request] = []
+
+    def urlopen(request: urllib.request.Request, *, timeout: float):
+        del timeout
+        requests.append(request)
+        return Response({"ticket_id": "d" * 32})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    client = RelayClient(
+        "https://relay.invalid", "unused-passcode", token="already-authorized"
+    )
+
+    receipt = client.submit_bug_report(
+        ticket_id="d" * 32,
+        comments="Run Match stayed disabled after choosing a sound.",
+        logs="PatchLab diagnostic fixture",
+    )
+
+    assert receipt == {"ticket_id": "d" * 32}
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.full_url == "https://relay.invalid/bug-reports"
+    assert request.headers["Authorization"] == "Bearer already-authorized"
+    body = request.data.decode("utf-8")
+    assert 'name="comments"' in body
+    assert 'name="logs"' in body
+    assert "preset" not in body.casefold()
+    assert "audio" not in body.casefold()

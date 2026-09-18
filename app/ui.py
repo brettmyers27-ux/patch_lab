@@ -67,7 +67,9 @@ from app.widgets import (
 )
 from app.workers import (
     AnalyzeProcessRunner,
+    BugReportProcessRunner,
     ExportProcessRunner,
+    FactoryVerificationProcessRunner,
     MatchProcessRunner,
     PreviewProcessRunner,
     RenderProcessRunner,
@@ -574,7 +576,10 @@ class LegacyMainWindow(QMainWindow):
 
     def _apply_factory_status(self) -> None:
         verification = self.factory_verification
-        if verification is None or not verification.bundle_available:
+        if verification is None:
+            text = "Checking installed factory presets in the background…"
+            color = "#64748B"
+        elif not verification.bundle_available:
             text = (
                 "Factory fingerprint bundle is unavailable. Reinstall PatchLab to restore "
                 "instant factory matching."
@@ -750,6 +755,11 @@ class LegacyMainWindow(QMainWindow):
             )
 
     def _local_library_progress_changed(self, detail: dict) -> None:
+        # Automatic maintenance must never repaint the workflow/status area or
+        # make the freshly opened application look occupied. Manual jobs keep
+        # their detailed progress exactly as before.
+        if getattr(self, "_automatic_link_scan_active", False):
+            return
         stage = str(detail.get("stage", "scan"))
         current = int(detail.get("current", 0))
         total = int(detail.get("total", 0))
@@ -899,13 +909,68 @@ class LegacyMainWindow(QMainWindow):
             return
         if self.runner.running or "link" in self._workflow_activities:
             return
+        # Never add rendering load while the user is already matching. A later
+        # launch will safely resume the incremental check instead.
+        if getattr(self, "match_runner", None) is not None and self.match_runner.running:
+            return
         if not auto_scan_due(env):
             return
         record_auto_scan(env)
-        self.append_log(f"Automatic daily check for new presets in {folder}")
-        self._set_workflow_activity("link", 0, 0, "Checking for new presets…")
-        self.statusBar().showMessage("Checking for new presets…")
-        self.runner.start(folder, local_library=True)
+        self._automatic_link_scan_active = True
+        self._automatic_log_lines_suppressed = 0
+        self.append_log("Background preset check started; matching remains ready.")
+        # One worker deliberately leaves processor and disk headroom for an
+        # immediate Match request. Manual library processing still uses four.
+        self.runner.start(folder, local_library=True, workers=1)
+
+    def maybe_verify_factory_install(self) -> None:
+        """Build local factory-path mapping after the window is interactive."""
+
+        if not self.distribution_mode or self.factory_verify_runner.running:
+            return
+        self.factory_verify_runner.start()
+
+    def _factory_verify_completed(self, payload: dict) -> None:
+        try:
+            self.factory_verification = FactoryVerification(
+                bundle_available=bool(payload["bundle_available"]),
+                factory_directories_found=int(payload["factory_directories_found"]),
+                local_files_found=int(payload["local_files_found"]),
+                known_bundle_hashes=int(payload["known_bundle_hashes"]),
+                matched_hashes=int(payload["matched_hashes"]),
+                missing_hashes=tuple(str(value) for value in payload["missing_hashes"]),
+                unknown_local_hashes=tuple(
+                    str(value) for value in payload["unknown_local_hashes"]
+                ),
+                local_paths_by_hash={
+                    str(key): str(value)
+                    for key, value in dict(payload["local_paths_by_hash"]).items()
+                },
+                elapsed_s=float(payload["elapsed_s"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            self.append_log(f"Factory preset check returned invalid data: {exc}")
+            return
+        self._apply_factory_status()
+        self.append_log("Installed factory preset check finished in the background.")
+
+    def _factory_verify_failed(self, error: str) -> None:
+        # The shipped fingerprint library is independent of local audition and
+        # remains usable even if a local path check has a temporary problem.
+        self.append_log(f"Installed factory preset check deferred: {error}")
+        self.factory_status.setText(
+            "Factory fingerprints remain ready. Local factory audition will retry "
+            "on the next launch."
+        )
+
+    def _local_library_log(self, message: str) -> None:
+        if not getattr(self, "_automatic_link_scan_active", False):
+            self.append_log(message)
+            return
+        if "FAILED" in message.upper() or "ERROR" in message.upper():
+            self.append_log(f"Background preset check: {message}")
+        else:
+            self._automatic_log_lines_suppressed += 1
 
     def maybe_check_for_update(self, *, env: PlatformEnv = ENV) -> None:
         """Quietly ask GitHub whether a newer PatchLab is published.
@@ -1001,6 +1066,8 @@ class LegacyMainWindow(QMainWindow):
         )
 
     def _scan_completed(self, summary: dict) -> None:
+        automatic = bool(getattr(self, "_automatic_link_scan_active", False))
+        self._automatic_link_scan_active = False
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
@@ -1029,18 +1096,28 @@ class LegacyMainWindow(QMainWindow):
                 f"params dumped {summary.get('params_dumped', 0)}, failed {summary.get('failed', 0)}, "
                 f"Serum 2 unavailable {summary.get('serum2_disabled', 0)}"
             )
-        self.append_log(text)
-        self.statusBar().showMessage(text)
+        if automatic:
+            self.append_log(
+                "Background preset check finished; PatchLab stayed ready for matching."
+            )
+        else:
+            self.append_log(text)
+            self.statusBar().showMessage(text)
         if not self.distribution_mode:
             self.render_button.setEnabled(True)
         self._refresh_workflow_cards()
 
     def _scan_failed(self, error: str) -> None:
+        automatic = bool(getattr(self, "_automatic_link_scan_active", False))
+        self._automatic_link_scan_active = False
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
-        self.append_log(f"Scan failed: {error}")
-        self.statusBar().showMessage(error)
+        self.append_log(
+            f"{'Background preset check was deferred' if automatic else 'Scan failed'}: {error}"
+        )
+        if not automatic:
+            self.statusBar().showMessage(error)
         self._refresh_workflow_cards()
 
     def start_render(self) -> None:
@@ -1374,6 +1451,17 @@ class LegacyMainWindow(QMainWindow):
             return
         if self._match_audio_path is None:
             return
+        # Matching is always the foreground request. An automatic maintenance
+        # scan is resumable, so stop it immediately rather than making a new
+        # patch compete with a Serum host, CPU, or disk work from launch.
+        if (
+            getattr(self, "_automatic_link_scan_active", False)
+            and self.runner.running
+        ):
+            self.append_log(
+                "Pausing background preset check so Match can start immediately."
+            )
+            self.runner.cancel()
         self.match_start_button.setEnabled(False)
         self.match_button.setEnabled(False)
         self.match_cancel_button.setEnabled(True)
@@ -2240,7 +2328,7 @@ class MainWindow(LegacyMainWindow):
         self.local_paths = default_local_paths()
         self._ensure_patchlab_export_folders()
         self.runner = ScanProcessRunner(self)
-        self.runner.log.connect(self.append_log)
+        self.runner.log.connect(self._local_library_log)
         self.runner.progress.connect(self._progress)
         self.runner.stage_progress.connect(self._local_library_progress_changed)
         self.runner.completed.connect(self._scan_completed)
@@ -2254,6 +2342,14 @@ class MainWindow(LegacyMainWindow):
         self.update_check_runner.log.connect(self.append_log)
         self.update_check_runner.completed.connect(self._update_check_completed)
         self.update_check_runner.failed.connect(self.append_log)
+        self.factory_verify_runner = FactoryVerificationProcessRunner(self)
+        self.factory_verify_runner.log.connect(self.append_log)
+        self.factory_verify_runner.completed.connect(self._factory_verify_completed)
+        self.factory_verify_runner.failed.connect(self._factory_verify_failed)
+        self.bug_report_runner = BugReportProcessRunner(self)
+        self.bug_report_runner.log.connect(self.append_log)
+        self.bug_report_runner.completed.connect(self._bug_report_completed)
+        self.bug_report_runner.failed.connect(self._bug_report_failed)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -2304,6 +2400,8 @@ class MainWindow(LegacyMainWindow):
         self._batch_state: dict | None = None
         self._workflow_activities: dict[str, WorkflowActivity] = {}
         self._workflow_last_match_complete = False
+        self._automatic_link_scan_active = False
+        self._automatic_log_lines_suppressed = 0
         self._match_session = tempfile.TemporaryDirectory(
             prefix="patchlab-match-app-"
         )
@@ -4176,14 +4274,130 @@ class MainWindow(LegacyMainWindow):
 
     def open_help(self) -> None:
         build = current_build_info()
-        QMessageBox.about(
-            self,
-            "About PatchLab",
-            "PatchLab\n\n"
-            "Select a library, render it, analyze it once, then match any sound. "
-            "The complete workflow and troubleshooting guide are in README.md.\n\n"
+        dialog = QDialog(self)
+        dialog.setWindowTitle("PatchLab Help")
+        dialog.setMinimumWidth(470)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel("PatchLab Help")
+        heading.setStyleSheet("font-size: 20px; font-weight: 750;")
+        body = QLabel(
+            "Match a sound immediately with PatchLab’s included factory library and "
+            "trained synthesis model. Linking your own presets is optional and only "
+            "adds them to your personal closest-match results.\n\n"
             f"Build: {build.short_commit} · {build.built_at_utc}\n\n"
-            f"{Path(__file__).resolve().parents[1] / 'README.md'}",
+            "If something goes wrong, send a report with the detail of what you "
+            "were doing."
+        )
+        body.setWordWrap(True)
+        report = QPushButton("Report a Problem…")
+        report.setObjectName("compactActionButton")
+        report.clicked.connect(lambda: (dialog.accept(), self.open_bug_report()))
+        close = QPushButton("Done")
+        close.setObjectName("primaryButton")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        layout.addWidget(report)
+        layout.addWidget(close)
+        dialog.exec()
+
+    def _diagnostic_log_text(self) -> str:
+        build = current_build_info()
+        visible_log = self.log_pane.toPlainText() if hasattr(self, "log_pane") else ""
+        return (
+            "PatchLab diagnostic report\n"
+            f"Build: {build.short_commit}\n"
+            f"Built: {build.built_at_utc}\n"
+            f"Platform: {ENV.branch}\n"
+            f"Compute: {ENV.compute_backend}\n"
+            "\n--- Application log ---\n"
+            + visible_log
+            + "\n"
+        )
+
+    def open_bug_report(self) -> None:
+        """Collect a required description and send two text files privately."""
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Report a Problem")
+        dialog.setMinimumSize(570, 390)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel("Help us reproduce the problem")
+        heading.setStyleSheet("font-size: 20px; font-weight: 750;")
+        detail = QLabel(
+            "Please describe exactly what happened, what you expected, what sound "
+            "or action led to it, and any steps that reliably reproduce it. The more "
+            "detail you provide, the faster we can fix it. A description is required.\n\n"
+            "Sending creates one private support folder containing exactly two text "
+            "files: your comments and PatchLab’s diagnostic log. It never sends your "
+            "audio or preset files. The diagnostic log can include app status and "
+            "local file paths."
+        )
+        detail.setWordWrap(True)
+        comments = QPlainTextEdit()
+        comments.setPlaceholderText(
+            "What were you doing? What did you expect? What happened instead? "
+            "Please include enough detail to reproduce the problem."
+        )
+        comments.setMinimumHeight(150)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        send = QPushButton("Send Report")
+        send.setObjectName("primaryButton")
+        send.setEnabled(False)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(send)
+        layout.addWidget(heading)
+        layout.addWidget(detail)
+        layout.addWidget(comments)
+        layout.addLayout(buttons)
+
+        comments.textChanged.connect(lambda: send.setEnabled(bool(comments.toPlainText().strip())))
+        cancel.clicked.connect(dialog.reject)
+
+        def submit() -> None:
+            if self.bug_report_runner.running:
+                QMessageBox.information(
+                    dialog, "Report already sending", "Wait for the current report to finish."
+                )
+                return
+            try:
+                from core.bug_report import create_request
+
+                request_path = create_request(
+                    comments=comments.toPlainText(), logs=self._diagnostic_log_text()
+                )
+                self.bug_report_runner.start(request_path)
+            except Exception as exc:
+                QMessageBox.warning(dialog, "Report was not sent", str(exc))
+                return
+            self.append_log("Sending user-approved bug report to private support…")
+            self.statusBar().showMessage("Sending bug report…")
+            dialog.accept()
+
+        send.clicked.connect(submit)
+        dialog.exec()
+
+    def _bug_report_completed(self, result: dict) -> None:
+        ticket_id = str(result.get("ticket_id", ""))
+        self.append_log(f"Bug report sent successfully: {ticket_id}")
+        self.statusBar().showMessage("Bug report sent. Thank you.")
+        QMessageBox.information(
+            self,
+            "Bug report sent",
+            "Thank you. Your comments and diagnostic log were sent privately to "
+            "the PatchLab support folder.",
+        )
+
+    def _bug_report_failed(self, error: str) -> None:
+        self.append_log(f"Bug report was not sent: {error}")
+        self.statusBar().showMessage("Bug report was not sent; you can retry.")
+        QMessageBox.warning(
+            self,
+            "Bug report was not sent",
+            "PatchLab kept the report locally so you can retry after reconnecting.\n\n"
+            + error,
         )
 
     def append_log(self, message: str) -> None:

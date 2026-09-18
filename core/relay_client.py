@@ -20,7 +20,7 @@ class UploadReceipt:
 
 
 class RelayClient:
-    """Only exposes auth, hash existence, and preset upload operations."""
+    """Private relay operations available to an authenticated PatchLab user."""
 
     def __init__(
         self,
@@ -149,3 +149,52 @@ class RelayClient:
             stored=bool(result.get("stored", True)),
             relative_path=relative_path,
         )
+
+    def submit_bug_report(
+        self,
+        *,
+        ticket_id: str,
+        comments: str,
+        logs: str,
+    ) -> dict[str, str]:
+        """Send a user-approved text-only diagnostics report to private support."""
+
+        if not ticket_id or not comments.strip():
+            raise ValueError("A bug report needs an identifier and a description")
+        boundary = "PatchLabBugReport" + secrets.token_hex(16)
+        parts: list[bytes] = []
+
+        def field(name: str, value: str) -> None:
+            parts.extend(
+                [
+                    f"--{boundary}\r\n".encode(),
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                    value.encode("utf-8"),
+                    b"\r\n",
+                ]
+            )
+
+        field("ticket_id", ticket_id)
+        field("comments", comments)
+        field("logs", logs)
+        parts.append(f"--{boundary}--\r\n".encode())
+        body = b"".join(parts)
+        for attempt in range(2):
+            request = urllib.request.Request(
+                self.base_url + "/bug-reports",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self.token()}",
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 401 or not self.password or attempt:
+                    raise
+                self._token = None
+        return {"ticket_id": str(result["ticket_id"])}
