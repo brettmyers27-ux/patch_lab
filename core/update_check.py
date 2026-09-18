@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, Iterable
 
 from core.platform_env import ENV, PlatformEnv
 
@@ -24,12 +25,71 @@ DEFAULT_VERSION_URL = (
     "app/__version__.py"
 )
 _VERSION_PATTERN = re.compile(r'__version__\s*=\s*"([0-9]+(?:\.[0-9]+)*)"')
+_MACOS_PACKAGE_PATTERN = re.compile(
+    r"^PatchLab-(?P<version>[0-9]+(?:\.[0-9]+){2})-macOS\.pkg$"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class UpdatePreferences:
     auto_check: bool = True
     skipped_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MacOSPackageRelease:
+    """One signed-by-checksum private macOS installer advertised by the relay."""
+
+    name: str
+    version: str
+    size: int
+    sha256: str
+
+
+def macos_package_releases(rows: Iterable[dict[str, Any]]) -> list[MacOSPackageRelease]:
+    """Return only well-formed private Mac installer records.
+
+    The runtime-artifact catalog is also used by first installation.  An
+    explicit ``kind`` prevents a package from ever being mistaken for a model
+    download, while the filename/version checks prevent a malformed catalog
+    entry from becoming an update prompt.
+    """
+
+    releases: list[MacOSPackageRelease] = []
+    for row in rows:
+        if row.get("kind") != "macos-package":
+            continue
+        name = str(row.get("name") or "")
+        match = _MACOS_PACKAGE_PATTERN.fullmatch(name)
+        version = str(row.get("version") or "")
+        sha256 = str(row.get("sha256") or "")
+        try:
+            size = int(row.get("size"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            match is None
+            or match.group("version") != version
+            or size <= 0
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            continue
+        releases.append(MacOSPackageRelease(name, version, size, sha256))
+    return sorted(releases, key=lambda release: parse_version(release.version))
+
+
+def newest_macos_package(
+    rows: Iterable[dict[str, Any]], current_version: str
+) -> MacOSPackageRelease | None:
+    """Select the newest private package that is genuinely newer than this app."""
+
+    available = [
+        release
+        for release in macos_package_releases(rows)
+        if update_available(current_version, release.version)
+    ]
+    return available[-1] if available else None
 
 
 def settings_path(env: PlatformEnv = ENV) -> Path:

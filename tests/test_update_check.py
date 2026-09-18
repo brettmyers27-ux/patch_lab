@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.update_check import (
+    macos_package_releases,
+    newest_macos_package,
     UpdatePreferences,
     extract_version,
     fetch_remote_version,
@@ -44,6 +46,21 @@ def test_update_available_compares_correctly() -> None:
 
 def test_update_available_is_false_when_remote_is_unknown() -> None:
     assert update_available("1.4.5", None) is False
+
+
+def test_private_macos_release_requires_explicit_kind_and_valid_metadata() -> None:
+    rows = [
+        {"name": "PatchLab-1.5.3-macOS.pkg", "version": "1.5.3", "size": 9,
+         "sha256": "a" * 64, "kind": "macos-package"},
+        {"name": "PatchLab-9.9.9-macOS.pkg", "version": "9.9.9", "size": 9,
+         "sha256": "b" * 64, "kind": "runtime"},
+        {"name": "PatchLab-1.5.4-macOS.pkg", "version": "1.5.3", "size": 9,
+         "sha256": "c" * 64, "kind": "macos-package"},
+    ]
+    releases = macos_package_releases(rows)
+    assert [release.version for release in releases] == ["1.5.3"]
+    assert newest_macos_package(rows, "1.5.2").version == "1.5.3"
+    assert newest_macos_package(rows, "1.5.3") is None
 
 
 def test_fetch_remote_version_never_raises_on_network_failure() -> None:

@@ -30,6 +30,8 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "render-library": WorkerEntryPoint("scripts.render_library"),
     "fingerprint-local": WorkerEntryPoint("scripts.fingerprint_pending_presets"),
     "check-update": WorkerEntryPoint("scripts.check_for_update"),
+    "download-update": WorkerEntryPoint("scripts.download_update"),
+    "open-downloaded-update": WorkerEntryPoint("scripts.open_downloaded_update"),
     "bug-report": WorkerEntryPoint("scripts.submit_bug_report"),
     "analyze": WorkerEntryPoint("scripts.run_milestone3"),
     "match": WorkerEntryPoint("scripts.match_sound"),

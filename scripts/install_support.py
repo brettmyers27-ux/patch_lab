@@ -359,7 +359,8 @@ def _artifact_manifest(relay_url: str) -> tuple[str, list[dict]]:
 
 def _artifacts_preflight(args: argparse.Namespace) -> None:
     token, rows = _artifact_manifest(args.relay_url)
-    for row in rows:
+    runtime_rows = [row for row in rows if str(row.get("kind") or "runtime") == "runtime"]
+    for row in runtime_rows:
         name = str(row["name"])
         url = (
             args.relay_url.rstrip("/")
@@ -384,7 +385,7 @@ def _artifacts_preflight(args: argparse.Namespace) -> None:
                 "Retry later or contact the PatchLab operator."
             )
         print(f"ARTIFACT_PREFLIGHT_OK name={name} status=206 bytes=1")
-    print(f"ARTIFACT_PREFLIGHT_PASS count={len(rows)}")
+    print(f"ARTIFACT_PREFLIGHT_PASS count={len(runtime_rows)}")
 
 
 def _extract_tar_gz(archive: Path, target: Path) -> int:
@@ -428,6 +429,8 @@ def _artifacts(args: argparse.Namespace) -> None:
     completed = 0
     total = 0
     for row in rows:
+        if str(row.get("kind") or "runtime") != "runtime":
+            continue
         name = str(row["name"])
         size = int(row["size"])
         sha256 = str(row["sha256"])

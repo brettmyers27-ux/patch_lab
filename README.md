@@ -31,10 +31,12 @@ If macOS still blocks PatchLab after installation, open **System Settings →
 Privacy & Security**, click **Open Anyway** beside the PatchLab message, and
 authenticate when prompted. This is required only for the unsigned build.
 
-To update, download the newer PKG and open it the same way. macOS Installer
-replaces only `/Applications/PatchLab.app`; PatchLab's settings, learned data,
-linked presets, and any existing private relay copies live outside the app
-bundle and remain intact.
+PatchLab checks the private release channel in the background. When a newer
+checksum-verified Mac installer is available, **Update Now** downloads it and
+opens macOS Installer. Installer replaces only `/Applications/PatchLab.app`;
+PatchLab's settings, learned data, linked presets, and any existing private
+relay copies live outside the app bundle and remain intact. macOS may request
+the user's administrator password in Installer.
 
 ### macOS source/bootstrap path (developers only)
 
@@ -100,7 +102,7 @@ learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
 machine before library ingestion is enabled.
 
-The current PatchLab application version is **1.4.7**.
+The current PatchLab application version is **1.5.3**.
 
 It runs Serum headlessly through DawDreamer—never by automating a DAW—and
 provides a PySide6 desktop workflow for scanning presets, rendering an audition
@@ -627,9 +629,28 @@ Applications folder or real PatchLab files.
 
 The frozen runtime keeps the existing first-run access and consent behavior,
 including its already-configured non-secret relay endpoint. It does not add or
-change any Drive/preset-copy operation. Source-checkout auto-update is disabled
-inside the PKG because it invokes `install.sh`; PKG users update by installing
-the next version from Finder.
+change any Drive/preset-copy operation. The packaged updater uses the same
+passcode-authenticated relay as the private runtime artifacts; it resumes an
+interrupted download, verifies the published SHA-256, and only then opens
+macOS Installer.
+
+### Publishing a macOS update (release operator)
+
+After building and verifying a committed PKG, publish it from the sibling
+`patchlab-relay` checkout:
+
+```bash
+cd ../patchlab-relay
+python scripts/publish_macos_release.py \
+  ../soundmatch/release/PatchLab-<version>-macOS.pkg
+gcloud run deploy patchlab-relay --source . --region us-central1 --project patchlab-relay
+```
+
+The publisher uses the existing private Drive artifact folder, records the
+PKG's exact size and SHA-256, and marks it as a macOS installer package. The
+normal runtime installer explicitly ignores this kind of catalog entry, so it
+can never download an app PKG as a model artifact. Do not use GitHub Releases
+for PatchLab PKGs or private assets.
 
 Release builds embed the exact Git commit plus UTC build time. PatchLab reports
 that identity in its activity log and About dialog. A packaged build can report

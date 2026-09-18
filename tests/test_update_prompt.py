@@ -66,17 +66,17 @@ def test_dev_mode_never_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     start.assert_not_called()
 
 
-def test_packaged_pkg_does_not_try_source_checkout_updater(
+def test_packaged_pkg_checks_private_release_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A PKG upgrade is performed by macOS Installer, not install.sh."""
+    """A PKG checks its private release catalog, never a source checkout."""
 
     window, env = _window(tmp_path, monkeypatch)
     monkeypatch.setenv("PATCHLAB_PACKAGED_INSTALLER", "1")
     save_update_preferences(UpdatePreferences(auto_check=True), env)
     with patch.object(window.update_check_runner, "start") as start:
         window.maybe_check_for_update(env=env)
-    start.assert_not_called()
+    start.assert_called_once()
 
 
 def test_does_not_check_again_while_already_running(

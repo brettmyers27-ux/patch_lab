@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -78,6 +79,7 @@ from app.workers import (
     ScanProcessRunner,
     StorageProcessRunner,
     UpdateCheckProcessRunner,
+    UpdateDownloadProcessRunner,
 )
 from core.audio_input import SUPPORTED_AUDIO_SUFFIXES
 from core.branding import display_match_name, generated_preset_name
@@ -90,6 +92,7 @@ from core.update_check import (
     load_update_preferences,
     save_update_preferences,
 )
+from core.worker_runtime import worker_invocation
 from core.match_batch import (
     discover_batch_audio,
     disambiguated_preset_path,
@@ -321,6 +324,11 @@ class LegacyMainWindow(QMainWindow):
         self.update_check_runner.log.connect(self.append_log)
         self.update_check_runner.completed.connect(self._update_check_completed)
         self.update_check_runner.failed.connect(self.append_log)
+        self.update_download_runner = UpdateDownloadProcessRunner(self)
+        self.update_download_runner.log.connect(self.append_log)
+        self.update_download_runner.progress.connect(self._update_download_progress)
+        self.update_download_runner.completed.connect(self._update_download_completed)
+        self.update_download_runner.failed.connect(self._update_download_failed)
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -976,24 +984,9 @@ class LegacyMainWindow(QMainWindow):
             self._automatic_log_lines_suppressed += 1
 
     def maybe_check_for_update(self, *, env: PlatformEnv = ENV) -> None:
-        """Quietly ask GitHub whether a newer PatchLab is published.
+        """Quietly check the appropriate trusted PatchLab release channel."""
 
-        Read-only and cheap, so this runs on every launch rather than being
-        throttled like the preset scan -- it's a small network request, not
-        a rendering job. Respects the Settings toggle and never prompts
-        twice for a version the user already dismissed with "Skip".
-        """
-
-        # A flat PKG upgrade is intentionally manual: a user installs the new
-        # package from Finder, which atomically replaces /Applications/PatchLab.app.
-        # The older source-checkout updater invokes install.sh and therefore is
-        # not valid inside the standalone bundle.
-        import os
-
-        if (
-            not self.distribution_mode
-            or os.environ.get("PATCHLAB_PACKAGED_INSTALLER") == "1"
-        ):
+        if not self.distribution_mode:
             return
         if not load_update_preferences(env).auto_check:
             return
@@ -1007,10 +1000,18 @@ class LegacyMainWindow(QMainWindow):
             return
         if load_update_preferences(env).skipped_version == remote:
             return
-        self._prompt_update_available(str(remote), env=env)
+        package = result.get("package")
+        if isinstance(package, dict):
+            self._prompt_update_available(str(remote), package=package, env=env)
+        else:
+            self._prompt_update_available(str(remote), env=env)
 
     def _prompt_update_available(
-        self, remote_version: str, *, env: PlatformEnv = ENV
+        self,
+        remote_version: str,
+        *,
+        package: dict[str, object] | None = None,
+        env: PlatformEnv = ENV,
     ) -> None:
         box = QMessageBox(self)
         box.setWindowTitle("Update available")
@@ -1028,7 +1029,10 @@ class LegacyMainWindow(QMainWindow):
         box.exec()
         clicked = box.clickedButton()
         if clicked is update_button:
-            self._apply_update()
+            if package is not None:
+                self._download_package_update(package)
+            else:
+                self._apply_update()
         elif clicked is skip_button:
             preferences = load_update_preferences(env)
             save_update_preferences(
@@ -1056,6 +1060,63 @@ class LegacyMainWindow(QMainWindow):
             "Update starting; PatchLab will quit and relaunch automatically "
             "once it finishes."
         )
+        QApplication.instance().quit()
+
+    def _download_package_update(self, package: dict[str, object]) -> None:
+        if self.update_download_runner.running:
+            QMessageBox.information(self, "Update download", "PatchLab is already downloading this update.")
+            return
+        try:
+            self.update_download_runner.start(package)
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Update unavailable", str(exc))
+            return
+        version = str(package.get("version") or "the new version")
+        self.statusBar().showMessage(f"Downloading PatchLab {version}…")
+        self.append_log(f"Downloading checksum-verified PatchLab {version} installer…")
+
+    def _update_download_progress(self, detail: dict) -> None:
+        percent = int(detail.get("percent", 0))
+        self.statusBar().showMessage(f"Downloading PatchLab update… {percent}%")
+
+    def _update_download_failed(self, error: str) -> None:
+        self.statusBar().showMessage("Update download did not finish.")
+        self.append_log(f"PatchLab update download failed: {error}")
+        QMessageBox.warning(
+            self,
+            "Update download did not finish",
+            "The current PatchLab version is unchanged. Please try again later.\n\n"
+            f"Details: {error}",
+        )
+
+    def _update_download_completed(self, result: dict) -> None:
+        package = Path(str(result.get("path") or ""))
+        version = str(result.get("version") or "the new version")
+        if not package.is_file():
+            self._update_download_failed("The downloaded installer could not be found.")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Update ready")
+        box.setText(
+            f"PatchLab {version} has been downloaded and verified.\n\n"
+            "Choose Install Update to close PatchLab and open macOS Installer. "
+            "Installer will replace the old PatchLab app while preserving your "
+            "settings, library, and rendered audio."
+        )
+        install = box.addButton("Install Update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not install:
+            self.statusBar().showMessage("Update is downloaded and ready to install.")
+            return
+        program, arguments = worker_invocation(
+            "open-downloaded-update",
+            ["--parent-pid", str(os.getpid()), "--package", str(package)],
+        )
+        if not QProcess.startDetached(program, arguments):
+            self._update_download_failed("Could not start macOS Installer.")
+            return
+        self.append_log(f"Opening macOS Installer for PatchLab {version} after exit.")
         QApplication.instance().quit()
 
     def append_log(self, message: str) -> None:
@@ -2345,6 +2406,11 @@ class MainWindow(LegacyMainWindow):
         self.update_check_runner.log.connect(self.append_log)
         self.update_check_runner.completed.connect(self._update_check_completed)
         self.update_check_runner.failed.connect(self.append_log)
+        self.update_download_runner = UpdateDownloadProcessRunner(self)
+        self.update_download_runner.log.connect(self.append_log)
+        self.update_download_runner.progress.connect(self._update_download_progress)
+        self.update_download_runner.completed.connect(self._update_download_completed)
+        self.update_download_runner.failed.connect(self._update_download_failed)
         self.factory_verify_runner = FactoryVerificationProcessRunner(self)
         self.factory_verify_runner.log.connect(self.append_log)
         self.factory_verify_runner.completed.connect(self._factory_verify_completed)

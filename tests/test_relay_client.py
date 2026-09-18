@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
 import urllib.error
 import urllib.request
 
@@ -80,3 +81,50 @@ def test_bug_report_posts_only_text_fields_to_private_endpoint(monkeypatch) -> N
     assert 'name="logs"' in body
     assert "preset" not in body.casefold()
     assert "audio" not in body.casefold()
+
+
+def test_private_package_download_resumes_and_verifies_before_publishing(
+    tmp_path, monkeypatch
+) -> None:
+    payload = b"xar!" + b"verified-installer" * 20
+    target = tmp_path / "PatchLab-1.5.3-macOS.pkg"
+    partial = target.with_name(f".{target.name}.part")
+    partial.write_bytes(payload[:10])
+    requests: list[urllib.request.Request] = []
+
+    class BinaryResponse:
+        status = 206
+
+        def __init__(self, body: bytes) -> None:
+            self.stream = io.BytesIO(body)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def getcode(self):
+            return self.status
+
+        def read(self, size: int = -1) -> bytes:
+            return self.stream.read(size)
+
+    def urlopen(request: urllib.request.Request, *, timeout: float):
+        del timeout
+        requests.append(request)
+        return BinaryResponse(payload[10:])
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    client = RelayClient("https://relay.invalid", "", token="authorized")
+    result = client.download_artifact(
+        name=target.name,
+        destination=target,
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert result == target
+    assert target.read_bytes() == payload
+    assert not partial.exists()
+    assert requests[0].headers["Range"] == "bytes=10-"
