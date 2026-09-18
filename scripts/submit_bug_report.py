@@ -34,7 +34,6 @@ def main() -> int:
             comments=request.comments,
             logs=request.logs,
         )
-        args.request.unlink(missing_ok=True)
     except Exception as exc:
         print(f"BUG_REPORT_ERROR={type(exc).__name__}: {exc}", flush=True)
         return 1

@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "packaging" / "patchlab.spec"
 IDENTIFIER = "com.patchlab.desktop"
 INSTALL_LOCATION = "/Applications"
+INSTALLER_SCRIPTS = ROOT / "packaging" / "macos-installer-scripts"
 
 
 class PackageBuildError(RuntimeError):
@@ -94,6 +95,10 @@ def build_pkg(
 
     _require_tool("pkgbuild")
     _require_tool("productbuild")
+    if not (INSTALLER_SCRIPTS / "preinstall").is_file() or not (
+        INSTALLER_SCRIPTS / "postinstall"
+    ).is_file():
+        raise PackageBuildError("The macOS replacement installer scripts are missing")
     _validate_app(app, version)
     work_root.mkdir(parents=True, exist_ok=True)
     destination = destination.expanduser().resolve()
@@ -121,6 +126,8 @@ def build_pkg(
             IDENTIFIER,
             "--version",
             version,
+            "--scripts",
+            str(INSTALLER_SCRIPTS),
             str(component),
         ],
         environment=package_environment,

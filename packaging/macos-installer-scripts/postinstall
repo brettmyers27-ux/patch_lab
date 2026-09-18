@@ -1,0 +1,17 @@
+#!/bin/sh
+# The payload must have replaced the exact app bundle removed by preinstall.
+set -eu
+
+TARGET_VOLUME="$3"
+TARGET="${TARGET_VOLUME%/}/Applications/PatchLab.app"
+
+if [ ! -x "$TARGET/Contents/MacOS/PatchLab" ]; then
+    echo "PatchLab was not installed at $TARGET." >&2
+    exit 1
+fi
+
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TARGET/Contents/Info.plist" 2>/dev/null || true)"
+if [ "$BUNDLE_ID" != "com.patchlab.desktop" ]; then
+    echo "Installed application identity did not match PatchLab." >&2
+    exit 1
+fi

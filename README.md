@@ -614,12 +614,16 @@ a public GitHub Release.
 
 The builder refuses uncommitted tracked source by default, creates an Apple
 Silicon `PatchLab.app`, and wraps only that app in a PKG targeted at
-`/Applications`. No user data is packaged: settings, learned data, linked
-presets, and private relay copies stay in their existing per-user locations.
-Use a newer versioned PKG for upgrades. `scripts/verify_macos_pkg.py` uses a
-throwaway fixture to validate a clean package, the `/Applications` target,
-launch behavior, and an upgrade that preserves separate user data; it never
-uses the real Applications folder or real PatchLab files.
+`/Applications`. On upgrade the installer first verifies the existing bundle
+identity, removes only that prior `PatchLab.app`, then verifies the replacement
+bundle after installation. It refuses to replace an unrelated app and asks the
+user to quit PatchLab first if it is open. No user data is packaged: settings,
+learned data, linked presets, and private relay copies stay in their existing
+per-user locations. Use a newer versioned PKG for upgrades.
+`scripts/verify_macos_pkg.py` uses a throwaway fixture to validate a clean
+package, the `/Applications` target, replacement scripts, launch behavior, and
+an upgrade that preserves separate user data; it never uses the real
+Applications folder or real PatchLab files.
 
 The frozen runtime keeps the existing first-run access and consent behavior,
 including its already-configured non-secret relay endpoint. It does not add or
@@ -867,11 +871,13 @@ local render/index work that a large library can take 1–4 hours and use severa
 gigabytes.
 
 **Report a Problem** lives in Help. A description is required and asks for the
-expected result, actual result, and repeatable steps. Sending happens in the
-background and creates one private support ticket with exactly `comments.txt`
-and `logs.txt`; it never sends audio or preset files. If the support service is
-temporarily unavailable, the text-only report stays locally queued so it can be
-sent again later.
+expected result, actual result, and repeatable steps. Before any network call,
+PatchLab saves one combined, user-readable ticket on the Desktop under
+`PatchLab Bug Reports`. It includes a stable Ticket ID, the user's comments,
+build/runtime details, model/storage/plugin health, current UI state, and the
+application log. The same ticket is then sent privately in the background; it
+never sends audio or preset files. The Desktop ticket remains available even if
+the support relay cannot be reached.
 The persisted gate can be rechecked without loading Serum:
 
 ```bash

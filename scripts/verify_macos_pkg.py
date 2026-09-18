@@ -107,6 +107,10 @@ def _verify_package(
             or item.removeprefix("./") == "._PatchLab.app"
             for item in payload
         ),
+        "replacement_scripts": (
+            component / "Scripts" / "preinstall"
+        ).is_file()
+        and (component / "Scripts" / "postinstall").is_file(),
     }
 
 

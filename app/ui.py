@@ -5,6 +5,8 @@ from __future__ import annotations
 import html
 import json
 import shutil
+import sqlite3
+import sys
 import tempfile
 import time
 from datetime import datetime
@@ -109,6 +111,7 @@ from core.preview_cache import (
     unmodified_recommendation_basis_index,
 )
 from core.privacy import PrivacyStore, distribution_mode
+from core.runtime_log import append_runtime_log
 from core.storage import (
     StoragePreferences,
     audio_root_size,
@@ -4302,14 +4305,55 @@ class MainWindow(LegacyMainWindow):
         dialog.exec()
 
     def _diagnostic_log_text(self) -> str:
+        """Capture an actionable, consented snapshot without touching audio."""
+
         build = current_build_info()
         visible_log = self.log_pane.toPlainText() if hasattr(self, "log_pane") else ""
+        from core.model_assets import resolve_model_assets
+        from core.synthesis_assets import synthesis_readiness
+
+        assets = resolve_model_assets()
+        synth_readiness = {
+            synth: synthesis_readiness(synth) for synth in ("serum1", "serum2")
+        }
+        storage = storage_status()
+        try:
+            usage = shutil.disk_usage(storage.root)
+            storage_space = f"{usage.free} bytes free / {usage.total} bytes total"
+        except OSError:
+            storage_space = "unavailable"
+        database_path = self.local_paths["db"]
+        database_summary = "not present"
+        if database_path.is_file():
+            try:
+                with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+                    presets = int(connection.execute("SELECT COUNT(*) FROM presets").fetchone()[0])
+                    renders = int(connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0])
+                database_summary = f"{presets} presets, {renders} renders"
+            except (OSError, sqlite3.Error) as exc:
+                database_summary = f"unreadable: {type(exc).__name__}: {exc}"
+        plugin_summary = ", ".join(
+            f"{item.synth}/{item.format}={'present' if item.exists else 'missing'}"
+            for item in ENV.plugin_candidates
+        )
         return (
             "PatchLab diagnostic report\n"
-            f"Build: {build.short_commit}\n"
-            f"Built: {build.built_at_utc}\n"
-            f"Platform: {ENV.branch}\n"
-            f"Compute: {ENV.compute_backend}\n"
+            f"Build: {json.dumps(build.as_dict(), sort_keys=True)}\n"
+            f"Runtime: Python {sys.version.split()[0]} · {ENV.system_name} · {ENV.machine}\n"
+            f"Executable: {sys.executable}\n"
+            f"Platform: {ENV.branch}; compute={ENV.compute_backend}; warning={ENV.compute_warning or 'none'}\n"
+            f"Synthesis: serum1={'ready' if synth_readiness['serum1'].available else synth_readiness['serum1'].reason}; "
+            f"serum2={'ready' if synth_readiness['serum2'].available else synth_readiness['serum2'].reason}\n"
+            f"Model checkpoint: {assets.checkpoint} ({assets.checkpoint.stat().st_size if assets.checkpoint.is_file() else 0} bytes)\n"
+            f"Storage: root={storage.root}; available={storage.available}; configured_external={storage.configured_external}; "
+            f"reason={storage.reason or 'none'}; space={storage_space}\n"
+            f"Local library: {database_path}; {database_summary}\n"
+            f"Privacy/link state: sharing={self.privacy_choice.use_and_share_own_presets}; "
+            f"linked_folder={self.privacy_choice.linked_folder or 'none'}\n"
+            f"Plugins: {plugin_summary}\n"
+            f"UI state: activities={','.join(sorted(self._workflow_activities)) or 'none'}; "
+            f"match_file={self._match_audio_path or 'none'}; target={self.match_synth.currentData()}; "
+            f"quality={self.match_budget.currentData()}; offset={self.match_offset.value()}\n"
             "\n--- Application log ---\n"
             + visible_log
             + "\n"
@@ -4328,10 +4372,10 @@ class MainWindow(LegacyMainWindow):
             "Please describe exactly what happened, what you expected, what sound "
             "or action led to it, and any steps that reliably reproduce it. The more "
             "detail you provide, the faster we can fix it. A description is required.\n\n"
-            "Sending creates one private support folder containing exactly two text "
-            "files: your comments and PatchLab’s diagnostic log. It never sends your "
-            "audio or preset files. The diagnostic log can include app status and "
-            "local file paths."
+            "PatchLab first saves one combined report file on your Desktop, with a "
+            "Ticket ID, your comments, and detailed diagnostics. It then tries to "
+            "send a private support copy. It never sends your audio or preset files. "
+            "The diagnostics can include app status and local file paths."
         )
         detail.setWordWrap(True)
         comments = QPlainTextEdit()
@@ -4372,8 +4416,9 @@ class MainWindow(LegacyMainWindow):
             except Exception as exc:
                 QMessageBox.warning(dialog, "Report was not sent", str(exc))
                 return
+            self.append_log(f"Saved bug report locally: {request_path}")
             self.append_log("Sending user-approved bug report to private support…")
-            self.statusBar().showMessage("Sending bug report…")
+            self.statusBar().showMessage("Bug report saved locally; sending private copy…")
             dialog.accept()
 
         send.clicked.connect(submit)
@@ -4386,8 +4431,8 @@ class MainWindow(LegacyMainWindow):
         QMessageBox.information(
             self,
             "Bug report sent",
-            "Thank you. Your comments and diagnostic log were sent privately to "
-            "the PatchLab support folder.",
+            "Thank you. Your combined local report remains on your Desktop in "
+            "“PatchLab Bug Reports”, and a private support copy was sent.",
         )
 
     def _bug_report_failed(self, error: str) -> None:
@@ -4396,11 +4441,13 @@ class MainWindow(LegacyMainWindow):
         QMessageBox.warning(
             self,
             "Bug report was not sent",
-            "PatchLab kept the report locally so you can retry after reconnecting.\n\n"
+            "Your combined report was saved locally on your Desktop in “PatchLab "
+            "Bug Reports”. Keep its Ticket ID for support.\n\n"
             + error,
         )
 
     def append_log(self, message: str) -> None:
+        append_runtime_log(message)
         if not hasattr(self, "log_pane") or not isinstance(self.log_pane, QTextEdit):
             return
         upper = message.upper()

@@ -7,6 +7,7 @@ import multiprocessing as mp
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,7 @@ from core.launch_gates import run_distribution_gates  # noqa: E402
 from core.model_assets import ModelAssetsError, validate_model_assets  # noqa: E402
 from core.platform_env import ENV  # noqa: E402,F401
 from core.privacy import distribution_mode  # noqa: E402
+from core.runtime_log import append_runtime_log  # noqa: E402
 
 
 def _run_packaged_host_probe(output_path: str) -> int:
@@ -88,8 +90,18 @@ def _run_packaged_host_probe(output_path: str) -> int:
 
 def main() -> int:
     mp.set_start_method("spawn", force=True)
+
+    def report_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+        append_runtime_log(
+            "UNCAUGHT EXCEPTION\n"
+            + "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = report_uncaught_exception
     application = QApplication(sys.argv)
     application.setApplicationName("PatchLab")
+    append_runtime_log("Application launch requested")
     if probe_path := os.environ.get("PATCHLAB_PACKAGED_HOST_PROBE"):
         return _run_packaged_host_probe(probe_path)
     factory_verification = None
