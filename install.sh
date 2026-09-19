@@ -159,7 +159,9 @@ fi
 
 .venv/bin/python scripts/install_support.py artifacts-preflight --relay-url "$RELAY_URL" || exit 1
 .venv/bin/python scripts/install_support.py clap --install-root "$INSTALL_ROOT" || exit 1
-CLAP_RUNTIME_MARKER="$INSTALL_ROOT/data/models/huggingface/.patchlab-clap-runtime-v1"
+RUNTIME_MODEL_ROOT="$INSTALL_ROOT/data/runtime/v1-legacy-stock-clap/models"
+export PATCHLAB_MODEL_CACHE="$RUNTIME_MODEL_ROOT/huggingface"
+CLAP_RUNTIME_MARKER="$PATCHLAB_MODEL_CACHE/.patchlab-clap-runtime-v1"
 if [ ! -f "$CLAP_RUNTIME_MARKER" ]; then
     say "Preparing CLAP runtime files for offline first use..."
     .venv/bin/python scripts/cache_clap.py || fail "CLAP runtime preparation failed. Check the network connection and rerun; completed downloads will be reused."
@@ -193,7 +195,7 @@ printf -v RELAY_URL_Q '%q' "$RELAY_URL"
 printf -v INSTALL_ROOT_Q '%q' "$INSTALL_ROOT"
 printf -v PYTHON_PATH_Q '%q' "$INSTALL_ROOT/.venv/bin/python"
 printf -v APP_MAIN_Q '%q' "$INSTALL_ROOT/app/main.py"
-printf -v MODEL_CACHE_Q '%q' "$INSTALL_ROOT/data/models/huggingface"
+printf -v MODEL_CACHE_Q '%q' "$RUNTIME_MODEL_ROOT/huggingface"
 printf -v APP_PATH_Q '%q' "$APP_PATH"
 cat > "$LAUNCHER_TMP/Contents/MacOS/PatchLab" <<EOF
 #!/bin/bash

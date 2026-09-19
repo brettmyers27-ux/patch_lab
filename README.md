@@ -51,6 +51,13 @@ bash install.sh
 
 ### Windows 11
 
+Ordinary trusted-group users can download and double-click the Windows x64
+installer. It is a thin Inno Setup bootstrapper around the canonical
+`install.ps1` flow: it installs Python 3.11 and Git through Windows Package
+Manager when needed, then performs the same authenticated, hash-verified
+runtime installation described below. The app itself is not frozen or replaced
+by the EXE.
+
 The recommended Windows form also downloads the installer for inspection
 before it runs:
 
@@ -102,7 +109,7 @@ learning, and matching Serum presets. Development is deliberately gate-driven:
 the plugin host and real preset-state round trip must be proven on the target
 machine before library ingestion is enabled.
 
-The current PatchLab application version is **1.5.3**.
+The current PatchLab application version is **1.5.4**.
 
 It runs Serum headlessly through DawDreamer—never by automating a DAW—and
 provides a PySide6 desktop workflow for scanning presets, rendering an audition
@@ -121,7 +128,7 @@ cd patch_lab
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install torch torchaudio
+pip install torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0
 pip install -r requirements.txt
 python scripts/verify_env.py
 python app/main.py
@@ -131,13 +138,13 @@ On Windows, activate with `.venv\Scripts\Activate.ps1`. Use CUDA 12.8 wheels
 when an NVIDIA adapter is present:
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 
 On a Windows PC without an NVIDIA adapter, use the CPU wheels instead:
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
 ```
 
 `install.ps1` makes this selection automatically and prints the detected
@@ -752,7 +759,7 @@ its own process.
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install torch torchaudio
+pip install torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0
 pip install -r requirements.txt
 python scripts/verify_env.py
 python scripts/spike_preset_load.py /path/to/preset/root
@@ -767,7 +774,7 @@ The standard PyPI torch wheel includes MPS support. Patch Lab sets
 py -3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 python scripts\verify_env.py
 python scripts\spike_preset_load.py C:\path\to\preset\root

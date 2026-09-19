@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import torch
 
 from core.build_info import assert_packaged_commit, current_build_info
 from core.model_assets import (
@@ -53,17 +52,24 @@ def test_shared_model_resolution_and_validation(
     )
 
 
-def test_default_model_resolution_uses_adopted_stage2b_checkpoint(
+def test_default_model_resolution_uses_approved_legacy_stock_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PATCHLAB_CLAP_CHECKPOINT", raising=False)
-    monkeypatch.setattr(model_assets, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        model_assets,
+        "runtime_data_root",
+        lambda: tmp_path / "data" / "runtime" / "v1-legacy-stock-clap",
+    )
 
     assets = model_assets.resolve_model_assets()
 
-    assert CLAP_CHECKPOINT_NAME == "patchlab_clap_ft_v1.pt"
-    assert assets.checkpoint == (tmp_path / "data" / "models" / CLAP_CHECKPOINT_NAME)
+    assert CLAP_CHECKPOINT_NAME == "music_audioset_epoch_15_esc_90.14.pt"
+    assert assets.checkpoint == (
+        tmp_path / "data" / "runtime" / "v1-legacy-stock-clap" / "models"
+        / CLAP_CHECKPOINT_NAME
+    )
 
 
 def test_missing_assets_error_is_actionable(
@@ -86,35 +92,24 @@ def test_missing_assets_error_is_actionable(
     assert "scripts/cache_clap.py" in message
 
 
-def test_smaller_authenticated_finetuned_checkpoint_is_accepted(
+def test_smaller_finetuned_checkpoint_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache = tmp_path / "cache"
     checkpoint = tmp_path / "patchlab_clap_ft_v1.pt"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": {
-                "audio_branch.fixture": torch.ones(1),
-                "audio_projection.fixture": torch.ones(1),
-            },
-            "patchlab_metadata": {"format": "patchlab_clap_ft_v1"},
-        },
-        checkpoint,
-    )
+    checkpoint.write_bytes(b"stage2b checkpoint must never be accepted")
     for model_name, filenames in TOKENIZER_REQUIREMENTS.items():
         snapshot = cache / "transformers" / model_name / "snapshots" / "fixture"
         snapshot.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
             (snapshot / filename).write_text("fixture", encoding="utf-8")
-    monkeypatch.setattr(model_assets, "MIN_FINETUNED_CHECKPOINT_BYTES", 0)
     monkeypatch.setenv("PATCHLAB_MODEL_CACHE", str(cache))
     monkeypatch.setenv("PATCHLAB_CLAP_CHECKPOINT", str(checkpoint))
 
-    assets = validate_model_assets()
-
-    assert assets.checkpoint == checkpoint.resolve()
+    with pytest.raises(ModelAssetsError, match="approved stock CLAP checkpoint"):
+        validate_model_assets()
 
 
 def test_offline_default_allows_explicit_diagnostic_override(

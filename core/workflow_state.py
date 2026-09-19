@@ -13,6 +13,7 @@ from typing import Literal, Mapping
 
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE
 from core.model_assets import ModelAssetsError, validate_model_assets
+from core.runtime_compatibility import RuntimeCompatibilityError, validate_runtime_family
 from core.privacy import PrivacyChoice
 from core.render import MIDI_NOTES
 
@@ -117,8 +118,9 @@ def _model_problem_label(detail: str) -> str:
 
 def _match_prerequisite_error(factory_bundle_path: Path) -> str:
     try:
+        validate_runtime_family()
         validate_model_assets()
-    except ModelAssetsError as exc:
+    except (ModelAssetsError, RuntimeCompatibilityError) as exc:
         return _model_problem_label(str(exc))
 
     bundle_path = Path(factory_bundle_path).expanduser().resolve()

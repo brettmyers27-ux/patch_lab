@@ -15,6 +15,7 @@ ROOT = Path(SPECPATH).parent
 sys.path.insert(0, str(ROOT))
 VERSION = {}
 exec((ROOT / "app" / "__version__.py").read_text(), VERSION)
+from core.runtime_compatibility import RUNTIME_FAMILY_ID  # noqa: E402
 
 SOURCE_COMMIT = subprocess.check_output(
     ["git", "rev-parse", "HEAD"],
@@ -47,49 +48,35 @@ build_info_path.write_text(
     encoding="utf-8",
 )
 
-# Build the smallest database that analysis-by-synthesis actually consumes.
-# Shared with the gated-artifact packaging via scripts/build_synthesis_catalog.py
-# so a frozen build and a git-clone install can never disagree about what the
-# catalog contains.
-sys.path.insert(0, str(ROOT / "scripts"))
-from build_synthesis_catalog import build_synthesis_catalog  # noqa: E402
-
-synthesis_catalog = build_synthesis_catalog(
-    ROOT / "data" / "library.db",
-    ROOT / "build" / "patchlab-synthesis-catalog.sqlite",
-)
-
 datas = [
     (str(ROOT / "app" / "theme.qss"), "app"),
     (str(ROOT / "app" / "icons"), "app/icons"),
     (str(build_info_path), "."),
-    (str(synthesis_catalog), "data/models"),
 ]
+runtime_data = ROOT / "data" / "runtime" / RUNTIME_FAMILY_ID
 for source, destination in (
-    (ROOT / "data" / "dist" / "factory_bundle.sqlite", "data/dist"),
-    (
-        ROOT / "data" / "models" / "patchlab_clap_ft_v1.pt",
-        "data/models",
-    ),
+    (runtime_data / "runtime-sha256s.txt", f"data/runtime/{RUNTIME_FAMILY_ID}"),
+    (runtime_data / "dist" / "factory_bundle.sqlite", f"data/runtime/{RUNTIME_FAMILY_ID}/dist"),
+    (runtime_data / "models" / "music_audioset_epoch_15_esc_90.14.pt", f"data/runtime/{RUNTIME_FAMILY_ID}/models"),
     # Analysis-by-synthesis inputs. Without these the packaged app can only
     # retrieve the closest existing preset — it cannot generate a new patch —
     # so they are part of a functional build, not an optional extra.
-    (ROOT / "data" / "features" / "preset_index.npy", "data/features"),
-    (ROOT / "data" / "features" / "note_index.npy", "data/features"),
-    (ROOT / "data" / "features" / "similarity_manifest.npz", "data/features"),
-    (ROOT / "data" / "features" / "delta_neighbors.npz", "data/features"),
-    (ROOT / "data" / "features" / "serum2_targets.npz", "data/features"),
-    (ROOT / "data" / "models" / "serum2_target_schema.json", "data/models"),
-    (ROOT / "data" / "models" / "param_model.pt", "data/models"),
-    (ROOT / "data" / "models" / "delta_param_model.pt", "data/models"),
+    (runtime_data / "features" / "preset_index.npy", f"data/runtime/{RUNTIME_FAMILY_ID}/features"),
+    (runtime_data / "features" / "note_index.npy", f"data/runtime/{RUNTIME_FAMILY_ID}/features"),
+    (runtime_data / "features" / "similarity_manifest.npz", f"data/runtime/{RUNTIME_FAMILY_ID}/features"),
+    (runtime_data / "features" / "delta_neighbors.npz", f"data/runtime/{RUNTIME_FAMILY_ID}/features"),
+    (runtime_data / "features" / "serum2_targets.npz", f"data/runtime/{RUNTIME_FAMILY_ID}/features"),
+    (runtime_data / "models" / "patchlab-synthesis-catalog.sqlite", f"data/runtime/{RUNTIME_FAMILY_ID}/models"),
+    (runtime_data / "models" / "serum2_target_schema.json", f"data/runtime/{RUNTIME_FAMILY_ID}/models"),
+    (runtime_data / "models" / "serum2_render_state_manifest.json", f"data/runtime/{RUNTIME_FAMILY_ID}/models"),
     (
-        ROOT / "data" / "models" / "serum2_render_states",
-        "data/models/serum2_render_states",
+        runtime_data / "models" / "serum2_render_states",
+        f"data/runtime/{RUNTIME_FAMILY_ID}/models/serum2_render_states",
     ),
 ):
     if source.exists():
         datas.append((str(source), destination))
-hf_cache = ROOT / "data" / "models" / "huggingface"
+hf_cache = runtime_data / "models" / "huggingface"
 if hf_cache.is_dir():
     # Bundle only the pinned runtime snapshots—not download locks or local
     # Hugging Face/Xet logs, which can contain machine-specific diagnostics.

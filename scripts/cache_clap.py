@@ -21,12 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from core.model_assets import (  # noqa: E402
     PINNED_CLAP_CHECKPOINT_NAME,
     configure_model_environment,
-    runtime_root,
 )
+from core.runtime_compatibility import runtime_data_root  # noqa: E402
 
 
 os.environ["PATCHLAB_CLAP_CHECKPOINT"] = str(
-    runtime_root() / "data" / "models" / PINNED_CLAP_CHECKPOINT_NAME
+    runtime_data_root() / "models" / PINNED_CLAP_CHECKPOINT_NAME
 )
 MODEL_ASSETS = configure_model_environment()
 MODEL_DIR = MODEL_ASSETS.model_dir
@@ -39,6 +39,12 @@ CHECKPOINT_URL = (
 
 
 def _configure_cache() -> None:
+    # This one-shot bootstrap is responsible for populating the pinned
+    # Hugging Face snapshots. Normal application startup remains offline-first
+    # through configure_model_environment(); forcing offline mode here makes a
+    # fresh Windows installation unable to acquire its tokenizer runtime.
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    os.environ["TRANSFORMERS_OFFLINE"] = "0"
     configure_model_environment()
 
 

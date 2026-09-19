@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoUrl = if ($env:PATCHLAB_REPO_URL) { $env:PATCHLAB_REPO_URL } else { "https://github.com/brettmyers27-ux/patch_lab.git" }
+$RepoBundle = if ($env:PATCHLAB_REPO_BUNDLE) { $env:PATCHLAB_REPO_BUNDLE } else { "" }
 $RelayUrl = if ($env:PATCHLAB_RELAY_URL) { $env:PATCHLAB_RELAY_URL } else { "https://patchlab-relay-482507024870.us-central1.run.app" }
 $InstallRoot = if ($env:PATCHLAB_INSTALL_ROOT) { $env:PATCHLAB_INSTALL_ROOT } else { Join-Path ([Environment]::GetFolderPath("MyDocuments")) "PatchLab\soundmatch" }
 $TestMode = $env:PATCHLAB_INSTALL_TEST_MODE -eq "1"
@@ -204,14 +205,39 @@ if (Test-Path -LiteralPath $InstallRoot) {
         Stop-Install "The existing checkout has local changes. They were left untouched; commit or move them before rerunning."
     }
     Write-Step "Updating existing PatchLab checkout (fast-forward only)..."
-    & git.exe -C $InstallRoot pull --ff-only
-    if ($LASTEXITCODE -ne 0) { Stop-Install "The checkout cannot fast-forward. It was left untouched." }
+    if ($RepoBundle) {
+        & git.exe -C $InstallRoot fetch $RepoBundle main
+        if ($LASTEXITCODE -ne 0) { Stop-Install "The packaged source update could not be read." }
+        & git.exe -C $InstallRoot merge --ff-only FETCH_HEAD
+        if ($LASTEXITCODE -ne 0) { Stop-Install "The packaged source update cannot fast-forward. The checkout was left untouched." }
+        & git.exe -C $InstallRoot remote set-url origin $RepoUrl
+        if ($LASTEXITCODE -ne 0) { Stop-Install "Could not configure the public update source." }
+    } else {
+        & git.exe -C $InstallRoot pull --ff-only
+        if ($LASTEXITCODE -ne 0) { Stop-Install "The checkout cannot fast-forward. It was left untouched." }
+    }
 } else {
     Write-Step "Cloning the PatchLab source..."
     $parent = Split-Path -Parent $InstallRoot
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    & git.exe clone $RepoUrl $InstallRoot
+    $cloneSource = if ($RepoBundle) {
+        if (-not (Test-Path -LiteralPath $RepoBundle -PathType Leaf)) {
+            Stop-Install "The packaged source bundle is missing: $RepoBundle"
+        }
+        $RepoBundle
+    } else {
+        $RepoUrl
+    }
+    if ($RepoBundle) {
+        & git.exe clone --branch main $cloneSource $InstallRoot
+    } else {
+        & git.exe clone $cloneSource $InstallRoot
+    }
     if ($LASTEXITCODE -ne 0) { Stop-Install "Could not clone the PatchLab repository." }
+    if ($RepoBundle) {
+        & git.exe -C $InstallRoot remote set-url origin $RepoUrl
+        if ($LASTEXITCODE -ne 0) { Stop-Install "Could not configure the public update source." }
+    }
 }
 
 Set-Location $InstallRoot
@@ -226,8 +252,9 @@ if (-not (Test-Path -LiteralPath $VenvPythonw)) {
     Stop-Install "The Python environment has no pythonw.exe; reinstall 64-bit Python 3.11 from python.org rather than the Microsoft Store."
 }
 
-$requirementsHash = (Get-FileHash -Algorithm SHA256 (Join-Path $InstallRoot "requirements.txt")).Hash.ToLowerInvariant()
-$hashInput = [Text.Encoding]::UTF8.GetBytes("$requirementsHash|windows-$($torch.Flavor)-torch-v1")
+$requirementsPath = Join-Path $InstallRoot "requirements.txt"
+$requirementsHash = (& $VenvPython -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" $requirementsPath).Trim()
+$hashInput = [Text.Encoding]::UTF8.GetBytes("$requirementsHash|windows-$($torch.Flavor)-torch-v2")
 $hasher = [Security.Cryptography.SHA256]::Create()
 $dependencyHash = ([BitConverter]::ToString($hasher.ComputeHash($hashInput))).Replace("-", "").ToLowerInvariant()
 $hasher.Dispose()
@@ -236,9 +263,14 @@ if (-not (Test-Path -LiteralPath $dependencyMarker)) {
     Write-Step "Installing PatchLab dependencies. This is the longest setup step..."
     & $VenvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) { Stop-Install "pip could not update." }
+    & $VenvPython -m pip install "setuptools==81.0.0"
+    if ($LASTEXITCODE -ne 0) { Stop-Install "The compatible setuptools runtime could not be installed." }
     $torchWheel = if ($torch.Flavor -eq "cuda") { "cu128" } else { "cpu" }
     $torchIndex = "https://download.pytorch.org/whl/$torchWheel"
-    & $VenvPython -m pip install torch torchaudio --index-url $torchIndex
+    # Keep the three native extensions on one tested release train. Leaving
+    # torchvision in requirements.txt lets PyPI replace the CUDA pair with a
+    # newer CPU-only torch, which makes libtorchaudio fail to load on Windows.
+    & $VenvPython -m pip install "torch==2.11.0" "torchaudio==2.11.0" "torchvision==0.26.0" --index-url $torchIndex
     if ($LASTEXITCODE -ne 0) { Stop-Install "PyTorch installation failed for $($torch.Flavor): $torchIndex" }
     & $VenvPython -m pip install -r (Join-Path $InstallRoot "requirements.txt")
     if ($LASTEXITCODE -ne 0) { Stop-Install "PatchLab dependency installation failed." }
@@ -268,19 +300,20 @@ if ($LASTEXITCODE -eq 0) {
 if ($LASTEXITCODE -ne 0) { Stop-Install "Private artifacts are not reachable. No multi-gigabyte CLAP download was started." }
 & $VenvPython (Join-Path $InstallRoot "scripts\install_support.py") clap --install-root $InstallRoot
 if ($LASTEXITCODE -ne 0) { Stop-Install "CLAP checkpoint download failed; completed bytes were preserved for a retry." }
-$clapMarker = Join-Path $InstallRoot "data\models\huggingface\.patchlab-clap-runtime-v1"
+& $VenvPython (Join-Path $InstallRoot "scripts\install_support.py") artifacts --relay-url $RelayUrl --install-root $InstallRoot
+if ($LASTEXITCODE -ne 0) { Stop-Install "Private artifact download failed; completed bytes were preserved for a retry." }
+$runtimeModelRoot = Join-Path $InstallRoot "data\runtime\v1-legacy-stock-clap\models"
+$env:PATCHLAB_MODEL_CACHE = Join-Path $runtimeModelRoot "huggingface"
+$clapMarker = Join-Path $env:PATCHLAB_MODEL_CACHE ".patchlab-clap-runtime-v1"
 if (-not (Test-Path -LiteralPath $clapMarker)) {
     Write-Step "Preparing CLAP runtime files for offline first use..."
     & $VenvPython (Join-Path $InstallRoot "scripts\cache_clap.py")
     if ($LASTEXITCODE -ne 0) { Stop-Install "CLAP runtime preparation failed; rerun to reuse completed downloads." }
     New-Item -ItemType File -Path $clapMarker -Force | Out-Null
 }
-& $VenvPython (Join-Path $InstallRoot "scripts\install_support.py") artifacts --relay-url $RelayUrl --install-root $InstallRoot
-if ($LASTEXITCODE -ne 0) { Stop-Install "Private artifact download failed; completed bytes were preserved for a retry." }
 
 Write-Step "Running the Windows parity gate before installing shortcuts..."
 $env:PATCHLAB_DISTRIBUTION_MODE = "1"
-$env:PATCHLAB_MODEL_CACHE = Join-Path $InstallRoot "data\models\huggingface"
 & $VenvPython (Join-Path $InstallRoot "scripts\verify_windows_install.py") --installer-gate
 if ($LASTEXITCODE -ne 0) {
     Stop-Install "The Windows parity gate failed. No launch shortcuts were created; copy the diagnostic table above back to the PatchLab maintainer."
@@ -288,7 +321,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $launcherConfig = @{
     relay_url = $RelayUrl
-    model_cache = (Join-Path $InstallRoot "data\models\huggingface")
+    model_cache = (Join-Path $runtimeModelRoot "huggingface")
 } | ConvertTo-Json
 Set-Content -LiteralPath (Join-Path $InstallRoot ".patchlab-launcher.json") -Value $launcherConfig -Encoding UTF8
 $icon = Join-Path $InstallRoot "app\icons\PatchLab.ico"
