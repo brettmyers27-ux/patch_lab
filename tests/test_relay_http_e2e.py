@@ -343,3 +343,65 @@ def test_worker_with_a_dead_relay_keeps_the_local_report_and_a_later_retry_succe
 def test_worker_output_never_contains_credentials(server: Server, tmp_path: Path, monkeypatch, capsys) -> None:
     code, out, _request, _ticket = _run_worker(monkeypatch, tmp_path, server.url, capsys)
     assert PASSCODE not in out and "Bearer" not in out
+
+
+# ---------------------------------------------------------------------------
+# Large-installer downloads through the frozen-1.5.3 client contract
+# ---------------------------------------------------------------------------
+
+
+def _artifact_server(tmp_path: Path, payload: bytes):
+    """The real relay app + real ArtifactCatalog serving ``payload`` as a 'macOS PKG'."""
+
+    from relay.artifacts import Artifact, ArtifactCatalog, LocalArtifactStore
+
+    source = tmp_path / "PatchLab-9.9.9-macOS.pkg"
+    source.write_bytes(payload)
+    artifact = Artifact(name=source.name, version="9.9.9", size=len(payload),
+                        sha256=hashlib.sha256(payload).hexdigest(),
+                        destination="releases/macos/" + source.name, drive_file_id="local", kind="macos-package")
+    catalog = ArtifactCatalog([artifact], LocalArtifactStore({source.name: source}))
+    server = Server(tmp_path)
+    server.flaky.app = create_app(server.service, catalog)
+    return server.start(), artifact
+
+
+def test_installer_larger_than_the_buffered_response_limit_downloads_chunked_and_intact(tmp_path: Path) -> None:
+    from relay.app import MAX_BUFFERED_RESPONSE_BYTES
+
+    payload = b"xar!" + bytes(range(256)) * ((MAX_BUFFERED_RESPONSE_BYTES // 256) + 4096)
+    assert len(payload) > MAX_BUFFERED_RESPONSE_BYTES
+    server, artifact = _artifact_server(tmp_path, payload)
+    try:
+        api = client(server)
+        request = urllib.request.Request(server.url + "/artifacts/" + artifact.name,
+                                         headers={"Authorization": f"Bearer {api.token()}"})
+        with urllib.request.urlopen(request, timeout=120) as response:
+            assert response.status == 200
+            assert response.headers.get("Content-Length") is None, "large responses must be streamed"
+            assert response.headers.get("Transfer-Encoding") == "chunked"
+            assert response.headers.get("Accept-Ranges") == "bytes"
+            body = response.read()
+        assert hashlib.sha256(body).hexdigest() == artifact.sha256
+    finally:
+        server.stop()
+
+
+def test_a_download_that_stops_part_way_is_resumed_by_the_1_5_3_client_from_its_partial_file(tmp_path: Path) -> None:
+    """If a stream ever stalls, clicking Update again must continue, not restart."""
+
+    payload = b"xar!" + bytes(range(256)) * 20000
+    server, artifact = _artifact_server(tmp_path, payload)
+    try:
+        api = client(server)
+        destination = tmp_path / "updates" / artifact.name
+        destination.parent.mkdir(parents=True)
+        cut = 1_234_567
+        (destination.parent / f".{artifact.name}.part").write_bytes(payload[:cut])
+        seen: list[int] = []
+        result = api.download_artifact(name=artifact.name, destination=destination, size=artifact.size,
+                                       sha256=artifact.sha256, progress=lambda got, _total: seen.append(got))
+        assert result.read_bytes() == payload
+        assert seen and seen[0] > cut, "the client continued from its partial file"
+    finally:
+        server.stop()
