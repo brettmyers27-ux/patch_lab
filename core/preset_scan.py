@@ -7,7 +7,7 @@ import json
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from core.db import DEFAULT_DB_PATH, Database, PresetRecord
 from core.platform_env import ENV, PlatformEnv
@@ -45,13 +45,132 @@ def sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def synth_for(path: Path) -> str | None:
+@dataclass(frozen=True, slots=True)
+class PresetClassification:
+    """Why one preset file was assigned to a Serum generation.
+
+    The reason travels into diagnostics.  Without it, "5,634 presets need
+    Serum 1" is an unexplained assertion; with it, a support bundle says the
+    classification was made purely from the ``.fxp`` extension, which is what
+    made a *Serum 2* preset folder demand a Serum 1 renderer.
+    """
+
+    path: Path
+    generation: str | None
+    reason: str
+    evidence: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "path": str(self.path),
+            "generation": self.generation,
+            "reason": self.reason,
+            "evidence": self.evidence,
+        }
+
+
+def classify_preset(path: Path) -> PresetClassification:
+    """Classify a preset file's Serum generation, recording the reason.
+
+    Classification is by file format, which is the only reliable signal: a
+    ``.fxp`` **is** a Serum 1 patch file and a ``.serumpreset`` **is** a Serum 2
+    patch file.
+
+    Note where those files live, though.  Serum 2's own factory library ships
+    thousands of legacy ``.fxp`` patches alongside its ``.serumpreset`` ones --
+    on a representative install, 4,826 ``.fxp`` against 1,857
+    ``.serumpreset`` under ``Serum 2 Presets/Presets``.  So "the user linked a
+    Serum 2 folder" does not mean "every file needs Serum 2", and it certainly
+    does not mean the Serum 2 subset should be blocked when Serum 1 is absent.
+    That is why callers route per generation and process the supported subset
+    rather than treating a mixed library as all-or-nothing.
+    """
+
     suffix = path.suffix.casefold()
     if suffix == ".fxp":
-        return "serum1"
+        return PresetClassification(
+            path=path,
+            generation="serum1",
+            reason=(
+                "the .fxp container is Serum 1's patch format; PatchLab's verified "
+                "loaders for it are the Serum 1 strategies (S1 VST2, S2 VST3 state, "
+                "S5 AU). Serum 2 factory libraries also ship .fxp content, so a "
+                "Serum 2 preset folder legitimately contains these."
+            ),
+            evidence=f"extension={suffix}",
+        )
     if suffix == ".serumpreset":
-        return "serum2"
-    return None
+        return PresetClassification(
+            path=path,
+            generation="serum2",
+            reason="the .serumpreset container is Serum 2's patch format",
+            evidence=f"extension={suffix}",
+        )
+    return PresetClassification(
+        path=path,
+        generation=None,
+        reason="not a recognised Serum patch container",
+        evidence=f"extension={suffix or '(none)'}",
+    )
+
+
+def synth_for(path: Path) -> str | None:
+    """Return the Serum generation for ``path``, or None if it is not a preset."""
+
+    return classify_preset(path).generation
+
+
+def classify_generations(paths: Iterable[Path]) -> dict[str, int]:
+    """Count presets per generation.
+
+    Aggregated on purpose: a 5,000-file library must not produce 5,000
+    classification log lines.  One summary carries the same diagnostic value.
+    """
+
+    counts: dict[str, int] = {}
+    for path in paths:
+        generation = synth_for(path)
+        if generation is not None:
+            counts[generation] = counts.get(generation, 0) + 1
+    return counts
+
+
+def log_classification_summary(
+    paths: Iterable[Path],
+    *,
+    operation_id: str = "",
+    linked_folder: Path | None = None,
+) -> dict[str, int]:
+    """Record one aggregated classification decision for a whole library."""
+
+    from core.diagnostics import record
+
+    materialised = list(paths)
+    counts = classify_generations(materialised)
+    examples = {}
+    for generation in counts:
+        example = next(
+            (item for item in materialised if synth_for(item) == generation), None
+        )
+        if example is not None:
+            examples[generation] = classify_preset(example).reason
+    record(
+        "preset-classification",
+        "classification_summary",
+        "classified "
+        + ", ".join(f"{count} {generation}" for generation, count in sorted(counts.items())),
+        operation_id=operation_id,
+        phase="preset-classification",
+        decision_reason=(
+            "generation is decided by patch container format; a Serum 2 preset "
+            "folder commonly contains both .serumpreset and legacy .fxp content"
+        ),
+        counts=counts,
+        total_files=len(materialised),
+        linked_folder=str(linked_folder) if linked_folder else None,
+        reasons=examples,
+    )
+    return counts
 
 
 def discover_presets(root: Path) -> list[Path]:
@@ -72,16 +191,55 @@ def load_capabilities() -> dict[str, dict[str, object]]:
     return supported if isinstance(supported, dict) else {}
 
 
-class SequentialSerum1VST2:
-    """One reusable engine/plugin instance for safe sequential FXP ingestion."""
+class SequentialSerum1Ingestor:
+    """One reusable engine/plugin instance for safe sequential FXP ingestion.
 
-    def __init__(self, env: PlatformEnv) -> None:
-        candidates = [item for item in env.plugins_for("serum1") if item.format == "VST2"]
-        if not candidates:
-            raise RuntimeError("Verified Serum 1 VST2 binary is unavailable.")
-        self.candidate = candidates[0]
+    Previously named ``SequentialSerum1VST2`` and hardcoded to
+    ``item.format == "VST2"``, which is the defect behind the reported
+    "Verified Serum 1 VST2 binary is unavailable." failure: constructing it at
+    all demanded a Serum 1 VST2 binary, even on a machine whose Serum 1 was
+    installed as VST3 or AU, and even when the pending work needed Serum 2.
+
+    Renderer choice now goes through :mod:`core.renderer_selection`, which
+    keeps VST2 as the highest preference (so nothing changes where VST2 exists)
+    and falls back to the VST3 and AU strategies
+    :func:`core.plugin_host.load_preset` already implements.
+    """
+
+    def __init__(
+        self,
+        env: PlatformEnv,
+        *,
+        operation_id: str = "",
+    ) -> None:
+        from core.renderer_selection import require_renderer
+
+        selection = require_renderer(
+            "serum1",
+            env=env,
+            operation_id=operation_id,
+            phase="preset-classification",
+            context="preparing sequential Serum 1 preset ingestion",
+        )
+        assert selection.selected is not None
+        self.selection = selection
+        self.candidate = next(
+            item
+            for item in env.plugin_candidates
+            if item.synth == "serum1"
+            and item.format == selection.selected.format
+            and str(item.path) == selection.selected.path
+        )
         self.engine, self.processor = make_dawdreamer_processor(self.candidate)
         self.initial = dump_dawdreamer_parameters(self.processor)
+
+    @property
+    def strategy_label(self) -> str:
+        if self.candidate.format == "VST2":
+            return "VST2/S1-dawdreamer-vst2-fxp"
+        if self.candidate.format == "VST3":
+            return "VST3/S2-dawdreamer-vst3-fxp-state"
+        return "AU/S5-dawdreamer-au-direct-preset"
 
     def ingest(self, path: Path) -> tuple[list[ParameterValue], float, str]:
         if self.processor.load_preset(str(path)) is False:
@@ -93,7 +251,11 @@ class SequentialSerum1VST2:
         _peak, rms = audio_levels(render_dawdreamer_note(self.engine, self.processor))
         if rms <= SILENCE_DBFS:
             raise SilentPresetError(f"C4 render is silent at {rms:.2f} dBFS")
-        return parameters, rms, "VST2/S1-dawdreamer-vst2-fxp"
+        return parameters, rms, self.strategy_label
+
+
+#: Retained so existing callers and tests keep working.
+SequentialSerum1VST2 = SequentialSerum1Ingestor
 
 
 class SilentPresetError(RuntimeError):
@@ -134,7 +296,18 @@ def scan_and_ingest(
     capabilities = load_capabilities()
     serum1_enabled = "serum1" in capabilities or bool(env.plugins_for("serum1"))
     needs_serum1 = any(preset.synth == "serum1" for preset in pending)
-    ingestor = SequentialSerum1VST2(env) if serum1_enabled and needs_serum1 else None
+    ingestor = None
+    if serum1_enabled and needs_serum1:
+        from core.renderer_selection import RendererUnavailableError
+
+        try:
+            ingestor = SequentialSerum1Ingestor(env)
+        except RendererUnavailableError as exc:
+            # A missing Serum 1 renderer must not abort the whole scan: the
+            # Serum 2 subset below is still processable.  Each Serum 1 preset is
+            # marked failed with the real reason instead.
+            ingestor = None
+            log(f"Serum 1 ingestion unavailable: {exc}")
     for index, preset in enumerate(pending, start=1):
         if preset.synth == "serum2" and "serum2" not in capabilities:
             database.mark_failed(

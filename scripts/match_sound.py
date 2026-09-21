@@ -62,9 +62,27 @@ def main() -> int:
                 progress_callback=progress,
             )
     except Exception as exc:
-        print(f"MATCH_ERROR={type(exc).__name__}: {exc}", flush=True)
+        # The UI needs one concise, actionable sentence; the flight recorder and
+        # postmortem already hold the full chain, phase and worker state.
+        from core.diagnostics import recorder
+
+        user_message = getattr(exc, "user_message", "") or f"{type(exc).__name__}: {exc}"
+        print(f"MATCH_ERROR={user_message}", flush=True)
+        print(f"MATCH_ERROR_DETAIL={type(exc).__name__}: {exc}", flush=True)
+        try:
+            recorder().flush(timeout=2.0)
+            recorder().close()
+        except Exception:
+            pass
         return 1
     print("MATCH_RESULT=" + str(result), flush=True)
+    try:
+        from core.diagnostics import recorder
+
+        recorder().flush(timeout=1.0)
+        recorder().close()
+    except Exception:
+        pass
     return 0
 
 

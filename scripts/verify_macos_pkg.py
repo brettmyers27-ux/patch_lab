@@ -96,6 +96,13 @@ def _verify_package(
         "identifier": package_info.attrib.get("identifier") == IDENTIFIER,
         "version": package_info.attrib.get("version") == version,
         "install_location": package_info.attrib.get("install-location") == "/Applications",
+        # A relocatable bundle lets macOS Installer redirect the payload to
+        # wherever LaunchServices last saw com.patchlab.desktop, so the app
+        # lands outside /Applications and the postinstall check fails the
+        # install.  PatchLab installs to exactly one place.
+        "bundle_never_relocates": all(
+            len(node) == 0 for node in package_info.iter("relocate")
+        ),
         # pkgutil's directory ordering changes between macOS releases; the
         # invariant is that every installed item is PatchLab.app or the small
         # AppleDouble companion metadata that pkgbuild itself emits.

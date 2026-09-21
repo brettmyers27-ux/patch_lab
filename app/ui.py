@@ -355,6 +355,12 @@ class LegacyMainWindow(QMainWindow):
         self.preview_runner.request_failed.connect(self._preview_request_failed)
         self._render_paused = False
         self._render_failure_detail: str = ""
+        # True while Render Sound Library is driving the shared scan runner,
+        # so its progress and failures land on the Render card rather than Link.
+        self._compact_render_active = False
+        # Last capability snapshot, so a later check can tell that a synth
+        # newly became available rather than merely being present.
+        self._capability_snapshot = None
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
@@ -730,6 +736,20 @@ class LegacyMainWindow(QMainWindow):
             ),
         )
         resolved_cards = state.as_dict()
+        phases = {name: card_state.phase for name, card_state in resolved_cards.items()}
+        previous_phases = getattr(self, "_last_card_phases", None)
+        if previous_phases is not None and phases != previous_phases:
+            self._ui_event(
+                "workflow_state_changed",
+                "workflow card state changed",
+                changed={
+                    name: [previous_phases.get(name), phase]
+                    for name, phase in phases.items()
+                    if previous_phases.get(name) != phase
+                },
+                activities=sorted(self._workflow_activities),
+            )
+        self._last_card_phases = phases
         for key, card in zip(
             ("link", "render", "analyze", "match"),
             self.hero_cards,
@@ -783,6 +803,13 @@ class LegacyMainWindow(QMainWindow):
             self._workflow_activities.pop("link", None)
             self._workflow_activities.pop("render", None)
             self._set_workflow_activity("analyze", current, total, text)
+        elif getattr(self, "_compact_render_active", False):
+            # Render Sound Library owns this job. Its catalog/classification
+            # pass still reports stage="scan", but showing that on the Link card
+            # made a Render click look like linking had restarted.
+            self._workflow_activities.pop("link", None)
+            self._workflow_activities.pop("analyze", None)
+            self._set_workflow_activity("render", current, total, text)
         else:
             self._workflow_activities.pop("render", None)
             self._workflow_activities.pop("analyze", None)
@@ -1131,7 +1158,42 @@ class LegacyMainWindow(QMainWindow):
 
     def _scan_completed(self, summary: dict) -> None:
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
+        compact_render = bool(getattr(self, "_compact_render_active", False))
         self._automatic_link_scan_active = False
+        self._compact_render_active = False
+        partial_note = ""
+        if compact_render:
+            # A partially supported library is a success, not a failure: the
+            # supported subset was learned. Say what was skipped and why.
+            skipped = int(summary.get("skipped_unsupported_generation", 0) or 0)
+            if skipped:
+                waiting = {
+                    "serum1": ("legacy .fxp presets", "Serum 1"),
+                    "serum2": ("Serum 2 presets", "Serum 2"),
+                }
+                kinds = [
+                    waiting[name]
+                    for name in str(summary.get("unsupported_generations", "")).split(",")
+                    if name in waiting
+                ]
+                # Name what the files ARE and which synth they need -- never the
+                # internal generation id, and never the folder they live in.
+                subject = kinds[0][0] if len(kinds) == 1 else "presets"
+                needs = " and ".join(dict.fromkeys(item[1] for item in kinds)) or "another Serum"
+                note = (
+                    f"{skipped:,} {subject} are waiting for {needs}. Your other "
+                    "presets were processed, and your preset folder is still linked."
+                )
+                self.append_log(note)
+                partial_note = note
+        if self.distribution_mode:
+            if int(summary.get("relay_uploaded", 0) or 0):
+                self.append_log("Preset contribution uploaded successfully.")
+            if int(summary.get("relay_upload_failed", 0) or 0):
+                self.append_log(
+                    "Your presets were not uploaded. Your original files were not "
+                    "changed. You can try again."
+                )
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
@@ -1166,17 +1228,66 @@ class LegacyMainWindow(QMainWindow):
             )
         else:
             self.append_log(text)
-            self.statusBar().showMessage(text)
+            # The actionable "N presets are waiting" line beats the long generic
+            # summary; the summary is still in the log.
+            self.statusBar().showMessage(partial_note or text)
         if not self.distribution_mode:
             self.render_button.setEnabled(True)
         self._refresh_workflow_cards()
+        if compact_render:
+            phases = self._card_phases()
+            self._ui_event(
+                "render_completed",
+                "Render Sound Library finished",
+                operation_id=getattr(self.runner, "operation_id", ""),
+                found=summary.get("found"),
+                skipped_unsupported=summary.get("skipped_unsupported_generation", 0),
+                fingerprints_created=summary.get("fingerprints_created"),
+                link_phase=phases.get("link"),
+                render_phase=phases.get("render"),
+            )
+            # The natural moment for the one informational popup: the user has
+            # just seen PatchLab process their folder, so "N presets need Serum X"
+            # is actionable now rather than abstract. It runs LAST -- after the
+            # activities are cleared and the cards refreshed -- because it is
+            # modal, and must not appear over a Render card still showing
+            # "in progress". Shown once; it re-arms only if the count changes.
+            self._notify_pending_after_scan()
 
     def _scan_failed(self, error: str) -> None:
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
+        compact_render = bool(getattr(self, "_compact_render_active", False))
         self._automatic_link_scan_active = False
+        self._compact_render_active = False
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
+        if compact_render:
+            # A Render failure must leave the Link card's success alone and put
+            # the Render card into a retryable failed state. Nothing here
+            # touches privacy_choice.linked_folder, so the folder stays linked.
+            self._render_failure_detail = self._user_facing_error(error)
+            self.render_button.setEnabled(True)
+            self.render_stats.setText(self._render_failure_detail)
+            self.append_log(f"Render Sound Library failed: {error}")
+            self.statusBar().showMessage(self._render_failure_detail)
+            self._refresh_workflow_cards()
+            phases = self._card_phases()
+            self._ui_event(
+                "render_failed",
+                "Render Sound Library failed; UI recovered",
+                severity="warning",
+                operation_id=getattr(self.runner, "operation_id", ""),
+                error=error,
+                link_phase=phases.get("link"),
+                render_phase=phases.get("render"),
+                retry_available=bool(
+                    self._render_failure_detail
+                    and "render" not in self._workflow_activities
+                ),
+                stale_activities=sorted(self._workflow_activities),
+            )
+            return
         self.append_log(
             f"{'Background preset check was deferred' if automatic else 'Scan failed'}: {error}"
         )
@@ -1184,7 +1295,76 @@ class LegacyMainWindow(QMainWindow):
             self.statusBar().showMessage(error)
         self._refresh_workflow_cards()
 
+    @staticmethod
+    def _user_facing_error(error: str) -> str:
+        """Turn an internal worker error into one concise, actionable sentence.
+
+        Users should never be shown a traceback or an internal class name. The
+        full technical detail stays in the flight recorder and the support
+        bundle; this is only what appears on a card or in the status bar.
+        """
+
+        text = str(error)
+        lowered = text.casefold()
+        if "no usable serum2 renderer" in lowered or (
+            "serum 2" in lowered and "renderer" in lowered
+        ):
+            return (
+                "PatchLab couldn't start Serum 2. Your preset folder is still "
+                "linked. Check your Serum 2 installation and try again."
+            )
+        if "no usable serum1 renderer" in lowered or (
+            "serum 1" in lowered and ("renderer" in lowered or "unavailable" in lowered)
+        ):
+            return (
+                "PatchLab couldn't start Serum 1, so legacy .fxp presets were "
+                "skipped. Your preset folder is still linked."
+            )
+        if "renderer" in lowered and "unavailable" in lowered:
+            return (
+                "PatchLab couldn't start Serum. Your preset folder is still "
+                "linked. Check your Serum installation and try again."
+            )
+        if "workers died" in lowered or "respawn" in lowered:
+            return (
+                "Serum kept stopping unexpectedly while PatchLab was working. Your "
+                "preset folder is still linked. Check your Serum installation and "
+                "try again."
+            )
+        if "stalled" in lowered or "no measurable progress" in lowered:
+            return (
+                "PatchLab stopped because the job had stopped making progress. "
+                "Your earlier setup is unchanged, so you can try again."
+            )
+        if "disk" in lowered or "no space" in lowered:
+            return "PatchLab ran out of disk space. Free some space and try again."
+        if "permission" in lowered or "denied" in lowered:
+            return (
+                "PatchLab could not read a required file. Check the folder's "
+                "permissions and try again."
+            )
+        if "filenotfound" in lowered or "no such file" in lowered:
+            return (
+                "PatchLab couldn't find a file it needed. If you moved or renamed "
+                "it, choose it again and retry."
+            )
+        if "notadirectory" in lowered:
+            return (
+                "PatchLab couldn't open your preset folder. Re-link it and try again."
+            )
+        # Fall back to the raw message, trimmed: better a terse technical line
+        # than a spinner that never stops.
+        first = text.strip().splitlines()[0] if text.strip() else "Something went wrong."
+        return first[:200]
+
     def start_render(self) -> None:
+        self._ui_event(
+            "render_requested",
+            "Render Sound Library selected",
+            compact_mode=bool(self.storage_preferences.compact_mode),
+            folder_linked=bool(self.privacy_choice.linked_folder),
+            retry=bool(self._render_failure_detail),
+        )
         storage = storage_status()
         if not storage.available:
             QMessageBox.warning(
@@ -1214,8 +1394,20 @@ class LegacyMainWindow(QMainWindow):
                 self.append_log("Compact preset processing is already running")
                 return
             folder = Path(linked_folder)
+            # This is the Render Sound Library button, so its progress and any
+            # failure belong to the Render card.
+            #
+            # Previously this drove the *link* card's activity, and the
+            # linked-folder progress stream (stage="scan") drove it too, so
+            # clicking Render visibly re-ran "Link My Preset Folder" for the
+            # whole catalog pass and a later failure was reported by
+            # _scan_failed -- which never sets _render_failure_detail. The
+            # reported symptom ("did not render sound library, it just restarted
+            # 'link my preset folder'") was exactly that mis-wiring.
+            self._compact_render_active = True
+            self._render_failure_detail = ""
             self._set_workflow_activity(
-                "link", 0, 0, "Starting compact preset-library processing…"
+                "render", 0, 0, "Starting compact preset-library processing…"
             )
             self.append_log(
                 "Starting compact linked-folder processing: renders are learned "
@@ -1223,6 +1415,12 @@ class LegacyMainWindow(QMainWindow):
             )
             self.statusBar().showMessage("Processing your presets locally…")
             self.runner.start(folder, local_library=True)
+            self._ui_event(
+                "render_started",
+                "compact linked-folder processing started",
+                operation_id=getattr(self.runner, "operation_id", ""),
+                card_phases=self._card_phases(),
+            )
             return
         self._set_workflow_activity("render", 0, 0, "Starting render workers…")
         self.render_pause_button.setEnabled(True)
@@ -1515,6 +1713,27 @@ class LegacyMainWindow(QMainWindow):
             return
         if self._match_audio_path is None:
             return
+        target_synth = str(self.match_synth.currentData())
+        self._ui_event(
+            "match_requested",
+            "user asked to run a match",
+            target_synth=target_synth,
+            quality=str(self.match_budget.currentData()),
+            audio_extension=self._match_audio_path.suffix.casefold(),
+        )
+        # CAPABILITY GATE (fresh, not cached startup state).
+        #
+        # Creating a Serum 2 preset needs Serum 2 installed. It does NOT need the
+        # user's existing library to have been processed -- those are different
+        # things, and conflating them would block Match for someone who simply
+        # has pending presets. Only the synth requirement is checked here.
+        #
+        # It runs BEFORE anything else changes: a refused Match must not cancel
+        # background work, disable the controls, or start a spinner. (It
+        # previously ran after all three, which left a user who had just been
+        # told to install Serum 2 staring at dead controls.)
+        if not self._check_output_capability(target_synth, matching_now=True):
+            return
         # Matching is always the foreground request. An automatic maintenance
         # scan is resumable, so stop it immediately rather than making a new
         # patch compete with a Serum host, CPU, or disk work from launch.
@@ -1538,7 +1757,6 @@ class LegacyMainWindow(QMainWindow):
         self.match_stats.setText("Loading audio and models…")
         self.recommendation_details.setVisible(False)
         self.recommendation_placeholder.setVisible(True)
-        target_synth = str(self.match_synth.currentData())
         budget = str(self.match_budget.currentData())
         # Analysis-by-synthesis produces a genuinely new patch; the factory
         # fingerprint path can only hand back the closest existing preset
@@ -1553,6 +1771,14 @@ class LegacyMainWindow(QMainWindow):
         self.append_log(
             f"Matching {self._match_audio_path.name} for {target_synth} ({budget}) "
             f"via {'factory fingerprints' if factory_only else 'analysis-by-synthesis'}"
+        )
+        self._ui_event(
+            "match_started",
+            "match worker launched",
+            target_synth=target_synth,
+            quality=budget,
+            factory_only=bool(factory_only),
+            card_phases=self._card_phases(),
         )
         self.match_runner.start(
             self._match_audio_path,
@@ -1616,6 +1842,11 @@ class LegacyMainWindow(QMainWindow):
         sd.play(audio, rate, blocking=False)
 
     def _match_completed(self, result_path: str) -> None:
+        self._ui_event(
+            "match_completed",
+            "match finished",
+            operation_id=getattr(self.match_runner, "operation_id", ""),
+        )
         self._workflow_activities.pop("match", None)
         self._workflow_last_match_complete = True
         import json
@@ -1740,7 +1971,40 @@ class LegacyMainWindow(QMainWindow):
         self.match_stats.setText(str(result.get("message", "Match complete")))
         self.statusBar().showMessage("Match complete")
 
+    @staticmethod
+    def _match_failure_message(error: str) -> str:
+        """One concise, plain-English line for a failed Match.
+
+        A message that already starts "PatchLab " was written for the user (the
+        worker sends those for known causes) and is shown as-is. Anything else is
+        a raw exception -- a class name and often a filesystem path -- which is
+        neither concise nor useful on screen, so it is summarised. The complete
+        text is never lost: it is written to the application log and recorded in
+        the flight recorder by the caller.
+        """
+
+        text = str(error).strip()
+        if text.startswith("PatchLab "):
+            return text.splitlines()[0][:200]
+        lowered = text.casefold()
+        if "filenotfound" in lowered or "no such file" in lowered:
+            return (
+                "PatchLab couldn't read that audio file. Check that it still "
+                "exists, then try again."
+            )
+        if "decode" in lowered or "unsupported" in lowered or "soundfile" in lowered:
+            return (
+                "PatchLab couldn't read that audio file. Try a WAV, AIFF, FLAC or "
+                "MP3 file."
+            )
+        return (
+            "PatchLab couldn't finish this match. Your sound is still selected — "
+            "you can try again."
+        )
+
     def _match_failed(self, error: str) -> None:
+        detail = str(error)
+        error = self._match_failure_message(detail)
         self._workflow_activities.pop("match", None)
         self._workflow_last_match_complete = False
         self.match_progress.setRange(0, 100)
@@ -1755,10 +2019,24 @@ class LegacyMainWindow(QMainWindow):
         self.match_offset.setEnabled(True)
         self.match_stats.setText(error)
         self.match_stats.setStyleSheet("color: #ff5f67; font-weight: 700;")
-        self.append_log(f"Match failed: {error}")
+        # The user sees the concise line; the full technical text stays here.
+        self.append_log(f"Match failed: {detail}")
         self.statusBar().showMessage(error)
         if hasattr(self, "match_card_status"):
             self._refresh_workflow_cards()
+        self._ui_event(
+            "match_failed",
+            "match failed; UI recovered",
+            severity="warning",
+            operation_id=getattr(self.match_runner, "operation_id", ""),
+            error=detail,
+            shown_to_user=error,
+            controls_recovered=bool(
+                self.match_synth.isEnabled() and not self.match_cancel_button.isEnabled()
+            ),
+            stale_activities=sorted(self._workflow_activities),
+            source_audio_kept=self._match_audio_path is not None,
+        )
 
     def report_model_asset_error(
         self,
@@ -2451,6 +2729,12 @@ class MainWindow(LegacyMainWindow):
         self._storage_pending: str | None = None
         self._render_paused = False
         self._render_failure_detail: str = ""
+        # True while Render Sound Library is driving the shared scan runner,
+        # so its progress and failures land on the Render card rather than Link.
+        self._compact_render_active = False
+        # Last capability snapshot, so a later check can tell that a synth
+        # newly became available rather than merely being present.
+        self._capability_snapshot = None
         self._model_asset_error: str | None = None
         self._match_audio_path: Path | None = None
         self._match_result_path: Path | None = None
@@ -3678,6 +3962,10 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None:
             QMessageBox.information(self, "Batch already running", "Only one batch can run at a time.")
             return
+        # Same fresh capability gate as a single Match, and before the user is
+        # asked to choose a folder and a name for a batch that cannot be produced.
+        if not self._check_output_capability(str(self.match_synth.currentData())):
+            return
         selected = QFileDialog.getExistingDirectory(
             self, "Choose a folder of sounds", str(Path.home())
         )
@@ -4370,6 +4658,266 @@ class MainWindow(LegacyMainWindow):
         layout.addWidget(close)
         dialog.exec()
 
+    def _ui_event(self, event_type: str, message: str = "", **fields) -> None:
+        """Record one GUI-level decision as a structured flight-recorder event.
+
+        Structured fields carry the *reason*; the visible popup text is not
+        duplicated here. Never raises: diagnostics must not affect the UI.
+        """
+
+        try:
+            from core.diagnostics import record
+
+            record("gui", event_type, message, **fields)
+        except Exception:
+            pass
+
+    def _card_phases(self) -> dict[str, str]:
+        """Current phase of the four workflow cards, for recovery diagnostics.
+
+        Reads the phases the most recent refresh already computed. Re-resolving
+        the whole workflow state here cost ~90 ms of GUI-thread work on every
+        recorded click, for a value that is already in hand.
+        """
+
+        return dict(getattr(self, "_last_card_phases", None) or {})
+
+    def _check_output_capability(
+        self, generation: str, *, matching_now: bool = False
+    ) -> bool:
+        """Fresh capability gate for a requested output generation.
+
+        Returns True when the operation may start. On failure the user gets one
+        concise sentence and nothing is started -- an impossible operation must
+        not be launched only to fail later.
+
+        Deliberately cheap (path stats, no plug-in is opened), so a user who
+        installs Serum while PatchLab is running is picked up without a restart.
+        """
+
+        from core.capability_ux import evaluate_output_target
+
+        try:
+            decision, snapshot = evaluate_output_target(
+                generation,
+                previous=getattr(self, "_capability_snapshot", None),
+            )
+        except Exception as exc:
+            # A capability-check failure must never block the user: fall through
+            # and let the operation report its own error.
+            self.append_log(f"Capability check unavailable: {exc}")
+            return True
+        previous = getattr(self, "_capability_snapshot", None)
+        self._capability_snapshot = snapshot
+        name = "Serum 2" if generation == "serum2" else "Serum 1"
+        if not decision.allowed:
+            QMessageBox.information(self, f"{name} is required", decision.message)
+            self.append_log(f"Match not started: {decision.message}")
+            self.statusBar().showMessage(decision.message)
+            return False
+        if decision.became_available:
+            self.append_log(f"{name} became available since the last check.")
+        # Offer any pending work for this generation. This is decided by the
+        # catalogued pending rows, not by having watched the synth disappear
+        # earlier in this session: a synth installed between launches must be
+        # offered exactly like one installed while the app was open.
+        self._offer_pending_processing(generation, matching_now=matching_now)
+        if previous is None:
+            self._maybe_show_missing_synth_notice(snapshot)
+        return True
+
+    def _pending_counts(self) -> dict:
+        try:
+            from core.db import Database
+
+            database_path = self.local_paths["db"]
+            if not Path(database_path).is_file():
+                return {}
+            return Database(database_path).pending_counts()
+        except Exception:
+            return {}
+
+    def _maybe_show_missing_synth_notice(self, snapshot) -> None:
+        """One informational message about presets needing an absent synth."""
+
+        from core.capability_ux import acknowledge, missing_synth_notice
+
+        pending = self._pending_counts()
+        if not pending:
+            return
+        try:
+            notice = missing_synth_notice(snapshot=snapshot, pending_counts=pending)
+        except Exception:
+            return
+        if notice is None:
+            return
+        QMessageBox.information(self, notice.title, notice.body)
+        acknowledge(notice, choice="seen")
+        self.append_log(notice.body)
+
+    def _offer_pending_processing(
+        self, generation: str, *, matching_now: bool = False
+    ) -> None:
+        """Offer to process presets that were waiting for ``generation``.
+
+        Choosing Not Now must leave everything else working: Match uses whatever
+        is already learned, and the pending presets simply do not participate in
+        retrieval until processed.
+        """
+
+        from core.capability_ux import acknowledge, synth_available_notice
+        from core.db import Database
+        from core.preset_identity import blocked_reasons_for
+
+        try:
+            database_path = self.local_paths["db"]
+            if not Path(database_path).is_file():
+                return
+            waiting = Database(database_path).presets_needing_generation(
+                generation, reasons=sorted(blocked_reasons_for(generation))
+            )
+        except Exception:
+            return
+        if not waiting:
+            return
+        try:
+            notice = synth_available_notice(
+                generation=generation, pending_count=len(waiting)
+            )
+        except Exception:
+            return
+        if notice is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(notice.title)
+        box.setText(notice.body)
+        process_now = box.addButton("Process Now", QMessageBox.ButtonRole.AcceptRole)
+        not_now = box.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(not_now)
+        box.exec()
+        chose_process = box.clickedButton() is process_now
+        acknowledge(notice, choice="process_now" if chose_process else "not_now")
+        if not chose_process:
+            self.append_log(
+                f"{len(waiting):,} waiting preset(s) left unprocessed for now. "
+                "Matching continues with the presets already learned."
+            )
+            return
+        # Process only the presets waiting on this generation -- no rescan.
+        if self.runner.running:
+            self.append_log("Preset processing is already running.")
+            return
+        self._compact_render_active = True
+        self._render_failure_detail = ""
+        self._set_workflow_activity(
+            "render", 0, len(waiting), f"Processing {len(waiting):,} waiting presets…"
+        )
+        self.append_log(
+            f"Processing {len(waiting):,} waiting {generation} preset(s) that were "
+            "already catalogued; no rescan is needed."
+        )
+        self._ui_event(
+            "process_pending_started",
+            "processing waiting presets for a newly available synth",
+            generation=generation,
+            waiting=len(waiting),
+            workers=1 if matching_now else 4,
+        )
+        # One worker when a Match is starting in the same click: Match is the
+        # foreground request and processing is resumable, so it yields.
+        self.runner.start(
+            pending_generation=generation, workers=1 if matching_now else 4
+        )
+
+    def _notify_pending_after_scan(self) -> None:
+        """Show the one 'these presets need Serum X' message after processing.
+
+        Uses a fresh capability check so a synth installed during the scan is
+        reflected, and defers the anti-nag decision to core.capability_ux.
+        """
+
+        try:
+            from core.synth_capability import refresh_capabilities
+
+            snapshot = refresh_capabilities(reason="linked-folder processing finished")
+            self._capability_snapshot = snapshot
+            self._maybe_show_missing_synth_notice(snapshot)
+        except Exception as exc:
+            self.append_log(f"Could not summarise pending presets: {exc}")
+
+    def _last_operation_name(self) -> str:
+        """Best guess at what the user was doing, for the bundle summary."""
+
+        if "match" in self._workflow_activities:
+            return "match"
+        if "render" in self._workflow_activities or getattr(
+            self, "_compact_render_active", False
+        ):
+            return "render-sound-library"
+        if "link" in self._workflow_activities:
+            return "link-preset-folder"
+        if "analyze" in self._workflow_activities:
+            return "analyze-and-learn"
+        return ""
+
+    def _diagnostic_settings(self) -> dict:
+        """The UI-side switches that affect which code path ran."""
+
+        try:
+            return {
+                "target_synth": str(self.match_synth.currentData()),
+                "quality_mode": str(self.match_budget.currentData()),
+                "start_offset_s": float(self.match_offset.value()),
+                "distribution_mode": bool(self.distribution_mode),
+                "compact_mode": bool(
+                    getattr(self, "storage_preferences", None)
+                    and self.storage_preferences.compact_mode
+                ),
+                "sharing_enabled": bool(
+                    self.privacy_choice.use_and_share_own_presets
+                ),
+                "active_activities": sorted(self._workflow_activities),
+                "render_failure_detail": self._render_failure_detail,
+                "model_asset_error": self._model_asset_error or "",
+                # UI recovery state: which cards a reader should expect to see,
+                # so a report answers "was earlier setup preserved?".
+                "ui_recovery": {
+                    card: {
+                        "phase": state.phase,
+                        "text": state.text,
+                    }
+                    for card, state in self._current_card_states().items()
+                },
+            }
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def _current_card_states(self) -> dict:
+        """Resolve the four workflow cards without touching the widgets."""
+
+        try:
+            storage = storage_status()
+            return resolve_workflow_state(
+                privacy=self.privacy_choice,
+                local_database_path=self.local_paths["db"],
+                audio_selected=self._match_audio_path is not None,
+                match_completed=self._workflow_last_match_complete,
+                activities=self._workflow_activities,
+                match_prerequisite_error=self._model_asset_error or "",
+                compact_mode=bool(
+                    getattr(self, "storage_preferences", None)
+                    and self.storage_preferences.compact_mode
+                ),
+                audio_storage_error=storage.reason if not storage.available else "",
+                render_failed_detail=(
+                    self._render_failure_detail
+                    if "render" not in self._workflow_activities
+                    else ""
+                ),
+            ).as_dict()
+        except Exception:
+            return {}
+
     def _diagnostic_log_text(self) -> str:
         """Capture an actionable, consented snapshot without touching audio."""
 
@@ -4402,8 +4950,37 @@ class MainWindow(LegacyMainWindow):
             f"{item.synth}/{item.format}={'present' if item.exists else 'missing'}"
             for item in ENV.plugin_candidates
         )
+        # The old flat present/missing list could not answer "which renderer did
+        # PatchLab actually pick, and why did it reject the others?", which is
+        # the question both reported tickets turned on.
+        renderer_summary = "unavailable"
+        try:
+            from core.diagnostics import DIAGNOSTIC_SCHEMA_VERSION, recorder
+            from core.renderer_selection import select_renderer
+
+            lines = []
+            for synth in ("serum1", "serum2"):
+                selection = select_renderer(synth, log_decision=False)
+                lines.append(
+                    f"  {synth}: selected={selection.renderer or 'NONE'} "
+                    f"reason={selection.reason}"
+                )
+                for item in selection.rejections():
+                    lines.append(
+                        f"    rejected {item.label}: {item.rejection_reason}"
+                    )
+            renderer_summary = "\n" + "\n".join(lines)
+            schema_line = (
+                f"Diagnostics: schema={DIAGNOSTIC_SCHEMA_VERSION}; "
+                f"session={recorder().session_id}; "
+                f"retention={recorder().retention_policy()['max_total_event_bytes']} bytes max\n"
+            )
+        except Exception as exc:
+            schema_line = f"Diagnostics: unavailable ({type(exc).__name__}: {exc})\n"
         return (
             "PatchLab diagnostic report\n"
+            + schema_line
+            + f"Renderer selection:{renderer_summary}\n"
             f"Build: {json.dumps(build.as_dict(), sort_keys=True)}\n"
             f"Runtime: Python {sys.version.split()[0]} · {ENV.system_name} · {ENV.machine}\n"
             f"Executable: {sys.executable}\n"
@@ -4426,7 +5003,7 @@ class MainWindow(LegacyMainWindow):
         )
 
     def open_bug_report(self) -> None:
-        """Collect a required description and send two text files privately."""
+        """Collect a required description, save it locally, then upload the saved bundle."""
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Report a Problem")
@@ -4473,16 +5050,52 @@ class MainWindow(LegacyMainWindow):
                 )
                 return
             try:
-                from core.bug_report import create_request
+                from core.bug_report import create_request, load_request
 
                 request_path = create_request(
                     comments=comments.toPlainText(), logs=self._diagnostic_log_text()
                 )
-                self.bug_report_runner.start(request_path)
             except Exception as exc:
                 QMessageBox.warning(dialog, "Report was not sent", str(exc))
                 return
             self.append_log(f"Saved bug report locally: {request_path}")
+            # The structured flight-recorder bundle is written next to the
+            # readable ticket and BEFORE any upload is attempted, so a support
+            # transport problem can never destroy the local evidence. It also
+            # does not depend on the private support service being connected.
+            bundle = None
+            try:
+                from core.support_bundle import create_support_bundle
+
+                ticket_id = load_request(request_path).ticket_id
+                bundle = create_support_bundle(
+                    ticket_id=ticket_id,
+                    comments=comments.toPlainText(),
+                    operation=self._last_operation_name(),
+                    settings=self._diagnostic_settings(),
+                    ticket_path=request_path,
+                )
+                self.append_log(
+                    f"Saved diagnostic bundle: {bundle.directory}"
+                    + (f" (+{bundle.archive.name})" if bundle.archive else "")
+                )
+                if bundle.fingerprint:
+                    self.append_log(f"Failure fingerprint: {bundle.fingerprint}")
+            except Exception as exc:
+                # A bundle problem must never block the readable ticket the user
+                # already has, so it is reported and the flow continues.
+                self.append_log(f"Diagnostic bundle could not be written: {exc}")
+            try:
+                self.bug_report_runner.start(request_path)
+            except Exception as exc:
+                QMessageBox.information(
+                    dialog,
+                    "Report saved locally",
+                    "Your report was saved on your Desktop in “PatchLab Bug "
+                    f"Reports”. It could not be sent right now: {exc}",
+                )
+                dialog.accept()
+                return
             self.append_log("Sending user-approved bug report to private support…")
             self.statusBar().showMessage("Bug report saved locally; sending private copy…")
             dialog.accept()
@@ -4492,25 +5105,67 @@ class MainWindow(LegacyMainWindow):
 
     def _bug_report_completed(self, result: dict) -> None:
         ticket_id = str(result.get("ticket_id", ""))
-        self.append_log(f"Bug report sent successfully: {ticket_id}")
-        self.statusBar().showMessage("Bug report sent. Thank you.")
+        receipt_id = str(result.get("receipt_id", ""))
+        self.append_log(
+            f"Bug report sent successfully: ticket {ticket_id}, receipt {receipt_id}"
+        )
+        self.statusBar().showMessage("Bug report sent successfully.")
         QMessageBox.information(
             self,
             "Bug report sent",
-            "Thank you. Your combined local report remains on your Desktop in "
-            "“PatchLab Bug Reports”, and a private support copy was sent.",
+            "Bug report sent successfully.\n\n"
+            f"Ticket ID: {ticket_id}\n\n"
+            "Your saved copy is on your Desktop in “PatchLab Bug Reports”.",
         )
 
     def _bug_report_failed(self, error: str) -> None:
-        self.append_log(f"Bug report was not sent: {error}")
-        self.statusBar().showMessage("Bug report was not sent; you can retry.")
-        QMessageBox.warning(
-            self,
-            "Bug report was not sent",
-            "Your combined report was saved locally on your Desktop in “PatchLab "
-            "Bug Reports”. Keep its Ticket ID for support.\n\n"
-            + error,
+        code = getattr(self.bug_report_runner, "error_code", "")
+        self.append_log(f"Bug report was saved locally but not uploaded ({code or 'unknown'}): {error}")
+        self.statusBar().showMessage("Bug report saved on this Mac; upload didn't complete.")
+        needs_connection = code in {"not_connected", "auth_failed"}
+        box = QMessageBox(self)
+        box.setWindowTitle("Bug report not uploaded")
+        box.setText(
+            "Your bug report was saved on this Mac, but PatchLab couldn't upload it. "
+            "You can try again.\n\n" + error
         )
+        retry = box.addButton("Try Again", QMessageBox.ButtonRole.AcceptRole)
+        connect = (
+            box.addButton("Sign In…", QMessageBox.ButtonRole.ActionRole)
+            if needs_connection
+            else None
+        )
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(retry)
+        box.exec()
+        clicked = box.clickedButton()
+        if connect is not None and clicked is connect:
+            if not self._reconnect_support_service():
+                return
+        elif clicked is not retry:
+            return
+        request_path = getattr(self.bug_report_runner, "request_path", None)
+        if request_path is None or self.bug_report_runner.running:
+            return
+        try:
+            self.bug_report_runner.start(request_path)
+            self.append_log("Retrying the saved bug report upload…")
+            self.statusBar().showMessage("Sending the saved bug report again…")
+        except Exception as exc:
+            self.append_log(f"Could not restart the bug report upload: {exc}")
+
+    def _reconnect_support_service(self) -> bool:
+        """Let the user sign in again (for example after choosing local-only)."""
+
+        try:
+            from app.access_dialog import PasscodeDialog
+            from core.access_gate import AccessManager
+
+            dialog = PasscodeDialog(AccessManager(), self)
+            return dialog.exec() == PasscodeDialog.DialogCode.Accepted
+        except Exception as exc:
+            self.append_log(f"Sign-in could not be opened: {exc}")
+            return False
 
     def append_log(self, message: str) -> None:
         append_runtime_log(message)

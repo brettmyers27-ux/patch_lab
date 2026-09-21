@@ -8,7 +8,7 @@ import os
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from core.worker_runtime import (
     DEFAULT_STARTUP_TIMEOUT_MS,
@@ -32,6 +32,7 @@ class _ProcessRunnerBase(QObject):
         self._startup_timer.setSingleShot(True)
         self._startup_timer.timeout.connect(self._startup_timed_out)
         self._worker_name = ""
+        self.operation_id = ""
         self._worker_ready = False
         self._startup_failure_emitted = False
         self._buffer = ""
@@ -59,6 +60,21 @@ class _ProcessRunnerBase(QObject):
         self._worker_ready = False
         self._startup_failure_emitted = False
         program, invocation = worker_invocation(worker_name, arguments)
+        # One correlation ID per worker launch, handed to the child through its
+        # environment, so a GUI-side event and the worker's own events for the
+        # same operation can be joined in a support bundle. Failure here must
+        # never stop a worker from starting.
+        self.operation_id = ""
+        try:
+            from core.diagnostics import child_environment, new_operation_id
+
+            self.operation_id = new_operation_id(worker_name.replace("_", "-"))
+            environment = QProcessEnvironment.systemEnvironment()
+            for key, value in child_environment(self.operation_id).items():
+                environment.insert(key, value)
+            self.process.setProcessEnvironment(environment)
+        except Exception:
+            self.operation_id = ""
         try:
             timeout_ms = int(
                 os.environ.get(
@@ -159,13 +175,24 @@ class ScanProcessRunner(_ProcessRunnerBase):
         local_library: bool = False,
         fingerprint_only: bool = False,
         workers: int = 4,
+        pending_generation: str | None = None,
     ) -> None:
         if self.process.state() != QProcess.ProcessState.NotRunning:
             raise RuntimeError("Scan worker is already running")
         self._buffer = ""
         self._summary = None
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
-        if fingerprint_only:
+        if pending_generation is not None:
+            # Process presets already catalogued as pending for one generation.
+            # No folder argument: rediscovering the library is exactly what this
+            # path exists to avoid.
+            if pending_generation not in {"serum1", "serum2"}:
+                raise ValueError(f"Unknown generation {pending_generation!r}")
+            self._start_worker(
+                "process-pending",
+                ["--generation", pending_generation, "--workers", str(max(1, workers))],
+            )
+        elif fingerprint_only:
             # No folder to scan here: this fingerprints whatever is already
             # rendered but missing from the fingerprints table, regardless of
             # which pipeline rendered it. Same LOCAL_LIBRARY_* output protocol
@@ -526,6 +553,10 @@ class BugReportProcessRunner(_ProcessRunnerBase):
         self._init_worker_process()
         self._result: dict[str, object] | None = None
         self._error: str | None = None
+        #: Stable machine-readable reason for the last failure ("" if none).
+        self.error_code: str = ""
+        #: The saved report being (re)sent; a retry re-sends the same saved files.
+        self.request_path: Path | None = None
 
     @property
     def running(self) -> bool:
@@ -537,6 +568,8 @@ class BugReportProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._result = None
         self._error = None
+        self.error_code = ""
+        self.request_path = Path(request_path)
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
         self._start_worker("bug-report", ["--request", str(request_path)])
 
@@ -549,6 +582,8 @@ class BugReportProcessRunner(_ProcessRunnerBase):
                 continue
             if line.startswith("BUG_REPORT_RESULT="):
                 self._result = json.loads(line.split("=", 1)[1])
+            elif line.startswith("BUG_REPORT_ERROR_CODE="):
+                self.error_code = line.split("=", 1)[1].strip()
             elif line.startswith("BUG_REPORT_ERROR="):
                 self._error = line.split("=", 1)[1]
             elif line:
@@ -561,8 +596,10 @@ class BugReportProcessRunner(_ProcessRunnerBase):
         if exit_code == 0 and self._result is not None:
             self.completed.emit(self._result)
         else:
+            if not self.error_code:
+                self.error_code = "worker_failed"
             self.failed.emit(
-                self._error or f"Bug report worker exited with code {exit_code}"
+                self._error or "The upload didn't complete."
             )
 
 
@@ -650,11 +687,23 @@ class AnalyzeProcessRunner(_ProcessRunnerBase):
             self.failed.emit(f"Analyze & Learn exited with code {exit_code} during {self._phase}")
 
 
+#: Default inactivity budget for the Match worker, measured from its last
+#: progress line. Generous on purpose: this is not a time limit on matching, it
+#: is the guarantee that a worker producing *nothing* still terminates instead
+#: of leaving the UI spinning. The in-worker phase-aware stall detector
+#: (core/operation_state.py) normally fires long before this does; this exists
+#: because the reported hang produced no output and no exception at all, so the
+#: GUI needs its own backstop that does not depend on the worker being healthy
+#: enough to report anything.
+DEFAULT_MATCH_INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000
+
+
 class MatchProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     progress = Signal(dict)
     completed = Signal(str)
     failed = Signal(str)
+    stalled = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -662,10 +711,98 @@ class MatchProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._result: str | None = None
         self._error: str | None = None
+        self._last_phase = ""
+        self._progress_lines = 0
+        self._stall_reported = False
+        # Liveness watchdog. Restarted by every worker output line, so a worker
+        # that is slow but talking is never killed, while one that has gone
+        # silent is turned into a clean terminal failure.
+        self._liveness_timer = QTimer(self)
+        self._liveness_timer.setSingleShot(True)
+        self._liveness_timer.timeout.connect(self._liveness_timed_out)
 
     @property
     def running(self) -> bool:
         return self.process.state() != QProcess.ProcessState.NotRunning
+
+    def _liveness_interval_ms(self) -> int:
+        try:
+            return max(
+                1_000,
+                int(
+                    os.environ.get(
+                        "PATCHLAB_MATCH_INACTIVITY_TIMEOUT_MS",
+                        str(DEFAULT_MATCH_INACTIVITY_TIMEOUT_MS),
+                    )
+                ),
+            )
+        except ValueError:
+            return DEFAULT_MATCH_INACTIVITY_TIMEOUT_MS
+
+    def _touch_liveness(self) -> None:
+        if self.running:
+            self._liveness_timer.start(self._liveness_interval_ms())
+
+    def _liveness_timed_out(self) -> None:
+        """No worker output for the whole inactivity budget: recover the UI.
+
+        Evidence first, then recovery: the worker is asked to dump its own state
+        via the flight recorder's postmortem file before it is killed, then the
+        UI receives a terminal `failed` so controls come back.
+        """
+
+        if not self.running or self._stall_reported:
+            return
+        self._stall_reported = True
+        seconds = self._liveness_interval_ms() / 1000.0
+        detail = {
+            "reason": (
+                f"the match worker produced no output for {seconds:.0f}s during "
+                f"phase {self._last_phase or 'unknown'}"
+            ),
+            "last_phase": self._last_phase,
+            "progress_lines": self._progress_lines,
+            "pid": int(self.process.processId()),
+            "inactivity_seconds": seconds,
+        }
+        try:
+            from core.diagnostics import record
+            from core.operation_state import capture_thread_stacks, write_postmortem
+
+            record(
+                "match-runner",
+                "stall_detected",
+                detail["reason"],
+                severity="error",
+                phase=self._last_phase,
+                decision_reason=(
+                    "GUI-side liveness backstop: a worker that reports nothing for a "
+                    "whole inactivity budget is terminated so the UI cannot stay in a "
+                    "loading state forever"
+                ),
+                **detail,
+            )
+            write_postmortem(
+                {
+                    "trigger": "stall",
+                    "operation": "match",
+                    "source": "gui-liveness-watchdog",
+                    "current_phase": self._last_phase,
+                    "seconds_since_last_progress": seconds,
+                    "stall_budget_seconds": seconds,
+                    "detail": detail,
+                    "thread_stacks": capture_thread_stacks(),
+                }
+            )
+        except Exception:
+            pass
+        self.stalled.emit(detail)
+        self.log.emit(f"Match stopped: {detail['reason']}")
+        self.process.kill()
+        self.failed.emit(
+            "PatchLab stopped waiting because the match made no progress. "
+            "Your selected audio is unchanged — you can try again."
+        )
 
     def start(
         self,
@@ -685,6 +822,9 @@ class MatchProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._result = None
         self._error = None
+        self._last_phase = ""
+        self._progress_lines = 0
+        self._stall_reported = False
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
         arguments = [
             str(audio),
@@ -706,6 +846,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
         if local_audio_root is not None:
             arguments.extend(["--local-audio-root", str(local_audio_root)])
         self._start_worker("match", arguments)
+        self._touch_liveness()
 
     def cancel(self) -> None:
         if self.running:
@@ -716,10 +857,16 @@ class MatchProcessRunner(_ProcessRunnerBase):
             "utf-8", errors="replace"
         )
         while (line := self._pop_line()) is not None:
+            # Any output at all is evidence of life, so the inactivity budget
+            # restarts here rather than only on structured progress.
+            self._touch_liveness()
             if self._handle_worker_line(line):
                 continue
             if line.startswith("MATCH_PROGRESS="):
-                self.progress.emit(json.loads(line.split("=", 1)[1]))
+                detail = json.loads(line.split("=", 1)[1])
+                self._progress_lines += 1
+                self._last_phase = str(detail.get("phase", "")) or self._last_phase
+                self.progress.emit(detail)
             elif line.startswith("MATCH_RESULT="):
                 self._result = line.split("=", 1)[1]
             elif line.startswith("MATCH_ERROR="):
@@ -728,8 +875,13 @@ class MatchProcessRunner(_ProcessRunnerBase):
                 self.log.emit(line)
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._liveness_timer.stop()
         self._read_output()
         if self._finished_before_ready(exit_code):
+            return
+        if self._stall_reported:
+            # The watchdog already emitted a terminal failure; do not emit a
+            # second, less useful one for the kill it caused.
             return
         if exit_code == 0 and self._result:
             self.completed.emit(self._result)

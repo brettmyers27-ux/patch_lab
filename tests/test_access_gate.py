@@ -31,6 +31,22 @@ class MemoryKeyring:
 
 
 class AccessGateTest(unittest.TestCase):
+    def test_launch_validation_keeps_the_fresh_token_for_background_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccessStore(
+                marker_path=Path(directory) / "access.json", keyring_backend=MemoryKeyring()
+            )
+            AccessManager(
+                store, relay_url="https://relay.invalid", validator=lambda _u, _p: "first-token"
+            ).authenticate("group-passcode")
+            self.assertEqual(store.load().token, "first-token")
+            manager = AccessManager(
+                store, relay_url="https://relay.invalid", validator=lambda _u, _p: "second-token"
+            )
+            self.assertFalse(manager.needs_prompt())
+            self.assertEqual(store.load().token, "second-token")
+            self.assertTrue(store.load().authenticated_once)
+
     def test_first_success_second_skips_and_signout_preserves_terms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

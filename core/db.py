@@ -6,15 +6,16 @@ import sqlite3
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from core.plugin_host import ParameterValue
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "library.db"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,16 @@ class PresetRecord:
     status: str
     error: str | None
     is_factory: bool
+    # Identity facts kept separate from `synth` (the origin generation), because
+    # collapsing format, origin, provenance and renderer compatibility into one
+    # column is what made a Serum 2 library demand a Serum 1 renderer.
+    file_format: str | None = None
+    provenance: str | None = None
+    compatible_renderers: str | None = None
+    #: Stable machine-readable code from core.preset_identity, or None when the
+    #: preset is processable on this machine.
+    pending_reason: str | None = None
+    last_attempt_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,21 +204,68 @@ class Database:
         finally:
             connection.close()
 
+    #: Columns added to ``presets`` after schema 5, in the order they are added.
+    _PRESET_COLUMNS_ADDED_LATER: tuple[tuple[str, str], ...] = (
+        (
+            "is_factory",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (is_factory IN (0,1))",
+        ),
+        # Schema 6: preserve discovered-but-unprocessable presets with the reason,
+        # so installing a missing Serum later does not require rediscovering a
+        # multi-thousand-file library from scratch.
+        ("file_format", "TEXT"),
+        ("provenance", "TEXT"),
+        ("compatible_renderers", "TEXT"),
+        ("pending_reason", "TEXT"),
+        ("last_attempt_at", "TEXT"),
+    )
+
     def migrate(self) -> None:
+        """Bring any older library up to the current schema, atomically.
+
+        ``executescript`` first (every statement is ``CREATE ... IF NOT EXISTS``,
+        so it only fills in what is missing and never alters existing data).
+        Then, only if a column is actually missing, the ``ALTER`` statements run
+        inside ONE explicit transaction. Python's sqlite3 does not open a
+        transaction for DDL on its own, so without ``BEGIN`` a failure between two
+        ``ALTER``s would leave a half-migrated table; with it, SQLite rolls the
+        whole step back and the next launch simply retries. Already-current
+        libraries take no write lock and change nothing.
+        """
+
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
-            columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(presets)").fetchall()
-            }
-            if "is_factory" not in columns:
-                connection.execute(
-                    "ALTER TABLE presets ADD COLUMN is_factory INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK (is_factory IN (0,1))"
-                )
+            existing = self._preset_columns(connection)
+            missing = [
+                (name, definition)
+                for name, definition in self._PRESET_COLUMNS_ADDED_LATER
+                if name not in existing
+            ]
+            if missing:
+                connection.execute("BEGIN IMMEDIATE")
+                # Re-read under the lock: another PatchLab process may have
+                # finished the same migration while this one waited.
+                existing = self._preset_columns(connection)
+                for name, definition in self._PRESET_COLUMNS_ADDED_LATER:
+                    if name not in existing:
+                        connection.execute(
+                            f"ALTER TABLE presets ADD COLUMN {name} {definition}"
+                        )
             connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,)
+                "CREATE INDEX IF NOT EXISTS presets_pending_reason "
+                "ON presets(pending_reason)"
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+
+    @staticmethod
+    def _preset_columns(connection: sqlite3.Connection) -> set[str]:
+        return {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(presets)").fetchall()
+        }
 
     def insert_preset(
         self, *, path: Path, name: str, synth: str, content_hash: str
@@ -653,6 +711,184 @@ class Database:
             ).fetchall()
         return {str(row["source_content_hash"]) for row in rows}
 
+    def record_identity(
+        self,
+        preset_id: int,
+        *,
+        file_format: str | None,
+        provenance: str | None,
+        compatible_renderers: Sequence[str],
+    ) -> None:
+        """Persist the orthogonal identity facts for one preset."""
+
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE presets SET file_format=?, provenance=?, "
+                "compatible_renderers=? WHERE id=?",
+                (
+                    file_format,
+                    provenance,
+                    ",".join(str(item) for item in compatible_renderers) or None,
+                    preset_id,
+                ),
+            )
+
+    def set_pending_reason(
+        self, preset_id: int, reason: str | None, *, error: str | None = None
+    ) -> None:
+        """Mark a discovered preset pending, or clear it once processable.
+
+        A pending preset is *kept*, not discarded: this is what lets a later
+        Serum install pick up thousands of already-catalogued presets without
+        rediscovering them.
+        """
+
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self.connect() as connection:
+            if error is None:
+                connection.execute(
+                    "UPDATE presets SET pending_reason=?, last_attempt_at=? WHERE id=?",
+                    (reason, stamp, preset_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE presets SET pending_reason=?, last_attempt_at=?, error=? "
+                    "WHERE id=?",
+                    (reason, stamp, error[:4000], preset_id),
+                )
+
+    def set_pending_reasons(self, updates: Mapping[int, str | None]) -> None:
+        """Bulk pending update; one transaction for a whole library."""
+
+        if not updates:
+            return
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self.connect() as connection:
+            connection.executemany(
+                "UPDATE presets SET pending_reason=?, last_attempt_at=? WHERE id=?",
+                [(reason, stamp, preset_id) for preset_id, reason in updates.items()],
+            )
+
+    def pending_presets(
+        self, reasons: Sequence[str] | None = None
+    ) -> list[PresetRecord]:
+        """Discovered presets that are not processable yet."""
+
+        with self.connect() as connection:
+            if reasons:
+                placeholders = ",".join("?" for _ in reasons)
+                rows = connection.execute(
+                    f"SELECT * FROM presets WHERE pending_reason IN ({placeholders}) "
+                    "ORDER BY id",
+                    tuple(reasons),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM presets WHERE pending_reason IS NOT NULL ORDER BY id"
+                ).fetchall()
+        return [self._preset(row) for row in rows]
+
+    def pending_counts(self) -> dict[str, int]:
+        """Pending totals per stable reason code, for diagnostics and the UI."""
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT pending_reason, COUNT(*) FROM presets "
+                "WHERE pending_reason IS NOT NULL GROUP BY pending_reason"
+            ).fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    def presets_needing_generation(
+        self, generation: str, reasons: Sequence[str] | None = None
+    ) -> list[PresetRecord]:
+        """Pending presets whose compatible renderer set includes ``generation``.
+
+        This is the query that makes a later Serum install cheap: PatchLab
+        already knows these files exist, so it never needs to re-walk and
+        re-hash the whole library to find them again.
+
+        ``reasons`` narrows to specific pending reasons -- the GUI uses it to
+        offer only presets that were genuinely *waiting on this synth*, not ones
+        that failed to render for an unrelated reason.
+        """
+
+        clause = ""
+        arguments: list[object] = [
+            generation,
+            f"{generation},%",
+            f"%,{generation}",
+            f"%,{generation},%",
+        ]
+        if reasons:
+            clause = " AND pending_reason IN (" + ",".join("?" for _ in reasons) + ")"
+            arguments.extend(reasons)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM presets WHERE pending_reason IS NOT NULL AND ("
+                "  compatible_renderers = ?"
+                "  OR compatible_renderers LIKE ? OR compatible_renderers LIKE ?"
+                "  OR compatible_renderers LIKE ?"
+                f"){clause} ORDER BY id",
+                tuple(arguments),
+            ).fetchall()
+        return [self._preset(row) for row in rows]
+
+    def library_coverage(self) -> dict[str, object]:
+        """Discovered / processed / pending counts, split by generation.
+
+        Exists so a support bundle can answer "why are only 3,842 of my 5,000
+        presets appearing?" without anyone having to guess.
+        """
+
+        with self.connect() as connection:
+            total = int(connection.execute("SELECT COUNT(*) FROM presets").fetchone()[0])
+            by_status = {
+                f"{row[0]}": int(row[1])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) FROM presets GROUP BY status"
+                ).fetchall()
+            }
+            by_generation = {
+                f"{row[0]}": int(row[1])
+                for row in connection.execute(
+                    "SELECT synth, COUNT(*) FROM presets GROUP BY synth"
+                ).fetchall()
+            }
+            by_format = {
+                f"{row[0] or 'unknown'}": int(row[1])
+                for row in connection.execute(
+                    "SELECT file_format, COUNT(*) FROM presets GROUP BY file_format"
+                ).fetchall()
+            }
+            pending = {
+                f"{row[0]}": int(row[1])
+                for row in connection.execute(
+                    "SELECT pending_reason, COUNT(*) FROM presets "
+                    "WHERE pending_reason IS NOT NULL GROUP BY pending_reason"
+                ).fetchall()
+            }
+            learned = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT preset_id) FROM fingerprints WHERE midi_note=0"
+                ).fetchone()[0]
+            )
+            with_params = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT preset_id) FROM params"
+                ).fetchone()[0]
+            )
+        return {
+            "discovered": total,
+            "by_status": by_status,
+            "by_generation": by_generation,
+            "by_file_format": by_format,
+            "pending_by_reason": pending,
+            "pending": sum(pending.values()),
+            "processed_params": with_params,
+            "learned": learned,
+            "failed": by_status.get("failed_load", 0) + by_status.get("failed_silent", 0),
+        }
+
     def set_factory_status(self, preset_id: int, is_factory: bool) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -672,7 +908,22 @@ class Database:
             status=str(row["status"]),
             error=row["error"],
             is_factory=bool(row["is_factory"]),
+            file_format=Database._optional(row, "file_format"),
+            provenance=Database._optional(row, "provenance"),
+            compatible_renderers=Database._optional(row, "compatible_renderers"),
+            pending_reason=Database._optional(row, "pending_reason"),
+            last_attempt_at=Database._optional(row, "last_attempt_at"),
         )
+
+    @staticmethod
+    def _optional(row: sqlite3.Row, column: str) -> str | None:
+        """Read a column that may not exist in an older row projection."""
+
+        try:
+            value = row[column]
+        except (IndexError, KeyError):
+            return None
+        return None if value is None else str(value)
 
     @staticmethod
     def _match_library(row: sqlite3.Row) -> MatchLibraryRecord:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import mimetypes
+import re
 import secrets
 import hashlib
 import urllib.error
@@ -12,6 +14,62 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+
+class MultipartFileBody:
+    """A streamed ``multipart/form-data`` body with exactly one file part.
+
+    Reads the file from disk in blocks instead of building one big ``bytes``
+    object, and reports how many bytes have been handed to the socket.
+    """
+
+    def __init__(
+        self,
+        fields: dict[str, str],
+        *,
+        field_name: str,
+        path: Path,
+        filename: str,
+        content_type: str = "application/zip",
+    ) -> None:
+        self.boundary = "PatchLab" + secrets.token_hex(16)
+        safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", filename) or "upload.zip"
+        head = bytearray()
+        for name, value in fields.items():
+            head += f"--{self.boundary}\r\n".encode()
+            head += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+            head += value.encode("utf-8") + b"\r\n"
+        head += f"--{self.boundary}\r\n".encode()
+        head += (
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{safe_name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        tail = f"\r\n--{self.boundary}--\r\n".encode()
+        self._path = Path(path)
+        self.length = len(head) + self._path.stat().st_size + len(tail)
+        self._segments: list = [io.BytesIO(bytes(head)), self._path.open("rb"), io.BytesIO(tail)]
+        self.sent = 0
+
+    @property
+    def content_type(self) -> str:
+        return f"multipart/form-data; boundary={self.boundary}"
+
+    def read(self, size: int = -1) -> bytes:
+        out = bytearray()
+        while self._segments and (size < 0 or len(out) < size):
+            want = -1 if size < 0 else size - len(out)
+            chunk = self._segments[0].read(want)
+            if chunk:
+                out += chunk
+            else:
+                self._segments.pop(0).close()
+        self.sent += len(out)
+        return bytes(out)
+
+    def close(self) -> None:
+        for segment in self._segments:
+            segment.close()
+        self._segments = []
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,15 +85,27 @@ class RelayClient:
     def __init__(
         self,
         base_url: str,
-        password: str,
+        password: str | Callable[[], str | None],
         *,
         timeout: float = 30.0,
         token: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.password = password
+        # A callable is only invoked when a passcode is actually needed (an
+        # expired token), so a valid saved token never touches the keychain.
+        self._password_source = password
+        self._password_value: str | None = password if isinstance(password, str) else None
         self.timeout = timeout
         self._token: str | None = token
+
+    @property
+    def password(self) -> str:
+        if self._password_value is None:
+            try:
+                self._password_value = str(self._password_source() or "")  # type: ignore[operator]
+            except Exception:
+                self._password_value = ""
+        return self._password_value
 
     def _json(
         self, endpoint: str, payload: dict[str, Any], *, authenticated: bool = True
@@ -309,3 +379,55 @@ class RelayClient:
                     raise
                 self._token = None
         return {"ticket_id": str(result["ticket_id"])}
+
+    def post_submission(
+        self,
+        *,
+        kind: str,
+        submission_id: str,
+        path: Path,
+        sha256: str,
+        version: str,
+        timeout: float,
+        on_body: Callable[[MultipartFileBody], None] | None = None,
+    ) -> dict[str, Any]:
+        """One HTTPS attempt to ``POST /submissions`` (streamed, no retry policy).
+
+        A 401 is answered by signing in again once when a passcode is available;
+        every other failure is raised for the caller's retry policy to classify.
+        """
+
+        for attempt in range(2):
+            body = MultipartFileBody(
+                {
+                    "type": kind,
+                    "submission_id": submission_id,
+                    "sha256": sha256,
+                    "patchlab_version": version,
+                },
+                field_name="file",
+                path=path,
+                filename=Path(path).name,
+            )
+            if on_body is not None:
+                on_body(body)
+            request = urllib.request.Request(
+                self.base_url + "/submissions",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self.token()}",
+                    "Content-Type": body.content_type,
+                    "Content-Length": str(body.length),
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code != 401 or not self.password or attempt:
+                    raise
+                self._token = None
+            finally:
+                body.close()
+        raise AssertionError("unreachable relay retry state")

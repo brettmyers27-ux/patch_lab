@@ -273,38 +273,182 @@ def run_match_file(
 ) -> Path:
     """Decode a user file and persist the complete UI result artifact."""
 
+    from core.diagnostic_env import capture_environment, write_environment
+    from core.diagnostics import inherited_operation_id, new_operation_id, record
+    from core.local_library import default_local_paths
+    from core.operation_state import (
+        MATCH_PHASES,
+        StallWatchdog,
+        capture_postmortem,
+        start_operation,
+        write_postmortem,
+    )
+
     if target_synth not in {"serum1", "serum2"}:
         raise ValueError("target_synth must be serum1 or serum2")
     if budget not in BUDGETS:
         raise ValueError(f"Unknown search budget {budget!r}")
+
+    operation_id = inherited_operation_id() or new_operation_id("match")
+    tracker = start_operation(
+        "match",
+        subsystem="match",
+        phases=MATCH_PHASES,
+        operation_id=operation_id,
+        target_synth=target_synth,
+        quality_mode=budget,
+        matcher_processes=matcher_processes,
+    )
+
+    def _phase(name: str, reason: str = "", **detail: Any) -> None:
+        """Advance the state machine and the UI progress stream together."""
+
+        tracker.enter_phase(name, reason=reason)
+        _emit(progress_callback, {"phase": name, "evaluations": 0, **detail})
+
     session = Path(session_root) / uuid.uuid4().hex
     session.mkdir(parents=True, exist_ok=False)
-    _emit(progress_callback, {"phase": "decoding", "evaluations": 0})
-    decoded = decode_audio_file(input_path, start_offset_s=start_offset_s)
-    if decoded.silent:
-        _emit(
-            progress_callback,
-            {"phase": "complete", "evaluations": 0, "best_clap_cosine": 0.0},
-        )
-        return _silence_result(decoded, session, target_synth)
 
-    _emit(progress_callback, {"phase": "loading-models", "evaluations": 0})
-    if matcher_processes <= 0:
-        raise ValueError("matcher_processes must be positive")
-    matcher = AnalysisBySynthesisMatcher(
-        processes=matcher_processes,
-        deterministic_render_dispatch=deterministic_render_dispatch,
-    )
+    # One environment snapshot per operation, captured before the expensive
+    # work, so a failure report always describes the machine it happened on.
     try:
+        paths = default_local_paths()
+        environment = capture_environment(
+            operation="match",
+            operation_id=operation_id,
+            db_path=paths["db"],
+            target_synth=target_synth,
+            quality_mode=budget,
+            settings={
+                "matcher_processes": matcher_processes,
+                "deterministic_render_dispatch": deterministic_render_dispatch,
+                "start_offset_s": start_offset_s,
+            },
+        )
+        write_environment(environment)
+    except Exception as exc:  # diagnostics must never break Match
+        environment = None
+        record(
+            "match",
+            "environment_snapshot_failed",
+            f"environment capture failed: {type(exc).__name__}: {exc}",
+            severity="warning",
+            operation_id=operation_id,
+            exception=exc,
+        )
+
+    def _postmortem(trigger: str, exception: BaseException | None = None) -> dict[str, Any]:
+        supervisor = getattr(matcher, "supervisor", None)
+        return capture_postmortem(
+            tracker,
+            exception=exception,
+            trigger=trigger,
+            workers=supervisor.worker_states() if supervisor is not None else (),
+            disk_paths=[session],
+            extra={"session": str(session)},
+        )
+
+    matcher = None
+    watchdog: StallWatchdog | None = None
+    try:
+        _phase("decoding", "decoding the user's audio file")
+        decoded = decode_audio_file(input_path, start_offset_s=start_offset_s)
+        tracker.mark_progress(text="audio decoded", samples=int(len(decoded.mono)))
+        if decoded.silent:
+            tracker.complete("input audio is silent; returning the silence result")
+            _emit(
+                progress_callback,
+                {"phase": "complete", "evaluations": 0, "best_clap_cosine": 0.0},
+            )
+            return _silence_result(decoded, session, target_synth)
+
+        if matcher_processes <= 0:
+            raise ValueError("matcher_processes must be positive")
+
+        # Renderer discovery and validation happen inside the matcher's
+        # constructor, in the parent process, before any worker is spawned.
+        _phase(
+            "renderer-discovery",
+            f"resolving the renderer required for a {target_synth} match",
+        )
+        _phase("loading-models", "loading CLAP, parameter and delta models")
+        matcher = AnalysisBySynthesisMatcher(
+            processes=matcher_processes,
+            deterministic_render_dispatch=deterministic_render_dispatch,
+            required_synths=(target_synth,),
+            operation_id=operation_id,
+        )
+        matcher.tracker = tracker
+        tracker.annotate(
+            renderer=matcher.renderer_preflight.selection_for(target_synth).renderer,
+            pool_id=matcher.pool_id,
+        )
+        tracker.mark_progress(text="render pool ready", pool_id=matcher.pool_id)
+
+        # Liveness: a phase-aware stall detector that captures a postmortem
+        # BEFORE it terminates anything, because recovery destroys the worker
+        # and stack state that explains a hang.
+        def _on_stall(verdict: Any, postmortem: dict[str, Any]) -> None:
+            write_postmortem(postmortem)
+            if matcher is not None:
+                matcher.supervisor.shutdown()
+
+        watchdog = StallWatchdog(
+            tracker,
+            on_stall=_on_stall,
+            postmortem_factory=lambda verdict: _postmortem("stall"),
+        )
+        watchdog.start()
+    except BaseException as exc:
+        write_postmortem(_postmortem("failure", exc))
+        tracker.fail(exc)
+        if matcher is not None:
+            matcher.close()
+        raise
+    try:
+        _phase("candidate-preparation", "embedding the target and retrieving neighbours")
         embedding = matcher.query_embedding(decoded.mono, decoded.sample_rate)
         retrieval = matcher.retrieve_existing(embedding, 10)
+        tracker.set_count("retrieved_presets", len(retrieval))
+        tracker.mark_progress(text="candidates retrieved", retrieved=len(retrieval))
+        # Record that pending presets are simply absent from retrieval -- Match
+        # is never blocked by them. Stated explicitly so a future reader of a
+        # support bundle does not mistake a partly-processed library for a
+        # broken Match.
+        try:
+            from core.capability_ux import record_pending_exclusion
+            from core.db import Database
+
+            # Resolved locally rather than reusing the snapshot block's `paths`,
+            # which is only bound if that block succeeded.
+            database_path = Path(default_local_paths()["db"])
+            if database_path.is_file():
+                database = Database(database_path)
+                coverage = database.library_coverage()
+                record_pending_exclusion(
+                    pending_counts=coverage.get("pending_by_reason", {}),
+                    learned=int(coverage.get("learned", 0)),
+                    operation_id=operation_id,
+                )
+        except Exception:
+            pass
         detail = _preset_details(
             [preset_id for preset_id, _score in retrieval],
             matcher.assets.library_db,
         )
 
         def search_progress(value: dict[str, Any]) -> None:
+            # Every reported search generation is real forward progress, which
+            # is what keeps the stall detector quiet during a legitimately long
+            # search and noisy when one genuinely wedges.
+            tracker.mark_progress(
+                text="search generation complete",
+                evaluations=value.get("evaluations"),
+                generation=value.get("generation"),
+            )
             _emit(progress_callback, {"phase": "searching", **value})
+
+        tracker.enter_phase("evaluation", reason="running analysis-by-synthesis search")
 
         result = matcher.match(
             decoded.mono,
@@ -474,6 +618,19 @@ def run_match_file(
                 "best_clap_cosine": result.best.clap_cosine,
             },
         )
+        tracker.set_count("evaluations", int(result.evaluations))
+        tracker.complete(
+            "match produced a result artifact",
+            evaluations=int(result.evaluations),
+        )
         return result_path
+    except BaseException as exc:
+        # Nothing is swallowed: the exception, its cause chain, the failing
+        # phase and the worker/process state are all preserved before cleanup.
+        write_postmortem(_postmortem("failure", exc))
+        tracker.fail(exc)
+        raise
     finally:
+        if watchdog is not None:
+            watchdog.stop()
         matcher.close()

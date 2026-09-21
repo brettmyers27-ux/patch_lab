@@ -22,24 +22,13 @@ from core.render import MIDI_NOTES, RenderSummary
 
 
 class FailingRelay:
+    """A support service that is unreachable: every upload attempt fails."""
+
     def __init__(self) -> None:
-        self.checks: list[str] = []
-        self.upload_attempts: list[str] = []
+        self.attempts = 0
 
-    def check_hash(self, content_hash: str) -> bool:
-        self.checks.append(content_hash)
-        return False
-
-    def upload(
-        self,
-        *,
-        preset_path: Path,
-        relative_path: str,
-        content_hash: str,
-        fingerprint: dict,
-    ) -> None:
-        del preset_path, relative_path, fingerprint
-        self.upload_attempts.append(content_hash)
+    def post_submission(self, **_kwargs):
+        self.attempts += 1
         raise ConnectionError("relay unavailable")
 
 
@@ -104,26 +93,101 @@ class LocalRelayResilienceTest(unittest.TestCase):
                     relay=relay,
                     render_processes=1,
                     log=messages.append,
+                    upload_sleep=lambda _seconds: None,
                 )
 
             self.assertEqual(summary.searchable_local, 4)
-            self.assertEqual(summary.relay_upload_failed, 3)
+            # One bundle for all four presets, retried a bounded number of times.
+            self.assertEqual(summary.relay_upload_failed, 4)
             self.assertEqual(summary.relay_disabled_after_failures, 1)
             self.assertEqual(summary.relay_uploaded, 0)
-            self.assertEqual(len(relay.upload_attempts), 3)
+            self.assertEqual(relay.attempts, 4)
+            for path in paths:
+                self.assertTrue(path.is_file(), "the user's preset files are never touched")
+            self.assertFalse((root / "contribution-ledger.json").exists())
             self.assertTrue(
                 any(
-                    "Relay upload skipped (will retry next scan)" in message
+                    "Preset sharing skipped (will retry next scan)" in message
                     for message in messages
                 )
             )
             self.assertTrue(
                 any(
-                    "Relay disabled for the remainder of this scan" in message
+                    "Sharing paused for the remainder of this scan" in message
                     for message in messages
                 )
             )
             self.assertTrue(messages[-1].startswith("LOCAL_LIBRARY_SUMMARY="))
+
+    def test_new_presets_are_shared_in_one_bundle_and_never_offered_twice(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="patchlab-contribution-") as temporary:
+            root = Path(temporary)
+            linked = root / "linked"
+            linked.mkdir()
+            db_path = root / "library.db"
+            database = Database(db_path)
+            paths = []
+            for index in range(4):
+                path = linked / f"Preset {index}.fxp"
+                path.write_bytes(b"CcnK" + bytes([index]) * 32)
+                paths.append(path)
+                preset_id, _ = database.insert_preset(
+                    path=path, name=path.stem, synth="serum1", content_hash=sha1_file(path)
+                )
+                database.replace_params(preset_id, [ParameterValue(0, "Master", 0.5, "50%")], "test")
+                database.upsert_fingerprint(
+                    preset_id, 0, np.zeros(512, dtype=np.float32).tobytes(),
+                    np.zeros(10, dtype=np.float32).tobytes(),
+                )
+                with database.connect() as connection:
+                    connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+
+            class GoodRelay:
+                base_url = "https://relay.invalid"
+
+                def __init__(self) -> None:
+                    self.sent: list[dict] = []
+                    self.archives: list[list[str]] = []
+
+                def post_submission(self, **kwargs):
+                    import zipfile
+
+                    self.sent.append(kwargs)
+                    with zipfile.ZipFile(kwargs["path"]) as archive:
+                        self.archives.append(archive.namelist())
+                    return {
+                        "ok": True, "submission_id": kwargs["submission_id"], "receipt_id": "r" * 24,
+                        "sha256": kwargs["sha256"], "size": Path(kwargs["path"]).stat().st_size,
+                    }
+
+            def scan(relay):
+                with (
+                    patch("core.local_library.FactoryBundle") as factory_bundle,
+                    patch("core.local_library.render_library", return_value=RenderSummary(selected_presets=4)),
+                ):
+                    factory_bundle.return_value.known_hashes.return_value = set()
+                    return process_linked_folder(
+                        linked, db_path=db_path, audio_root=root / "audio", state_dir=root / "states",
+                        relay=relay, render_processes=1, log=lambda _m: None,
+                        upload_sleep=lambda _s: None,
+                    )
+
+            relay = GoodRelay()
+            first = scan(relay)
+            self.assertEqual(len(relay.sent), 1, "one request for the whole contribution, not one per preset")
+            self.assertEqual(relay.sent[0]["kind"], "preset_contribution")
+            self.assertEqual(first.relay_uploaded, 4)
+            names = relay.archives[0]
+            self.assertIn("manifest.json", names)
+            self.assertEqual(sum(1 for n in names if n.startswith("fingerprints/")), 4)
+            self.assertFalse(any(n.lower().endswith((".wav", ".aif", ".aiff", ".flac")) for n in names))
+            for path in paths:
+                self.assertTrue(path.is_file(), "the originals are only ever read")
+
+            second = scan(relay)
+            self.assertEqual(len(relay.sent), 1, "already-contributed presets are not sent again")
+            self.assertEqual(second.relay_already_present, 4)
+            self.assertEqual(second.relay_uploaded, 0)
 
     def test_compact_mode_renders_fingerprints_and_deletes_in_small_batches(self) -> None:
         with tempfile.TemporaryDirectory(prefix="patchlab-compact-batches-") as temporary:

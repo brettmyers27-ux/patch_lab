@@ -9,6 +9,8 @@ import os
 import sqlite3
 import sys
 import tempfile
+import traceback
+import uuid
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,32 +276,184 @@ def multi_resolution_stft_loss(target: np.ndarray, candidate: np.ndarray) -> flo
     return float(np.mean(losses))
 
 
+#: Marker prefix used to carry a worker's initialization failure back to the
+#: parent through the ordinary result channel.  See ``_init_render_worker``.
+WORKER_INIT_FAILURE_PREFIX = "PATCHLAB_WORKER_INIT_FAILURE="
+
+
+class RenderWorkerInitializationError(RuntimeError):
+    """A render worker could not initialize; the operation cannot continue.
+
+    Raised in the *parent* so Match terminates with a real terminal state
+    instead of blocking forever on a pool whose workers never consume a task.
+    """
+
+    def __init__(self, detail: dict[str, Any]) -> None:
+        message = str(detail.get("message") or "render worker initialization failed")
+        super().__init__(message)
+        self.detail = detail
+
+    @property
+    def user_message(self) -> str:
+        return str(
+            self.detail.get("user_message")
+            or "PatchLab couldn't start the Serum renderer needed for this match."
+        )
+
+
 def _init_render_worker(
     scratch_root: str,
     assets: SynthesisAssets | None = None,
+    required_synths: Sequence[str] = ("serum1", "serum2"),
+    correlation: dict[str, str] | None = None,
 ) -> None:
-    from core.plugin_host import make_dawdreamer_processor
+    """Prepare one render worker.
 
-    hosts = {}
-    for synth, required in (("serum1", "VST2"), ("serum2", "VST3")):
-        candidate = next(
-            item for item in ENV.plugins_for(synth) if item.format == required and item.hostable
-        )
-        hosts[synth] = make_dawdreamer_processor(candidate)
-    # The parent resolves paths once and passes the immutable dataclass through
-    # spawn. Re-resolving inside a PyInstaller multiprocessing child can happen
-    # before its distribution environment is fully restored, which previously
-    # pointed children at an empty database inside bundle Resources.
-    assets = assets or resolve_synthesis_assets()
-    _RENDER.update(
-        hosts=hosts,
-        s1=_serum1_targets(assets.library_db),
-        s2=_serum2_targets(assets.serum2_targets, assets.serum2_schema),
-        schema=json.loads(assets.serum2_schema.read_text(encoding="utf-8")),
-        assets=assets,
-        library_db=assets.library_db,
-        state_path=Path(scratch_root) / f"worker-{os.getpid()}.vstpreset",
+    Two deliberate properties, both of which the previous implementation
+    lacked and both of which are load-bearing for the Match hang:
+
+    1. Only the generations this operation will actually render are hosted.
+       The old code opened a Serum 1 VST2 host *and* a Serum 2 VST3 host for
+       every match, so a Serum-2-only request on a machine without Serum 1
+       failed here even though ``_render_candidate_unsafe`` never touches
+       ``hosts["serum1"]`` for a Serum 2 candidate.
+    2. **It never raises.**  ``multiprocessing.Pool`` treats a dead worker as
+       something to replace, so an initializer that raises produces an
+       unbounded spawn storm (measured: 551 processes in 8 seconds) while
+       ``pool.map`` blocks forever because no worker ever reaches a task.
+       Instead the failure is recorded, kept in ``_RENDER["init_failure"]``,
+       and returned from the first task as a structured terminal error.
+    """
+
+    from core.diagnostics import apply_child_environment, record, worker_identity
+    from core.operation_state import emit_worker_heartbeat
+
+    if correlation:
+        # Carry the parent's session/operation IDs into this spawned child so
+        # one operation stays reconstructable across the process boundary.
+        apply_child_environment(correlation)
+    operation_id = (correlation or {}).get("PATCHLAB_OPERATION_ID", "")
+    worker_id = worker_identity("render")
+    _RENDER["operation_id"] = operation_id
+    _RENDER["worker_id"] = worker_id
+    _RENDER["pool_id"] = (correlation or {}).get("PATCHLAB_POOL_ID", "")
+
+    emit_worker_heartbeat(
+        operation_id=operation_id,
+        worker_id=worker_id,
+        state="initializing-renderer",
+        phase="worker-pool-initialization",
+        required_synths=list(required_synths),
     )
+    try:
+        from core.plugin_host import make_dawdreamer_processor
+        from core.renderer_selection import require_renderer
+
+        hosts = {}
+        wanted = tuple(dict.fromkeys(str(value) for value in required_synths))
+        for synth in wanted:
+            selection = require_renderer(
+                synth,
+                operation_id=operation_id,
+                phase="worker-pool-initialization",
+                context=f"initializing a {synth} render worker",
+            )
+            assert selection.selected is not None
+            hosts[synth] = make_dawdreamer_processor(
+                _candidate_for(synth, selection.selected.format, selection.selected.path)
+            )
+        # The parent resolves paths once and passes the immutable dataclass
+        # through spawn. Re-resolving inside a PyInstaller multiprocessing child
+        # can happen before its distribution environment is fully restored,
+        # which previously pointed children at an empty database inside bundle
+        # Resources.
+        assets = assets or resolve_synthesis_assets()
+        _RENDER.update(
+            hosts=hosts,
+            s1=_serum1_targets(assets.library_db),
+            s2=_serum2_targets(assets.serum2_targets, assets.serum2_schema),
+            schema=json.loads(assets.serum2_schema.read_text(encoding="utf-8")),
+            assets=assets,
+            library_db=assets.library_db,
+            state_path=Path(scratch_root) / f"worker-{os.getpid()}.vstpreset",
+            hosted_synths=wanted,
+        )
+        _RENDER.pop("init_failure", None)
+        emit_worker_heartbeat(
+            operation_id=operation_id,
+            worker_id=worker_id,
+            state="renderer-ready",
+            phase="worker-pool-initialization",
+            hosted_synths=list(wanted),
+        )
+    except BaseException as exc:  # noqa: BLE001 - must not reach Pool's reaper
+        from core.diagnostics import record_failure
+        from core.renderer_selection import RendererUnavailableError
+
+        detail: dict[str, Any] = {
+            "message": f"{type(exc).__name__}: {exc}",
+            "exception_type": type(exc).__name__,
+            "worker_id": worker_id,
+            "pid": os.getpid(),
+            "operation_id": operation_id,
+            "required_synths": list(required_synths),
+            "traceback": traceback.format_exc(),
+            "user_message": (
+                exc.user_message
+                if isinstance(exc, RendererUnavailableError)
+                else "PatchLab couldn't start the Serum renderer needed for this match."
+            ),
+        }
+        if isinstance(exc, RendererUnavailableError):
+            detail["renderer_selection"] = exc.selection.as_dict()
+            detail["requested_synth"] = exc.requested_synth
+        marker = record_failure(
+            "render-worker",
+            "worker_init_failed",
+            exc,
+            message=f"render worker initialization failed: {type(exc).__name__}: {exc}",
+            operation_id=operation_id,
+            phase="worker-pool-initialization",
+            worker_id=worker_id,
+            serum_generation=",".join(required_synths),
+        )
+        detail["fingerprint"] = marker.as_dict()
+        pool_id = (correlation or {}).get("PATCHLAB_POOL_ID", "")
+        _RENDER.clear()
+        _RENDER["init_failure"] = detail
+        # Correlation IDs must survive the failure: they are how a postmortem
+        # ties this dead worker back to one operation and one pool.
+        _RENDER["operation_id"] = operation_id
+        _RENDER["worker_id"] = worker_id
+        _RENDER["pool_id"] = pool_id
+        detail["pool_id"] = pool_id
+        emit_worker_heartbeat(
+            operation_id=operation_id,
+            worker_id=worker_id,
+            state="initialization-failed",
+            phase="worker-pool-initialization",
+            # A plain field, not the event's aggregation key: this heartbeat
+            # reports a state, it is not itself another copy of the failure.
+            failure_fingerprint_digest=marker.digest,
+        )
+        record(
+            "render-worker",
+            "worker_init_degraded",
+            "worker stays alive and will report a structured terminal failure; "
+            "raising here would make the pool respawn replacements without bound",
+            severity="warning",
+            operation_id=operation_id,
+            worker_id=worker_id,
+            phase="worker-pool-initialization",
+        )
+
+
+def _candidate_for(synth: str, plugin_format: str, path: Path | None):
+    """Rebuild a PluginCandidate from a selection result."""
+
+    from core.platform_env import PluginCandidate
+
+    return PluginCandidate(synth, plugin_format, Path(str(path)))  # type: ignore[arg-type]
 
 
 
@@ -442,11 +596,59 @@ def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.
 def _render_candidate(
     payload: tuple[Candidate, int, float]
 ) -> tuple[np.ndarray | None, float, str | None]:
+    # A worker whose initializer failed stays alive on purpose (see
+    # _init_render_worker) and reports that failure here, so the parent gets a
+    # real terminal error on the very first batch instead of blocking forever.
+    failure = _RENDER.get("init_failure")
+    if failure is not None:
+        return None, 0.0, WORKER_INIT_FAILURE_PREFIX + json.dumps(failure, default=str)
     try:
         waveform, coverage = _render_candidate_unsafe(payload)
         return waveform, coverage, None
     except Exception as exc:
+        # Per-candidate render failures are expected and non-fatal (a preset can
+        # be corrupt), but the reason must never be swallowed: it is recorded
+        # with its full chain here and summarised for the parent.
+        from core.diagnostics import record_failure
+
+        candidate = payload[0]
+        record_failure(
+            "render-worker",
+            "candidate_render_failed",
+            exc,
+            message=f"candidate render failed: {type(exc).__name__}: {exc}",
+            operation_id=str(_RENDER.get("operation_id", "")),
+            phase="evaluation",
+            worker_id=str(_RENDER.get("worker_id", "")),
+            serum_generation=candidate.synth,
+            base_preset_id=candidate.base_preset_id,
+            origin=candidate.origin,
+        )
         return None, 0.0, f"{type(exc).__name__}: {exc}"
+
+
+def _worker_probe(_value: int = 0) -> dict[str, Any]:
+    """Cheap round-trip that proves a worker reached task execution."""
+
+    failure = _RENDER.get("init_failure")
+    return {
+        "pid": os.getpid(),
+        "worker_id": str(_RENDER.get("worker_id", "")),
+        "hosted_synths": list(_RENDER.get("hosted_synths", ())),
+        "init_failure": failure,
+    }
+
+
+def decode_worker_init_failure(error: str | None) -> dict[str, Any] | None:
+    """Return the structured init failure carried by a worker result, if any."""
+
+    if not error or not str(error).startswith(WORKER_INIT_FAILURE_PREFIX):
+        return None
+    try:
+        payload = json.loads(str(error)[len(WORKER_INIT_FAILURE_PREFIX) :])
+    except ValueError:
+        return {"message": "render worker initialization failed (unparseable detail)"}
+    return payload if isinstance(payload, dict) else None
 
 
 class _DeterministicRenderPool:
@@ -493,11 +695,226 @@ class _DeterministicRenderPool:
         for pool in self._pools:
             pool.join()
 
+    @property
+    def _all_pools(self) -> list[Any]:
+        return list(self._pools)
+
+    def terminate(self) -> None:
+        for pool in self._pools:
+            try:
+                pool.terminate()
+            except Exception:
+                # Documented swallow: this is emergency teardown of an already
+                # broken pool. A failure to terminate one sub-pool must not stop
+                # the others being torn down, and must never replace the real
+                # error the caller is propagating.
+                continue
+
+
+#: An unexpectedly dead worker (a plug-in segfault, an OOM kill) is worth
+#: replacing a few times.  It is never worth replacing without bound, which is
+#: how 200+ identical failures reached the reported ticket.
+MAX_WORKER_REPLACEMENTS = 8
+
+
+class WorkerRespawnStormError(RuntimeError):
+    """Workers kept dying and being replaced; the pool was shut down."""
+
+    def __init__(self, replacements: int, detail: dict[str, Any]) -> None:
+        super().__init__(
+            f"Render workers died and were replaced {replacements} times; "
+            "PatchLab stopped the render pool instead of respawning without bound."
+        )
+        self.replacements = replacements
+        self.detail = detail
+
+    @property
+    def user_message(self) -> str:
+        return (
+            "PatchLab's Serum render workers kept stopping unexpectedly. "
+            "Check your Serum installation and try again."
+        )
+
+
+class _PoolSupervisor:
+    """Bound worker replacement and expose live worker state to postmortems.
+
+    ``multiprocessing.Pool`` silently replaces dead workers forever.  With a
+    deterministically failing initializer that is an infinite loop, so this
+    counts distinct worker PIDs and refuses to let the pool churn past
+    :data:`MAX_WORKER_REPLACEMENTS`.
+
+    This is defence in depth.  The primary protection is the parent-side
+    renderer preflight in :class:`AnalysisBySynthesisMatcher`, which stops the
+    deterministic case before a single process is spawned, plus the
+    non-raising initializer that removes the respawn trigger entirely.
+    """
+
+    def __init__(
+        self,
+        pool: Any,
+        *,
+        expected_workers: int,
+        operation_id: str = "",
+        pool_id: str = "",
+        max_replacements: int = MAX_WORKER_REPLACEMENTS,
+    ) -> None:
+        self._pool = pool
+        self.expected_workers = int(expected_workers)
+        self.operation_id = operation_id
+        self.pool_id = pool_id
+        self.max_replacements = int(max_replacements)
+        self._seen_pids: set[int] = set()
+        self.replacements = 0
+        self._record_workers()
+
+    def _processes(self) -> list[Any]:
+        pools = getattr(self._pool, "_all_pools", None)
+        if pools is not None:
+            found: list[Any] = []
+            for pool in pools:
+                found.extend(list(getattr(pool, "_pool", ()) or ()))
+            return found
+        return list(getattr(self._pool, "_pool", ()) or ())
+
+    def _record_workers(self) -> None:
+        for process in self._processes():
+            pid = getattr(process, "pid", None)
+            if pid is None:
+                continue
+            if pid not in self._seen_pids:
+                if self._seen_pids:
+                    self.replacements += 1
+                self._seen_pids.add(pid)
+
+    def worker_states(self) -> list[dict[str, Any]]:
+        """Live per-worker state for a postmortem snapshot."""
+
+        states: list[dict[str, Any]] = []
+        for process in self._processes():
+            try:
+                states.append(
+                    {
+                        "name": getattr(process, "name", ""),
+                        "pid": getattr(process, "pid", None),
+                        "alive": bool(process.is_alive()),
+                        "exitcode": getattr(process, "exitcode", None),
+                    }
+                )
+            except Exception as exc:
+                states.append({"error": f"{type(exc).__name__}: {exc}"})
+        return states
+
+    def check(self) -> None:
+        """Raise :class:`WorkerRespawnStormError` once replacement is excessive."""
+
+        self._record_workers()
+        if self.replacements <= self.max_replacements:
+            return
+        from core.diagnostics import record
+
+        detail = {
+            "replacements": self.replacements,
+            "max_replacements": self.max_replacements,
+            "expected_workers": self.expected_workers,
+            "distinct_worker_pids": len(self._seen_pids),
+            "worker_states": self.worker_states(),
+            "pool_id": self.pool_id,
+        }
+        record(
+            "render-pool",
+            "pool_shutdown",
+            f"stopping pool after {self.replacements} worker replacements",
+            severity="error",
+            operation_id=self.operation_id,
+            phase="worker-pool-initialization",
+            decision_reason=(
+                "bounded replacement policy: a pool whose workers keep dying is "
+                "shut down rather than respawned without bound"
+            ),
+            **detail,
+        )
+        self.shutdown()
+        raise WorkerRespawnStormError(self.replacements, detail)
+
+    def shutdown(self) -> None:
+        """Terminate the pool safely, without waiting on wedged workers."""
+
+        for action in ("terminate", "close"):
+            method = getattr(self._pool, action, None)
+            if method is None:
+                continue
+            try:
+                method()
+                return
+            except Exception:
+                # Documented swallow: try the next teardown method. The root
+                # cause is already recorded by the caller before shutdown runs.
+                continue
+
 
 class AnalysisBySynthesisMatcher:
     def __init__(
-        self, processes: int = 4, *, deterministic_render_dispatch: bool = False
+        self,
+        processes: int = 4,
+        *,
+        deterministic_render_dispatch: bool = False,
+        required_synths: Sequence[str] | None = None,
+        operation_id: str = "",
+        env: Any = None,
     ) -> None:
+        from core.diagnostics import child_environment, new_operation_id, record
+        from core.renderer_selection import preflight_renderers
+
+        self.operation_id = operation_id or new_operation_id("match")
+        self.pool_id = f"pool-{uuid.uuid4().hex[:8]}"
+        # Which Serum generations this matcher will actually render.  A Serum 2
+        # target only ever produces Serum 2 candidates (``_retrieve`` filters by
+        # synth), so hosting Serum 1 as well -- which the previous code did
+        # unconditionally -- imposed a requirement the work did not have.
+        self.required_synths = tuple(
+            dict.fromkeys(str(value) for value in (required_synths or ("serum1", "serum2")))
+        )
+
+        # PREFLIGHT BEFORE THE POOL EXISTS.
+        #
+        # This is the primary fix for the reported indefinite Match load.  The
+        # renderer requirement is deterministic and knowable in milliseconds, so
+        # it is resolved here, in the parent, with a clean terminal exception --
+        # rather than inside four spawned children where the exception became a
+        # bare StopIteration, an unbounded respawn storm and a blocked map().
+        preflight = preflight_renderers(
+            self.required_synths,
+            env=env if env is not None else ENV,
+            operation_id=self.operation_id,
+            phase="renderer-validation",
+        )
+        self.renderer_preflight = preflight
+        if not preflight.fully_supported:
+            from core.renderer_selection import RendererUnavailableError
+
+            missing = preflight.unsupported[0]
+            raise RendererUnavailableError(
+                preflight.selection_for(missing),
+                context=f"preparing a {missing} match",
+            )
+        record(
+            "render-pool",
+            "renderer_preflight_passed",
+            f"renderers ready for {', '.join(self.required_synths)}",
+            operation_id=self.operation_id,
+            phase="renderer-validation",
+            decision_reason=(
+                "validated in the parent process before any worker was spawned, so a "
+                "missing renderer fails fast instead of hanging the pool"
+            ),
+            required_synths=list(self.required_synths),
+            selected={
+                synth: preflight.selection_for(synth).renderer
+                for synth in self.required_synths
+            },
+        )
+
         context = mp.get_context("spawn")
         assets = resolve_synthesis_assets()
         self.assets = assets
@@ -505,21 +922,38 @@ class AnalysisBySynthesisMatcher:
         self._scratch = tempfile.TemporaryDirectory(
             prefix="patchlab-match-session-"
         )
-        pool_args = (
-            context,
-            processes,
-            _init_render_worker,
-            (self._scratch.name, assets),
+        # Correlation IDs travel into every spawned render worker so one
+        # operation can be reconstructed across process boundaries.
+        correlation = child_environment(
+            self.operation_id, PATCHLAB_POOL_ID=self.pool_id
         )
+        initargs = (
+            self._scratch.name,
+            assets,
+            self.required_synths,
+            correlation,
+        )
+        pool_args = (context, processes, _init_render_worker, initargs)
         self.pool = (
             _DeterministicRenderPool(*pool_args)
             if deterministic_render_dispatch
             else context.Pool(
                 processes,
                 initializer=_init_render_worker,
-                initargs=(self._scratch.name, assets),
+                initargs=initargs,
             )
         )
+        self.supervisor = _PoolSupervisor(
+            self.pool,
+            expected_workers=int(processes),
+            operation_id=self.operation_id,
+            pool_id=self.pool_id,
+        )
+        #: Optional OperationTracker supplied by the workflow so render
+        #: progress feeds the stall detector.  ``None`` keeps this module
+        #: usable from the benchmark scripts with no diagnostics wiring.
+        self.tracker: Any = None
+        self._rendered_batches = 0
         self.embedder = ClapEmbedder(ENV)
         self.stores = {
             1: _serum1_targets(assets.library_db),
@@ -556,10 +990,43 @@ class AnalysisBySynthesisMatcher:
             / "serum2_structural_search_policy.json"
         )
 
+    def _fail_on_worker_init(self, detail: dict[str, Any]) -> None:
+        """Shut the pool down and raise the worker's preserved root cause.
+
+        Preserves the original exception type, message, traceback and renderer
+        decision so nothing is lost between worker and UI.
+        """
+
+        from core.diagnostics import record
+
+        record(
+            "render-pool",
+            "pool_shutdown",
+            "shutting the render pool down after a worker initialization failure",
+            severity="error",
+            operation_id=self.operation_id,
+            phase="worker-pool-initialization",
+            decision_reason=(
+                "worker initialization is deterministic; retrying or respawning would "
+                "reproduce the same failure, so the pool is stopped and the operation "
+                "fails with the root cause"
+            ),
+            pool_id=self.pool_id,
+            worker_states=self.supervisor.worker_states(),
+            **{key: value for key, value in detail.items() if key != "traceback"},
+        )
+        self.supervisor.shutdown()
+        raise RenderWorkerInitializationError(detail)
+
     def close(self) -> None:
-        self.pool.close()
-        self.pool.join()
-        self._scratch.cleanup()
+        try:
+            self.pool.close()
+            self.pool.join()
+        except Exception:
+            # Never let teardown of an already-broken pool mask the real error.
+            self.supervisor.shutdown()
+        finally:
+            self._scratch.cleanup()
 
     def _retrieve(self, embedding: np.ndarray, synth: str | None, count: int = 5) -> list[int]:
         if synth is None:
@@ -749,11 +1216,39 @@ class AnalysisBySynthesisMatcher:
                 live_positions.append(position)
                 live_payloads.append((candidate, candidate_note, duration))
         if live_payloads:
+            # Tell the watchdog the pool is about to be busy, so a long batch is
+            # judged against the extended budget rather than looking silent.
+            if self.tracker is not None:
+                for state in self.supervisor.worker_states():
+                    if state.get("alive"):
+                        self.tracker.note_heartbeat(
+                            f"render-{state.get('pid')}", "rendering"
+                        )
             rendered = self.pool.map(_render_candidate, live_payloads)
+            # A worker that could not initialize reports it through the result
+            # channel rather than dying, so the parent converts it into one
+            # terminal failure here instead of silently producing zero renders
+            # for the rest of the search.
+            for _waveform, _coverage, error in rendered:
+                detail = decode_worker_init_failure(error)
+                if detail is not None:
+                    self._fail_on_worker_init(detail)
+            # Bounded replacement check: an unexpectedly dying worker must not
+            # be respawned without limit.
+            self.supervisor.check()
             for position, (waveform, _coverage, _error) in zip(
                 live_positions, rendered, strict=True
             ):
                 waveforms[position] = waveform
+            self._rendered_batches += 1
+            if self.tracker is not None:
+                self.tracker.bump("rendered_candidates", len(live_payloads))
+                self.tracker.mark_progress(
+                    text=f"Rendered {len(live_payloads)} candidate(s)",
+                    batch_id=f"batch-{self._rendered_batches}",
+                    rendered=len(live_payloads),
+                    failed=sum(1 for item in rendered if item[0] is None),
+                )
         successful = [position for position, waveform in enumerate(waveforms) if waveform is not None]
         target_samples = len(target)
         normalized = []

@@ -26,6 +26,7 @@ class WorkerEntryPoint:
 WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "scan": WorkerEntryPoint("app.workers", "worker_main"),
     "local-library": WorkerEntryPoint("scripts.process_local_library"),
+    "process-pending": WorkerEntryPoint("scripts.process_pending_presets"),
     "factory-verify": WorkerEntryPoint("scripts.verify_factory_runtime"),
     "render-library": WorkerEntryPoint("scripts.render_library"),
     "fingerprint-local": WorkerEntryPoint("scripts.fingerprint_pending_presets"),
@@ -61,6 +62,9 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     ),
     "workflow-card-gate": WorkerEntryPoint(
         "scripts.verify_workflow_cards"
+    ),
+    "release-flow-gate": WorkerEntryPoint(
+        "scripts.verify_release_flows"
     ),
     "preview-cache-gate": WorkerEntryPoint(
         "scripts.verify_preview_cache"

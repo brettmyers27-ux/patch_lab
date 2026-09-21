@@ -106,6 +106,22 @@ class AccessStore:
         )
         return keychain_saved
 
+    def refresh_token(self, token: str) -> None:
+        """Keep a freshly validated relay token so background workers can use it."""
+
+        current = self.load()
+        if not current.authenticated_once:
+            return
+        self._write(
+            AccessState(
+                True,
+                token,
+                current.local_only,
+                current.agreed_to_license,
+                current.license_accepted_at,
+            )
+        )
+
     def save_local_only(self) -> None:
         current = self.load()
         self._write(
@@ -197,7 +213,7 @@ class AccessManager:
         if not passcode:
             return False
         try:
-            self.validator(self.relay_url, passcode)
+            token = self.validator(self.relay_url, passcode)
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403}:
                 self.store.clear()
@@ -205,6 +221,10 @@ class AccessManager:
             return False
         except Exception:
             return False
+        try:
+            self.store.refresh_token(str(token))
+        except Exception:
+            pass
         return False
 
     def authenticate(self, passcode: str) -> tuple[bool, str, bool]:
@@ -223,6 +243,9 @@ class AccessManager:
         except Exception as exc:
             return False, f"Could not contact the sharing service ({exc}).", True
         keychain_saved = self.store.save_success(passcode, token)
+        # A user who earlier chose "continue without sharing" is signing in on
+        # purpose now; the rest of this session (and its workers) must see that.
+        os.environ.pop("PATCHLAB_DISABLE_RELAY", None)
         return (
             True,
             "Passcode accepted and saved securely."
@@ -240,6 +263,58 @@ class AccessManager:
         return RelayClient(url, passcode, timeout=10.0).token()
 
 
+#: How long a background process will wait for the keychain before giving up.
+#: A first read by a newly-signed app can sit behind an "allow access" prompt
+#: that nobody can see from a worker, so the wait must be bounded.
+KEYCHAIN_TIMEOUT_S = 15.0
+
+
+def stored_passcode(timeout: float = KEYCHAIN_TIMEOUT_S) -> str | None:
+    """Read the saved passcode, but never wait on the keychain indefinitely."""
+
+    import threading
+    import time
+
+    box: dict[str, str | None] = {}
+
+    def read() -> None:
+        try:
+            box["value"] = AccessStore().passcode()
+        except Exception:
+            box["value"] = None
+
+    started = time.monotonic()
+    thread = threading.Thread(target=read, name="keychain-read", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    finished = not thread.is_alive()
+    try:
+        from core.diagnostics import recorder
+
+        recorder().record(
+            "relay-auth",
+            "keychain_read",
+            "saved passcode read from the keychain"
+            if finished
+            else "keychain did not answer in time; continuing without it",
+            severity="info" if finished else "warning",
+            elapsed_s=round(time.monotonic() - started, 3),
+            timed_out=not finished,
+            found=bool(box.get("value")),
+        )
+    except Exception:
+        pass
+    return box.get("value") if finished else None
+
+
+def stored_token() -> str | None:
+    """The cached relay token (a plain file read; never touches the keychain)."""
+
+    try:
+        return AccessStore().load().token
+    except Exception:
+        return None
+
+
 def stored_relay_credential() -> tuple[str | None, str | None]:
-    store = AccessStore()
-    return store.passcode(), store.load().token
+    return stored_passcode(), stored_token()

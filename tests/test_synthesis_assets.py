@@ -160,7 +160,31 @@ class NoHardcodedRepositoryPathsTest(unittest.TestCase):
     def test_parent_passes_one_resolved_asset_set_to_spawned_workers(self) -> None:
         source = (PROJECT_ROOT / "core" / "matcher.py").read_text(encoding="utf-8")
         self.assertIn("assets = resolve_synthesis_assets()", source)
-        self.assertIn("initargs=(self._scratch.name, assets)", source)
+        # The parent must build the initargs tuple and hand the already-resolved
+        # asset set to every spawned worker. The tuple now also carries the
+        # required Serum generations and the correlation IDs, so this asserts the
+        # invariant rather than one exact spelling of the literal.
+        initargs = re.search(
+            r"initargs\s*=\s*\((?P<body>[^)]*)\)", source, re.DOTALL
+        )
+        self.assertIsNotNone(
+            initargs, "core/matcher.py must build an initargs tuple in the parent"
+        )
+        body = initargs.group("body")
+        self.assertIn("self._scratch.name", body)
+        self.assertIn("assets", body)
+        self.assertIn("initargs=initargs", source)
+
+    def test_worker_initializer_only_falls_back_to_resolving_assets(self) -> None:
+        """The child must prefer the parent's assets, never re-resolve blindly.
+
+        Re-resolving inside a PyInstaller multiprocessing child can run before
+        its distribution environment is restored and point it at an empty
+        bundled database.
+        """
+
+        source = (PROJECT_ROOT / "core" / "matcher.py").read_text(encoding="utf-8")
+        self.assertIn("assets = assets or resolve_synthesis_assets()", source)
 
 
 class UiRoutesOnReadinessTest(unittest.TestCase):

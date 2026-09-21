@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -84,6 +85,65 @@ def _validate_app(app: Path, version: str) -> None:
         )
 
 
+def _component_plist(payload_root: Path, work_root: Path) -> Path:
+    """Describe the payload's bundles, with bundle relocation switched off.
+
+    pkgbuild marks an app bundle relocatable by default.  macOS Installer then
+    asks LaunchServices where it last saw ``com.patchlab.desktop`` and shoves
+    the payload *there* instead of ``install-location``.  A tester with a copy
+    of PatchLab.app anywhere else -- ~/Applications, Downloads, a second
+    checkout -- therefore gets the app installed somewhere unexpected, and the
+    postinstall verification of /Applications/PatchLab.app correctly fails the
+    whole install.  PatchLab has exactly one supported location, so relocation
+    is never wanted.
+    """
+
+    plist_path = work_root / "component.plist"
+    _run(["pkgbuild", "--analyze", "--root", str(payload_root), str(plist_path)])
+    with plist_path.open("rb") as handle:
+        components = plistlib.load(handle)
+    if not isinstance(components, list) or not components:
+        raise PackageBuildError("pkgbuild could not describe the PatchLab.app payload")
+    for component in components:
+        component["BundleIsRelocatable"] = False
+    if not any(
+        component.get("RootRelativeBundlePath") == "PatchLab.app"
+        for component in components
+    ):
+        raise PackageBuildError(
+            "The analyzed payload does not contain PatchLab.app as a bundle"
+        )
+    with plist_path.open("wb") as handle:
+        plistlib.dump(components, handle)
+    return plist_path
+
+
+def _assert_component_contract(component: Path, work_root: Path, version: str) -> None:
+    """Read back the built component and refuse to ship a wrong install plan."""
+
+    extracted = work_root / "component-check"
+    if extracted.exists():
+        shutil.rmtree(extracted)
+    extracted.mkdir(parents=True)
+    _run(["xar", "-x", "-C", str(extracted), "-f", str(component), "PackageInfo"])
+    package_info = (extracted / "PackageInfo").read_text(encoding="utf-8")
+    root = ET.fromstring(package_info)
+    # A non-relocatable build still carries an empty <relocate/>; what must
+    # never appear is a bundle listed inside it.
+    relocate = root.find("relocate")
+    if relocate is not None and len(relocate):
+        raise PackageBuildError(
+            "The component package still allows bundle relocation; macOS Installer "
+            "could install PatchLab outside /Applications"
+        )
+    if root.attrib.get("install-location") != INSTALL_LOCATION:
+        raise PackageBuildError(
+            f"The component package does not install to {INSTALL_LOCATION}"
+        )
+    if root.attrib.get("identifier") != IDENTIFIER or root.attrib.get("version") != version:
+        raise PackageBuildError("The component package identity does not match this build")
+
+
 def build_pkg(
     app: Path,
     *,
@@ -95,6 +155,7 @@ def build_pkg(
 
     _require_tool("pkgbuild")
     _require_tool("productbuild")
+    _require_tool("xar")
     if not (INSTALLER_SCRIPTS / "preinstall").is_file() or not (
         INSTALLER_SCRIPTS / "postinstall"
     ).is_file():
@@ -120,6 +181,8 @@ def build_pkg(
             "pkgbuild",
             "--root",
             str(payload_root),
+            "--component-plist",
+            str(_component_plist(payload_root, work_root)),
             "--install-location",
             INSTALL_LOCATION,
             "--identifier",
@@ -132,6 +195,7 @@ def build_pkg(
         ],
         environment=package_environment,
     )
+    _assert_component_contract(component, work_root, version)
     _run(
         ["productbuild", "--package", str(component), str(temporary)],
         environment=package_environment,

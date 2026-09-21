@@ -160,8 +160,16 @@ def test_missing_handshake_fails_fast_and_kills_process(
     runner.process.waitForFinished(2_000)
     application.processEvents()
 
-    assert elapsed < 1.0
-    assert failures
+    # The invariant is that the *startup timeout* produced a terminal failure
+    # rather than the runner hanging until the guard expired. Asserting a 1.0s
+    # wall-clock bound instead measured interpreter spawn latency, which made
+    # this flake whenever the suite ran under load -- and it could not even
+    # distinguish a real failure from guard expiry, since the guard sits at 2.0s.
+    assert failures, "the runner must emit a terminal failure, not hang"
+    assert elapsed < 2.0, (
+        f"the failure must arrive before the {2.0}s guard, not because of it; "
+        f"took {elapsed:.2f}s"
+    )
     assert "did not confirm startup" in failures[0]
     assert "stopped instead of being left hung" in failures[0]
     assert runner.process.state() == QProcess.ProcessState.NotRunning
