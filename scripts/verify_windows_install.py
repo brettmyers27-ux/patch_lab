@@ -202,15 +202,29 @@ def _find_fixture_source(preset: Any) -> Path:
     suffix = ".fxp" if preset.synth == "serum1" else ".serumpreset"
     for root in ENV.factory_roots_for(preset.synth, existing_only=True):
         direct = root / Path(preset.relative_path)
-        if direct.is_file() and sha1_file(direct) == preset.content_hash:
-            return direct
-        for path in root.rglob("*"):
-            if (
-                path.is_file()
-                and path.suffix.casefold() == suffix
-                and sha1_file(path) == preset.content_hash
-            ):
-                return path.resolve()
+        try:
+            if direct.is_file() and sha1_file(direct) == preset.content_hash:
+                return direct
+        except OSError:
+            pass
+        try:
+            candidates = root.rglob("*")
+            for path in candidates:
+                try:
+                    if (
+                        path.is_file()
+                        and path.suffix.casefold() == suffix
+                        and sha1_file(path) == preset.content_hash
+                    ):
+                        return path.resolve()
+                except OSError:
+                    # Windows can expose licensed preset-library junctions that
+                    # are intentionally non-traversable from this process. A
+                    # single inaccessible entry must not hide valid fixtures
+                    # elsewhere under the same legitimate factory root.
+                    continue
+        except OSError:
+            continue
     raise FileNotFoundError(
         f"{preset.name} ({preset.content_hash}) was not found under the "
         f"resolved {preset.synth} factory roots"

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "runtime_family_id": "v1-legacy-stock-clap",
+  "decision": "Adopt the verified pre-Stage-2B V1 retrieval world; Stage 2B remains historical and is not selected by V1 runtime code.",
+  "checkpoint": {
+    "filename": "music_audioset_epoch_15_esc_90.14.pt",
+    "sha256": "fae3e9c087f2909c28a09dc31c8dfcdacbc42ba44c70e972b58c1bd1caf6dedd",
+    "byte_size": 2352471003,
+    "install_destination": "data/runtime/v1-legacy-stock-clap/models/music_audioset_epoch_15_esc_90.14.pt",
+    "acquisition": "trusted installer from the public LAION-CLAP upstream source"
+  },
+  "private_artifacts": "The exact private transfer manifest and hashes are enforced in core/runtime_compatibility.py; none are committed to this repository.",
+  "relay_requirement": "The private relay must declare runtime_family_id v1-legacy-stock-clap before this source version will accept any artifact manifest.",
+  "frozen_baselines": "Stage 2B artifacts and the fine-tuned checkpoint are excluded from runtime selection."
+}

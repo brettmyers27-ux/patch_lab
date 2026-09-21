@@ -42,6 +42,7 @@ from core.access_gate import AccessManager  # noqa: E402
 from core.audio_lifecycle import cleanup_stale_match_scratch  # noqa: E402
 from core.launch_gates import run_distribution_gates  # noqa: E402
 from core.model_assets import ModelAssetsError, validate_model_assets  # noqa: E402
+from core.runtime_compatibility import RuntimeCompatibilityError, validate_runtime_family  # noqa: E402
 from core.platform_env import ENV  # noqa: E402,F401
 from core.privacy import distribution_mode  # noqa: E402
 from core.runtime_log import append_runtime_log  # noqa: E402
@@ -123,8 +124,9 @@ def main() -> int:
             return 0
         cleanup_stale_match_scratch()
         try:
+            validate_runtime_family()
             validate_model_assets()
-        except ModelAssetsError as exc:
+        except (ModelAssetsError, RuntimeCompatibilityError) as exc:
             model_asset_error = str(exc)
     window = MainWindow(factory_verification=factory_verification)
     if model_asset_error:

@@ -167,6 +167,31 @@ def test_artifact_preflight_names_unreachable_artifact_before_clap(
     assert requests == install_support.MAX_NETWORK_ATTEMPTS
 
 
+def test_artifact_manifest_requires_matching_stock_checkpoint_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(install_support, "_artifact_token", lambda: "token")
+    payload = {
+        "runtime_family_id": install_support.RUNTIME_FAMILY_ID,
+        "runtime_requirements": {
+            "clap_checkpoint": {
+                "name": install_support.CLAP_NAME,
+                "sha256": "wrong",
+                "size": install_support.CLAP_SIZE,
+            }
+        },
+        "artifacts": [{"name": "fixture", "size": 1, "sha256": "a" * 64, "destination": "data/fixture"}],
+    }
+    monkeypatch.setattr(
+        install_support,
+        "_small_request",
+        lambda *_args, **_kwargs: (200, {}, json.dumps(payload).encode()),
+    )
+
+    with pytest.raises(install_support.InstallError, match="stock CLAP checkpoint"):
+        install_support._artifact_manifest("https://relay.invalid")
+
+
 def test_legacy_tar_artifact_manifest_downloads_beside_target_and_extracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

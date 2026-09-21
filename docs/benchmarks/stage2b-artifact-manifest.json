@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
   "stage": "2B",
-  "decision": "Adopt the fine-tuned encoder and its complete v2 embedding world with the shipped parameter predictors.",
-  "adopted_stack": "stage2b-finetuned-shipped-predictors",
+  "decision": "Historical Stage 2B adoption record. It is superseded for V1 runtime selection by v1-legacy-stock-clap after the Windows parity gate failed on this family.",
+  "adopted_stack": "stage2b-finetuned-shipped-predictors (historical; runtime-ineligible)",
+  "runtime_selection": "Do not install or select these artifacts in V1. core/runtime_compatibility.py selects and verifies v1-legacy-stock-clap as an indivisible family.",
   "adopted_artifacts": [
     {
       "filename": "patchlab_clap_ft_v1.pt",

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from core.local_library import default_local_paths
 from core.platform_env import ENV
-from core.model_assets import runtime_root
+from core.runtime_compatibility import runtime_data_root
 
 
 SERUM2_TARGETS_NAME = "serum2_targets.npz"
@@ -106,9 +106,9 @@ def _library_database_ready(path: Path) -> bool:
 def resolve_synthesis_assets() -> SynthesisAssets:
     """Resolve every synthesis input from the same knobs on all platforms."""
 
-    root = runtime_root()
-    repo_features = root / "data" / "features"
-    repo_models = root / "data" / "models"
+    data_root = runtime_data_root()
+    repo_features = data_root / "features"
+    repo_models = data_root / "models"
     local = default_local_paths()
 
     feature_dir = Path(
@@ -135,12 +135,15 @@ def resolve_synthesis_assets() -> SynthesisAssets:
         roots = (shipped_states.expanduser().resolve(),)
     render_states = roots[0]
     bundled_catalog = repo_models / SYNTHESIS_CATALOG_NAME
+    checkout_catalog = data_root / "library.db"
     default_db = (
         bundled_catalog
         if _distribution_mode() and bundled_catalog.is_file()
         else local["db"]
         if _distribution_mode()
-        else root / "data" / "library.db"
+        else checkout_catalog
+        if _library_database_ready(checkout_catalog)
+        else bundled_catalog
     )
     library_db = Path(
         os.environ.get("PATCHLAB_LIBRARY_DB", str(default_db))

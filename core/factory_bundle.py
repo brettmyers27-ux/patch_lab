@@ -11,9 +11,10 @@ from typing import Any, Iterator
 import numpy as np
 import zstandard
 
+from core.runtime_compatibility import runtime_data_root, validate_runtime_family
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FACTORY_BUNDLE = PROJECT_ROOT / "data" / "dist" / "factory_bundle.sqlite"
+
+DEFAULT_FACTORY_BUNDLE = runtime_data_root() / "dist" / "factory_bundle.sqlite"
 BUNDLE_SCHEMA_VERSION = 1
 _COMPRESSOR = zstandard.ZstdCompressor(level=9)
 _DECOMPRESSOR = zstandard.ZstdDecompressor()
@@ -106,6 +107,8 @@ def decompress_mask(value: bytes, length: int) -> np.ndarray:
 class FactoryBundle:
     def __init__(self, path: Path = DEFAULT_FACTORY_BUNDLE) -> None:
         self.path = Path(path).resolve()
+        if self.path == DEFAULT_FACTORY_BUNDLE.resolve():
+            validate_runtime_family()
         if not self.path.is_file():
             raise FileNotFoundError(self.path)
 

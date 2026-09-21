@@ -26,14 +26,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.access_gate import AccessManager, AccessStore  # noqa: E402
+from core.runtime_compatibility import (  # noqa: E402
+    CLAP_CHECKPOINT_BYTES,
+    CLAP_CHECKPOINT_NAME,
+    RUNTIME_FAMILY_ID,
+)
 
 
-CLAP_NAME = "music_audioset_epoch_15_esc_90.14.pt"
+CLAP_NAME = CLAP_CHECKPOINT_NAME
 CLAP_URL = (
     "https://huggingface.co/lukewys/laion_clap/resolve/main/"
     f"{CLAP_NAME}?download=true"
 )
-CLAP_SIZE = 2_352_471_003
+CLAP_SIZE = CLAP_CHECKPOINT_BYTES
 CLAP_SHA256 = "fae3e9c087f2909c28a09dc31c8dfcdacbc42ba44c70e972b58c1bd1caf6dedd"
 MAX_NETWORK_ATTEMPTS = 4
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
@@ -351,6 +356,26 @@ def _artifact_manifest(relay_url: str) -> tuple[str, list[dict]]:
             "the installer to resume."
         )
 
+    family = str(manifest.get("runtime_family_id") or "")
+    if family != RUNTIME_FAMILY_ID:
+        raise InstallError(
+            "private relay did not declare the required runtime family "
+            f"{RUNTIME_FAMILY_ID!r} (received {family!r}); refusing to install "
+            "a potentially mixed embedding world"
+        )
+    requirements = manifest.get("runtime_requirements")
+    checkpoint = requirements.get("clap_checkpoint") if isinstance(requirements, dict) else None
+    expected_checkpoint = {
+        "name": CLAP_NAME,
+        "sha256": CLAP_SHA256,
+        "size": CLAP_SIZE,
+    }
+    if checkpoint != expected_checkpoint:
+        raise InstallError(
+            "private relay did not declare the required stock CLAP checkpoint "
+            "identity for the approved runtime family; refusing to install "
+            "a potentially mixed embedding world"
+        )
     rows = manifest.get("artifacts")
     if not isinstance(rows, list) or not rows:
         raise InstallError("relay returned an empty or invalid artifact manifest")
@@ -482,7 +507,14 @@ def _clap(args: argparse.Namespace) -> None:
         size = int(os.environ.get("PATCHLAB_CLAP_SIZE", size))
         sha256 = os.environ.get("PATCHLAB_CLAP_SHA256", sha256)
 
-    destination = args.install_root / "data" / "models" / CLAP_NAME
+    destination = (
+        args.install_root.resolve()
+        / "data"
+        / "runtime"
+        / RUNTIME_FAMILY_ID
+        / "models"
+        / CLAP_NAME
+    )
     if _verified(destination, size=size, sha256=sha256):
         print(f"CLAP_OK already verified at {destination}")
         return

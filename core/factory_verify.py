@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -10,6 +11,36 @@ from pathlib import Path
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.platform_env import ENV, PlatformEnv
 from core.preset_scan import sha1_file
+
+
+def _factory_files(root: Path, suffix: str) -> set[Path]:
+    """Return regular preset files without crossing Windows reparse points."""
+
+    found: set[Path] = set()
+    for current, directories, files in os.walk(
+        root, topdown=True, onerror=lambda _error: None, followlinks=False
+    ):
+        current_path = Path(current)
+        traversable: list[str] = []
+        for name in directories:
+            candidate = current_path / name
+            try:
+                attributes = int(getattr(os.lstat(candidate), "st_file_attributes", 0))
+                if not (attributes & 0x400):  # FILE_ATTRIBUTE_REPARSE_POINT
+                    traversable.append(name)
+            except OSError:
+                continue
+        directories[:] = traversable
+        for name in files:
+            candidate = current_path / name
+            if candidate.suffix.casefold() != suffix:
+                continue
+            try:
+                if candidate.is_file():
+                    found.add(candidate.resolve())
+            except OSError:
+                continue
+    return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +85,7 @@ def verify_local_factory_install(
     for synth, suffix in (("serum1", ".fxp"), ("serum2", ".serumpreset")):
         for root in env.factory_roots_for(synth, existing_only=True):
             directory_count += 1
-            paths.update(
-                path.resolve()
-                for path in root.rglob("*")
-                if path.is_file() and path.suffix.casefold() == suffix
-            )
+            paths.update(_factory_files(root, suffix))
     local: dict[str, str] = {}
     unknown: set[str] = set()
     for path in sorted(paths, key=lambda value: str(value).casefold()):
