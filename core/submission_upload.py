@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from core.privacy import user_presets_enabled
 from core.relay_client import MultipartFileBody, RelayClient
 
 BUG_REPORT = "bug_report"
@@ -52,6 +53,7 @@ USER_MESSAGES = {
     "rejected": "The support service didn't accept the file.",
     "receipt_mismatch": "The support service's receipt didn't match the file.",
     "file_missing": "The saved file could not be found.",
+    "consent_off": "Personal presets are turned off, so nothing was uploaded.",
     "unknown": "The upload didn't complete.",
 }
 
@@ -220,6 +222,10 @@ def upload_file(
     """
 
     path = Path(path)
+    if kind == PRESET_CONTRIBUTION and not user_presets_enabled():
+        # Last line of defence: whatever asked for this upload, a contribution is
+        # a use of the user's own presets and must never leave while it is OFF.
+        raise UploadError("consent_off", detail="personal presets are turned off")
     try:
         size = path.stat().st_size
         digest = sha256_file(path)

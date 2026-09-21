@@ -15,6 +15,7 @@ import numpy as np
 import soundfile as sf
 
 from core.db import DEFAULT_DB_PATH, Database, PresetRecord, RenderRecord
+from core.privacy import user_presets_enabled
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -222,13 +223,17 @@ def _worker_loop(task_queue: Any, result_queue: Any, pause_event: Any, cancel_ev
 
 
 def _select_records(database: Database, preset_ids: Sequence[int] | None) -> list[PresetRecord]:
+    # While personal presets are OFF, renderable_presets() is factory-only, so a
+    # requested user preset is not "missing": it is inactive and must simply not
+    # be rendered.  Anything else that is missing is still an error.
+    consent = user_presets_enabled()
     records = database.renderable_presets()
     if preset_ids is None:
         return records
     wanted = set(preset_ids)
     selected = [record for record in records if record.id in wanted]
     missing = wanted - {record.id for record in selected}
-    if missing:
+    if missing and consent:
         raise KeyError(f"Preset ids are not renderable: {sorted(missing)}")
     return selected
 
@@ -311,8 +316,20 @@ def render_library(
     done_workers = 0
     processed_tasks = 0
     resolved_pairs = skipped
+    # A job that includes the user's own presets must stop promptly if they are
+    # withdrawn mid-run.  Rendering is resumable, so cancelling is safe.
+    includes_user_presets = any(not record.is_factory for record in records)
+    last_consent_check = started
     try:
         while done_workers < len(workers):
+            now = time.monotonic()
+            if includes_user_presets and now - last_consent_check >= 2.0:
+                last_consent_check = now
+                if not user_presets_enabled():
+                    log("Personal presets were turned off; stopping user-preset rendering.")
+                    control.cancel()
+                    summary.cancelled = True
+                    includes_user_presets = False
             try:
                 message = result_queue.get(timeout=1.0)
             except queue.Empty:

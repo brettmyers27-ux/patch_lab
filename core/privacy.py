@@ -1,4 +1,11 @@
-"""Persisted, reversible consent for local linking plus contribution upload."""
+"""Persisted, reversible consent for using the user's own presets.
+
+One field, ``use_and_share_own_presets``, is the only authority.  ON permits
+both local use (scanning, analysing, rendering, matching) of the user's own
+presets and contributing them; OFF permits neither.  Factory presets never
+depend on it.  ``user_presets_enabled()`` fails closed: anything other than an
+explicit ``true`` on disk -- no file, no answer yet, a damaged file -- is OFF.
+"""
 
 from __future__ import annotations
 
@@ -60,3 +67,53 @@ class PrivacyStore:
             encoding="utf-8",
         )
         return choice
+
+
+class UserPresetsDisabled(RuntimeError):
+    """The user has not (or no longer) allowed PatchLab to use their own presets."""
+
+    def __init__(self, stage: str = "") -> None:
+        super().__init__(
+            "Personal presets are turned off"
+            + (f" (stopped before: {stage})" if stage else "")
+        )
+        self.stage = stage
+
+
+_ACTIVE_STORE: PrivacyStore | None = None
+
+
+def set_active_store(store: PrivacyStore | None) -> None:
+    """Make the window's own store authoritative inside this process.
+
+    The GUI may be handed a store at a non-default path; anything running in the
+    same process must then read the same file the user's choice was written to.
+    Worker processes read the default (or ``PATCHLAB_PRIVACY_SETTINGS``) path.
+    """
+
+    global _ACTIVE_STORE
+    _ACTIVE_STORE = store
+
+
+def user_presets_enabled() -> bool:
+    """True only when the user explicitly allowed use of their own presets.
+
+    Read from disk on every call, so a choice withdrawn while a job is running
+    is honoured at that job's next boundary rather than at its next launch.
+    Developer builds do not apply distribution consent, matching the UI.
+    """
+
+    if not distribution_mode():
+        return True
+    try:
+        store = _ACTIVE_STORE or PrivacyStore()
+        return store.load().use_and_share_own_presets is True
+    except Exception:
+        return False
+
+
+def require_user_presets(stage: str = "") -> None:
+    """Raise :class:`UserPresetsDisabled` unless the user's presets are allowed."""
+
+    if not user_presets_enabled():
+        raise UserPresetsDisabled(stage)

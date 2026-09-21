@@ -127,9 +127,14 @@ def resolve_synthesis_assets() -> SynthesisAssets:
     if override:
         roots = (Path(override).expanduser().resolve(),)
     elif _distribution_mode():
+        # The render states the app generates for the user's own linked presets
+        # are consulted only while personal presets are ON.
+        from core.privacy import user_presets_enabled
+
         roots = (
-            shipped_states.expanduser().resolve(),
-            local["states"].expanduser().resolve(),
+            (shipped_states.expanduser().resolve(), local["states"].expanduser().resolve())
+            if user_presets_enabled()
+            else (shipped_states.expanduser().resolve(),)
         )
     else:
         roots = (shipped_states.expanduser().resolve(),)

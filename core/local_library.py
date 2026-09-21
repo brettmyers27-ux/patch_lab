@@ -20,6 +20,7 @@ from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.features import ClapEmbedder, handcrafted_features, load_audio_48k_mono
 from core.platform_env import ENV, PlatformEnv
 from core.plugin_host import ParameterValue
+from core.privacy import UserPresetsDisabled, require_user_presets, user_presets_enabled
 from core.preset_scan import (
     SequentialSerum1Ingestor,
     SilentPresetError,
@@ -126,6 +127,9 @@ class LocalLibrarySummary:
     #: reports the rest, rather than aborting everything.
     skipped_unsupported_generation: int = 0
     unsupported_generations: str = ""
+    #: True when the run did nothing (or stopped early) because the user's own
+    #: presets are turned off; the UI reports that instead of "0 presets".
+    user_presets_disabled: bool = False
 
 
 def default_local_paths(env: PlatformEnv = ENV) -> dict[str, Path]:
@@ -239,6 +243,9 @@ def fingerprint_pending_presets(
     runs the shipped CLAP encoder over audio that already exists.
     """
 
+    if not user_presets_enabled():
+        log("Personal presets are turned off; nothing was learned from your library.")
+        return LocalLibrarySummary(user_presets_disabled=True)
     database = Database(Path(db_path).expanduser().resolve())
     if compact_mode is None:
         compact_mode = load_storage_preferences(env).compact_mode
@@ -357,9 +364,10 @@ class PendingProcessSummary:
     still_pending: int = 0
     compacted_render_files: int = 0
     compacted_render_bytes: int = 0
+    user_presets_disabled: bool = False
 
 
-def process_pending_for_generation(
+def _process_pending_for_generation(
     generation: str,
     *,
     db_path: Path,
@@ -409,6 +417,7 @@ def process_pending_for_generation(
         )
         raise RuntimeError(capability.user_message())
 
+    require_user_presets("pending-processing")
     candidates = database.presets_needing_generation(generation)
     if limit is not None:
         candidates = candidates[: max(0, int(limit))]
@@ -435,6 +444,7 @@ def process_pending_for_generation(
     template = None
     ready_ids: list[int] = []
     for index, record_row in enumerate(candidates, start=1):
+        require_user_presets("pending-analysis")
         path = Path(record_row.path)
         if not path.is_file():
             # The file moved or was deleted. Keep the row pending rather than
@@ -501,6 +511,7 @@ def process_pending_for_generation(
     completed_notes = 0
     batch_size = 24 if compact_mode else max(len(ready_ids), 1)
     for start in range(0, len(ready_ids), batch_size):
+        require_user_presets("pending-rendering")
         batch = ready_ids[start : start + batch_size]
 
         def render_progress(detail: dict[str, Any]) -> None:
@@ -584,6 +595,24 @@ def process_pending_for_generation(
         },
     )
     return summary
+
+
+def process_pending_for_generation(generation: str, **kwargs: Any) -> PendingProcessSummary:
+    """Process already-catalogued pending presets -- only while personal presets are ON.
+
+    See :func:`_process_pending_for_generation`.  The user's choice is checked
+    before any work starts and again at every preset and render-batch boundary.
+    """
+
+    log = kwargs.get("log", print)
+    if not user_presets_enabled():
+        log("Personal presets are turned off; waiting presets were not processed.")
+        return PendingProcessSummary(generation=str(generation), user_presets_disabled=True)
+    try:
+        return _process_pending_for_generation(generation, **kwargs)
+    except UserPresetsDisabled:
+        log("Personal presets were turned off; stopped before doing further work on them.")
+        return PendingProcessSummary(generation=str(generation), user_presets_disabled=True)
 
 
 def refresh_pending_reasons(
@@ -677,7 +706,7 @@ def _coverage_log_lines(coverage: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def process_linked_folder(
+def _process_linked_folder(
     root: Path,
     *,
     db_path: Path,
@@ -800,6 +829,8 @@ def process_linked_folder(
             }
         )
     for discovered_index, path in enumerate(paths, start=1):
+        if discovered_index % 25 == 1:
+            require_user_presets("scanning")
         identity = identities[path]
         synth = identity.origin_generation
         assert synth is not None
@@ -888,6 +919,7 @@ def process_linked_folder(
             pending_presets=len(serum1_ids),
         )
         for ingest_index, preset_id in enumerate(serum1_ids, start=1):
+            require_user_presets("analysis")
             try:
                 parameters, rms, strategy = ingestor.ingest(id_to_path[preset_id])
                 database.replace_params(preset_id, parameters, strategy)
@@ -942,6 +974,7 @@ def process_linked_folder(
         live = load_plugin(str(serum2_selection.selected.path), plugin_name="Serum 2")
         template = decode_host_template(bytes(live.preset_data))
         for serum2_index, preset_id in enumerate(serum2_ids, start=1):
+            require_user_presets("analysis")
             try:
                 _store_serum2(
                     database, preset_id, id_to_path[preset_id], template, Path(state_dir)
@@ -1000,6 +1033,7 @@ def process_linked_folder(
     def fingerprint_batch(preset_ids: list[int]) -> None:
         nonlocal completed_features
         for preset_id in preset_ids:
+            require_user_presets("analysis")
             if preset_id not in feature_targets:
                 continue
             assert embedder is not None
@@ -1025,6 +1059,7 @@ def process_linked_folder(
     # a full library never needs tens of gigabytes of free local space.
     batch_size = 24 if compact_mode else max(len(render_targets), 1)
     for batch_start in range(0, len(render_targets), batch_size):
+        require_user_presets("rendering")
         batch = render_targets[batch_start : batch_start + batch_size]
 
         def render_progress(detail: dict[str, Any]) -> None:
@@ -1089,6 +1124,7 @@ def process_linked_folder(
         ).fetchall()
     eligible = [row for row in presets if int(row["id"]) in id_to_path and int(row["id"]) in searchable_ids]
     summary.searchable_local = len(eligible)
+    require_user_presets("contribution")
     _contribute_presets(
         database=database,
         relay=relay,
@@ -1112,6 +1148,27 @@ def process_linked_folder(
             )
     log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
     return summary
+
+
+def process_linked_folder(root: Path, **kwargs: Any) -> LocalLibrarySummary:
+    """Scan, learn and (with consent) share the user's linked preset folder.
+
+    Everything here concerns the user's OWN presets, so it happens only while
+    "Use & share my own presets" is ON: the folder is not even walked otherwise.
+    The choice is re-read at every scan, analysis, render and upload boundary of
+    :func:`_process_linked_folder`, so withdrawing it stops further work promptly
+    and safely (all steps are resumable) without touching stored data.
+    """
+
+    log = kwargs.get("log", print)
+    if not user_presets_enabled():
+        log("Personal presets are turned off; your linked folder was not scanned.")
+        return LocalLibrarySummary(user_presets_disabled=True)
+    try:
+        return _process_linked_folder(root, **kwargs)
+    except UserPresetsDisabled:
+        log("Personal presets were turned off; stopped before doing further work on them.")
+        return LocalLibrarySummary(user_presets_disabled=True)
 
 
 def _contribute_presets(
@@ -1142,6 +1199,7 @@ def _contribute_presets(
     )
     from core.submission_upload import PRESET_CONTRIBUTION, UploadError, upload_file
 
+    require_user_presets("contribution")
     ledger = ContributionLedger(ledger_path)
     pending: list[Candidate] = []
     for row in rows:
@@ -1162,12 +1220,13 @@ def _contribute_presets(
         return
     sent = 0
     with tempfile.TemporaryDirectory(prefix="patchlab-contribution-") as scratch:
-        bundles = build_bundles(
-            pending,
-            fingerprint_for=lambda item: _fingerprint_payload(database, item.preset_id),
-            work_dir=Path(scratch),
-        )
+        def fingerprint_for(item: Candidate) -> dict[str, Any]:
+            require_user_presets("contribution")
+            return _fingerprint_payload(database, item.preset_id)
+
+        bundles = build_bundles(pending, fingerprint_for=fingerprint_for, work_dir=Path(scratch))
         for bundle in bundles:
+            require_user_presets("contribution")
             if sent >= MAX_BUNDLES_PER_SCAN:
                 log(
                     "More presets are waiting to be shared; they will be sent on a "

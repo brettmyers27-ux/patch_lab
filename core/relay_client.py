@@ -266,6 +266,9 @@ class RelayClient:
         content_hash: str,
         fingerprint: dict[str, Any],
     ) -> UploadReceipt:
+        from core.privacy import require_user_presets
+
+        require_user_presets("contribution")
         preset_path = Path(preset_path).resolve()
         if preset_path.suffix.casefold() not in {".fxp", ".serumpreset"}:
             raise ValueError("Relay uploads are restricted to Serum preset files")

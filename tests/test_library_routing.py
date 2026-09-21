@@ -468,7 +468,7 @@ def test_compact_pipeline_order_is_preserved() -> None:
     # Scope the check to the per-batch loop inside process_linked_folder: the
     # module has other compact_render_library() calls (the standalone compaction
     # entry point and the final sweep) that are not part of this ordering.
-    source = inspect.getsource(library_module.process_linked_folder)
+    source = inspect.getsource(library_module._process_linked_folder)
     tree = ast.parse(inspect.cleandoc(source))
     loop = next(
         node

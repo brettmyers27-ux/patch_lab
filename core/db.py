@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
+from core.privacy import user_presets_enabled
 from core.plugin_host import ParameterValue
 
 
@@ -183,6 +184,20 @@ CREATE INDEX IF NOT EXISTS idx_match_batches_created ON match_batches(created_at
 """
 
 
+
+def _factory_only(alias: str = "") -> str:
+    """SQL fragment that removes the user's own presets while consent is OFF.
+
+    User presets are rows with ``is_factory=0``.  They stay in the database --
+    turning consent off never deletes anything -- but every query that decides
+    what to process must treat them as inactive, so a later render, analysis or
+    upload cannot pick them up.  Evaluated per call, so withdrawing consent
+    takes effect on the very next query.
+    """
+
+    return "" if user_presets_enabled() else f" AND {alias}is_factory=1"
+
+
 class Database:
     def __init__(self, path: Path = DEFAULT_DB_PATH) -> None:
         self.path = Path(path).resolve()
@@ -286,19 +301,19 @@ class Database:
         placeholders = ",".join("?" for _ in statuses)
         with self.connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM presets WHERE status IN ({placeholders}) ORDER BY id", tuple(statuses)
+                f"SELECT * FROM presets WHERE status IN ({placeholders}){_factory_only()} ORDER BY id", tuple(statuses)
             ).fetchall()
         return [self._preset(row) for row in rows]
 
     def renderable_presets(self, synth: str | None = None) -> list[PresetRecord]:
         """Return presets with a completed parameter record, regardless of later render status."""
 
-        where = "WHERE p.synth=?" if synth is not None else ""
+        where = "WHERE p.synth=?" if synth is not None else "WHERE 1=1"
         arguments: tuple[object, ...] = (synth,) if synth is not None else ()
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT p.* FROM presets p JOIN params pa ON pa.preset_id=p.id "
-                f"{where} GROUP BY p.id HAVING COUNT(pa.param_index)>0 ORDER BY p.id",
+                f"{where}{_factory_only('p.')} GROUP BY p.id HAVING COUNT(pa.param_index)>0 ORDER BY p.id",
                 arguments,
             ).fetchall()
         return [self._preset(row) for row in rows]
@@ -778,13 +793,14 @@ class Database:
             if reasons:
                 placeholders = ",".join("?" for _ in reasons)
                 rows = connection.execute(
-                    f"SELECT * FROM presets WHERE pending_reason IN ({placeholders}) "
-                    "ORDER BY id",
+                    f"SELECT * FROM presets WHERE pending_reason IN ({placeholders})"
+                    f"{_factory_only()} ORDER BY id",
                     tuple(reasons),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM presets WHERE pending_reason IS NOT NULL ORDER BY id"
+                    "SELECT * FROM presets WHERE pending_reason IS NOT NULL"
+                    f"{_factory_only()} ORDER BY id"
                 ).fetchall()
         return [self._preset(row) for row in rows]
 
@@ -828,7 +844,7 @@ class Database:
                 "  compatible_renderers = ?"
                 "  OR compatible_renderers LIKE ? OR compatible_renderers LIKE ?"
                 "  OR compatible_renderers LIKE ?"
-                f"){clause} ORDER BY id",
+                f"){clause}{_factory_only()} ORDER BY id",
                 tuple(arguments),
             ).fetchall()
         return [self._preset(row) for row in rows]

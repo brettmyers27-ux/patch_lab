@@ -11,6 +11,7 @@ from typing import Any, Callable
 import librosa
 import numpy as np
 
+from core.privacy import user_presets_enabled
 from core.audio_input import decode_audio_file
 from core.branding import display_match_name, generated_preset_name
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
@@ -86,6 +87,11 @@ def _local_search_rows(
     database_path: Path | None,
     audio_root: Path | None = None,
 ) -> tuple[np.ndarray | None, list[dict[str, Any]]]:
+    # The user's own presets are a candidate pool only while they are allowed.
+    # Checked here, at the point the pool is built, so no caller, cache or older
+    # request can put them into a Match while "Use & share my own presets" is OFF.
+    if not user_presets_enabled():
+        return None, []
     if database_path is None or not Path(database_path).is_file():
         return None, []
     database_path = Path(database_path).resolve()

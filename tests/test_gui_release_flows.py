@@ -1282,3 +1282,162 @@ def test_preset_contribution_outcomes_use_the_agreed_plain_wording(gui: Gui) -> 
     gui.window.runner.completed.emit({"found": 4, "relay_uploaded": 0, "relay_upload_failed": 4})
     log = gui.window.log_pane.toPlainText()
     assert "Your presets were not uploaded. Your original files were not changed. You can try again." in log
+
+
+# ===========================================================================
+# L. "Use & share my own presets" OFF: the app behaves as the consent text says
+# ===========================================================================
+
+
+def _turn_personal_presets(gui: Gui, value: bool | None) -> None:
+    """Set the privacy choice exactly as the real toggle / dialog would persist it."""
+
+    store = gui.window.privacy_store
+    if value is None:
+        store.path.unlink(missing_ok=True)
+        gui.window.privacy_choice = store.load()
+    else:
+        gui.window.privacy_choice = store.save(value)
+    gui.window.share_toggle.blockSignals(True)
+    gui.window.share_toggle.setChecked(bool(value))
+    gui.window.share_toggle.blockSignals(False)
+    gui.window.fingerprint_runner.start = MagicMock(name="fingerprint_runner.start")
+
+
+def _clicking_dialog(label: str):
+    """A QDialog that presses the named button as soon as it is shown, like a user."""
+
+    from PySide6.QtWidgets import QDialog, QPushButton
+
+    class ClickingDialog(QDialog):
+        def exec(self) -> int:
+            next(b for b in self.findChildren(QPushButton) if b.text() == label).click()
+            return 0
+
+    return ClickingDialog
+
+
+def _running(*runners):
+    """Make the given runners report an active job, patching their class property."""
+
+    from unittest.mock import PropertyMock, patch
+
+    patches = [patch.object(type(r), "running", new_callable=PropertyMock, return_value=True, create=True) for r in runners]
+    for p in patches:
+        p.start()
+    return patches
+
+
+def test_fresh_user_who_disagrees_starts_no_user_preset_work(gui: Gui, monkeypatch) -> None:
+    from core.privacy import user_presets_enabled
+
+    _turn_personal_presets(gui, None)
+    assert gui.window.privacy_choice.use_and_share_own_presets is None
+    monkeypatch.setattr("app.ui.QDialog", _clicking_dialog("Disagree"))
+    gui.window._show_consent_dialog()
+
+    assert gui.window.privacy_store.load().use_and_share_own_presets is False
+    assert user_presets_enabled() is False
+    assert gui.window.share_toggle.isChecked() is False
+    gui.window.maybe_start_automatic_link_scan()
+    gui.window.start_render()
+    gui.window.start_analyze()
+    gui.window.choose_folder()
+    for name in ("runner", "render_runner", "fingerprint_runner", "analyze_runner"):
+        getattr(gui.window, name).start.assert_not_called()
+    assert not gui.window._workflow_activities
+
+
+def test_agreeing_enables_personal_presets(gui: Gui, monkeypatch) -> None:
+    from core.privacy import user_presets_enabled
+
+    _turn_personal_presets(gui, None)
+    monkeypatch.setattr("app.ui.QDialog", _clicking_dialog("Agree"))
+    gui.window._show_consent_dialog()
+    assert gui.window.privacy_store.load().use_and_share_own_presets is True and user_presets_enabled()
+
+
+def test_turning_it_off_stops_running_user_preset_jobs_and_keeps_the_data(gui: Gui) -> None:
+    gui.window.fingerprint_runner.start = MagicMock()
+    gui.seed_library(learned=3)
+    before = Database(gui.db_path).library_coverage()
+    linked = gui.window.privacy_choice.linked_folder
+    for name in ("runner", "render_runner", "fingerprint_runner", "analyze_runner"):
+        setattr(getattr(gui.window, name), "cancel", MagicMock(name=f"{name}.cancel"))
+    patches = _running(gui.window.runner, gui.window.render_runner, gui.window.fingerprint_runner, gui.window.analyze_runner)
+    try:
+        gui.window._set_workflow_activity("link", 1, 10, "Scanning…")
+        gui.window.share_toggle.setChecked(False)
+    finally:
+        for p in reversed(patches):  # unwind in reverse: runners may share a class
+            p.stop()
+    assert gui.window.privacy_store.load().use_and_share_own_presets is False
+    for name in ("runner", "render_runner", "fingerprint_runner", "analyze_runner"):
+        getattr(gui.window, name).cancel.assert_called_once()
+    assert "link" not in gui.window._workflow_activities
+    assert Database(gui.db_path).library_coverage() == before, "stored presets and fingerprints are untouched"
+    assert gui.window.privacy_store.load().linked_folder == linked, "the folder link is kept for re-enabling"
+
+
+def test_render_and_learn_controls_refuse_cleanly_while_off(gui: Gui) -> None:
+    _turn_personal_presets(gui, False)
+    gui.window.start_render()
+    gui.window.start_analyze()
+    titles = [d["title"] for d in gui.dialogs("information")]
+    assert titles.count("Turn on personal presets") == 2
+    gui.window.runner.start.assert_not_called()
+    gui.window.render_runner.start.assert_not_called()
+    gui.window.fingerprint_runner.start.assert_not_called()
+
+
+def test_turning_it_back_on_makes_processing_available_again(gui: Gui) -> None:
+    _turn_personal_presets(gui, False)
+    gui.window.start_render()
+    gui.window.runner.start.assert_not_called()
+    gui.window.share_toggle.setChecked(True)
+    assert gui.window.privacy_store.load().use_and_share_own_presets is True
+    gui.window.start_render()
+    gui.window.runner.start.assert_called_once()
+
+
+def test_startup_with_personal_presets_off_schedules_no_scan(gui: Gui) -> None:
+    _turn_personal_presets(gui, False)
+    # A fresh window over the same persisted state, as after a relaunch.
+    relaunched = MainWindow(privacy_store=PrivacyStore(gui.window.privacy_store.path))
+    relaunched.runner.start = MagicMock()
+    relaunched.maybe_start_automatic_link_scan()
+    relaunched.runner.start.assert_not_called()
+    assert relaunched.privacy_choice.use_and_share_own_presets is False
+    relaunched.close()
+
+
+def test_the_automatic_daily_scan_still_runs_when_it_is_on(gui: Gui, monkeypatch) -> None:
+    monkeypatch.setattr("app.ui.auto_scan_due", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.ui.record_auto_scan", lambda *_a, **_k: None)
+    gui.window.maybe_start_automatic_link_scan()
+    gui.window.runner.start.assert_called_once()
+
+
+def test_match_uses_no_user_presets_while_off_and_uses_them_when_on(gui: Gui, monkeypatch) -> None:
+    monkeypatch.setattr("app.ui.synthesis_readiness", lambda *_a, **_k: SimpleNamespace(available=False, reason="test"))
+    gui.choose_audio()
+    _turn_personal_presets(gui, False)
+    gui.click(gui.window.match_start_button)
+    off = gui.window.match_runner.start.call_args.kwargs
+    assert off["factory_only"] is True and off["local_db"] is None and off["local_audio_root"] is None
+
+    gui.window.match_runner.start.reset_mock()
+    gui.window._match_failed("test cleanup")
+    _turn_personal_presets(gui, True)
+    gui.choose_audio()
+    gui.click(gui.window.match_start_button)
+    on = gui.window.match_runner.start.call_args.kwargs
+    assert on["local_db"] == gui.window.local_paths["db"], "the user's presets are candidates again"
+
+
+def test_worker_that_refused_because_it_is_off_is_reported_as_the_users_choice(gui: Gui) -> None:
+    gui.window._automatic_link_scan_active = True
+    gui.window._scan_completed({"user_presets_disabled": True, "found": 0})
+    assert "Personal presets are off" in gui.window.statusBar().currentMessage()
+    assert gui.window._render_failure_detail == ""
+    assert not gui.window._workflow_activities

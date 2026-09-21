@@ -113,7 +113,7 @@ from core.preview_cache import (
     recommendation_cache_key,
     unmodified_recommendation_basis_index,
 )
-from core.privacy import PrivacyStore, distribution_mode
+from core.privacy import PrivacyStore, distribution_mode, set_active_store, user_presets_enabled
 from core.runtime_log import append_runtime_log
 from core.storage import (
     StoragePreferences,
@@ -299,6 +299,7 @@ class LegacyMainWindow(QMainWindow):
         self.distribution_mode = distribution_mode()
         self.factory_verification = factory_verification
         self.privacy_store = privacy_store or PrivacyStore()
+        set_active_store(self.privacy_store)
         self.privacy_choice = self.privacy_store.load()
         self.factory_mapping_path = (
             ENV.app_data_dir / "factory-paths.json"
@@ -664,6 +665,8 @@ class LegacyMainWindow(QMainWindow):
             self.share_toggle.blockSignals(True)
             self.share_toggle.setChecked(value)
             self.share_toggle.blockSignals(False)
+            if not value:
+                self._stop_user_preset_work()
             self._apply_privacy_choice()
             dialog.accept()
 
@@ -676,10 +679,51 @@ class LegacyMainWindow(QMainWindow):
             return
         self.privacy_choice = self.privacy_store.save(enabled)
         if not enabled:
-            # Local processing is resumable. Stopping the worker here ensures a
-            # withdrawn choice also prevents its later upload phase.
-            self.runner.cancel()
+            self._stop_user_preset_work()
+        else:
+            self.append_log(
+                "Personal presets are on again. Anything already learned is usable "
+                "again, and waiting presets can be processed."
+            )
         self._apply_privacy_choice()
+
+    def _stop_user_preset_work(self) -> None:
+        """Stop every job that works on the user's own presets. Deletes nothing.
+
+        The choice is already saved, and every processing boundary re-reads it,
+        so this is what makes the stop prompt rather than what makes it safe.
+        All of these jobs are resumable; stored presets, fingerprints and renders
+        stay on disk but are inactive until the user turns the setting back on.
+        """
+
+        stopped = []
+        for label, runner in (
+            ("preset scan", getattr(self, "runner", None)),
+            ("preset rendering", getattr(self, "render_runner", None)),
+            ("learning", getattr(self, "fingerprint_runner", None)),
+            ("analysis", getattr(self, "analyze_runner", None)),
+        ):
+            if runner is not None and getattr(runner, "running", False):
+                runner.cancel()
+                stopped.append(label)
+        for card in ("link", "render", "analyze"):
+            self._workflow_activities.pop(card, None)
+        self._automatic_link_scan_active = False
+        self._compact_render_active = False
+        self.append_log(
+            "Personal presets are off. PatchLab will match against factory presets "
+            "only, and will not scan, render, analyze or share your presets."
+            + (f" Stopped: {', '.join(stopped)}." if stopped else "")
+        )
+
+    def _explain_personal_presets_off(self) -> None:
+        QMessageBox.information(
+            self,
+            "Turn on personal presets",
+            "Turn on “Use & share my own presets” in Settings → Privacy first. "
+            "While it is off, PatchLab matches against factory presets only and "
+            "does not scan, render, analyze or share your own presets.",
+        )
 
     def _apply_privacy_choice(self) -> None:
         enabled = bool(self.privacy_choice.use_and_share_own_presets)
@@ -864,7 +908,7 @@ class LegacyMainWindow(QMainWindow):
         return button, progress
 
     def choose_folder(self) -> None:
-        if self.distribution_mode and not self.privacy_choice.use_and_share_own_presets:
+        if self.distribution_mode and not user_presets_enabled():
             QMessageBox.information(
                 self,
                 "Turn on personal presets",
@@ -936,7 +980,8 @@ class LegacyMainWindow(QMainWindow):
         if not self.distribution_mode:
             return
         if not (
-            self.privacy_choice.use_and_share_own_presets
+            self.privacy_choice.use_and_share_own_presets is True
+            and user_presets_enabled()
             and self.privacy_choice.linked_folder
         ):
             return
@@ -1161,6 +1206,17 @@ class LegacyMainWindow(QMainWindow):
         compact_render = bool(getattr(self, "_compact_render_active", False))
         self._automatic_link_scan_active = False
         self._compact_render_active = False
+        if summary.get("user_presets_disabled"):
+            # The worker refused (or stopped) because personal presets are off.
+            # That is the user's choice working, not a failure and not "0 found".
+            for card in ("link", "render", "analyze"):
+                self._workflow_activities.pop(card, None)
+            self.scan_progress.setMaximum(100)
+            self.scan_progress.setValue(0)
+            self.append_log("Personal presets are off, so your presets were not processed.")
+            self.statusBar().showMessage("Personal presets are off — matching uses factory presets only.")
+            self._refresh_workflow_cards()
+            return
         partial_note = ""
         if compact_render:
             # A partially supported library is a success, not a failure: the
@@ -1358,6 +1414,10 @@ class LegacyMainWindow(QMainWindow):
         return first[:200]
 
     def start_render(self) -> None:
+        if self.distribution_mode and not user_presets_enabled():
+            self._ui_event("render_blocked", "personal presets are off")
+            self._explain_personal_presets_off()
+            return
         self._ui_event(
             "render_requested",
             "Render Sound Library selected",
@@ -1533,6 +1593,9 @@ class LegacyMainWindow(QMainWindow):
             menu.exec()
 
     def start_analyze(self) -> None:
+        if self.distribution_mode and not user_presets_enabled():
+            self._explain_personal_presets_off()
+            return
         if self.distribution_mode:
             pending = 0
             db_path = Path(self.local_paths["db"])
@@ -2657,6 +2720,7 @@ class MainWindow(LegacyMainWindow):
         self.distribution_mode = distribution_mode()
         self.factory_verification = factory_verification
         self.privacy_store = privacy_store or PrivacyStore()
+        set_active_store(self.privacy_store)
         self.privacy_choice = self.privacy_store.load()
         self.factory_mapping_path = (
             ENV.app_data_dir / "factory-paths.json"
@@ -4742,6 +4806,10 @@ class MainWindow(LegacyMainWindow):
 
         from core.capability_ux import acknowledge, missing_synth_notice
 
+        # Notices about waiting personal presets are meaningless (and would nag)
+        # while personal presets are off.
+        if not user_presets_enabled():
+            return
         pending = self._pending_counts()
         if not pending:
             return
@@ -4768,6 +4836,9 @@ class MainWindow(LegacyMainWindow):
         from core.capability_ux import acknowledge, synth_available_notice
         from core.db import Database
         from core.preset_identity import blocked_reasons_for
+
+        if not user_presets_enabled():
+            return
 
         try:
             database_path = self.local_paths["db"]
