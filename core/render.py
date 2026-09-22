@@ -79,6 +79,10 @@ class RenderSummary:
     failed_silent_serum2: int = 0
     elapsed_s: float = 0.0
     cancelled: bool = False
+    #: Presets left untouched because this machine cannot host their generation.
+    skipped_unrenderable_presets: int = 0
+    unrenderable_generations: str = ""
+
 
 
 class RenderControl:
@@ -105,14 +109,16 @@ def _worker_host(synth: str) -> tuple[Any, Any]:
     cached = _HOSTS.get(synth)
     if cached is not None:
         return cached
-    from core.platform_env import ENV
-    from core.plugin_host import make_dawdreamer_processor
+    from core.renderer_selection import open_renderer
 
-    required_format = "VST2" if synth == "serum1" else "VST3"
-    candidate = next(
-        item for item in ENV.plugins_for(synth) if item.format == required_format and item.hostable
+    # One authoritative answer to "which renderer can this machine use for this
+    # generation". The previous bare next() over a hardcoded format raised
+    # StopIteration inside a render worker on any machine lacking that exact
+    # format, which reached the user as "StopIteration" with no cause.
+    engine, processor, _selection = open_renderer(
+        synth, context=f"rendering the {synth} preset library"
     )
-    cached = make_dawdreamer_processor(candidate)
+    cached = (engine, processor)
     _HOSTS[synth] = cached
     return cached
 
@@ -238,6 +244,9 @@ def _select_records(database: Database, preset_ids: Sequence[int] | None) -> lis
     return selected
 
 
+_RENDER_OPERATION_ID = ""
+
+
 def render_library(
     *,
     db_path: Path = DEFAULT_DB_PATH,
@@ -259,6 +268,28 @@ def render_library(
         state_dir = DEFAULT_RENDER_STATE_DIR
     database = Database(db_path)
     records = _select_records(database, preset_ids)
+
+    # RENDERER PREFLIGHT, BEFORE ANY WORKER EXISTS.
+    #
+    # A machine renders only the generations it can actually host. Selecting
+    # presets purely by "has parameters" meant a library containing Serum 1
+    # entries queued Serum 1 work on a Serum-2-only Mac, and the missing host
+    # surfaced from inside a worker (as StopIteration) after the job had already
+    # started. Unrenderable generations are now reported and skipped here, and
+    # their presets stay pending for a later install -- exactly as discovery
+    # already treats them.
+    from core.renderer_selection import preflight_renderers
+
+    wanted = tuple(dict.fromkeys(str(record.synth) for record in records))
+    preflight = preflight_renderers(wanted, operation_id=str(_RENDER_OPERATION_ID or ""))
+    skipped_generations = set(preflight.unsupported)
+    skipped_records = [record for record in records if record.synth in skipped_generations]
+    if skipped_records:
+        log(
+            f"Skipping {len(skipped_records):,} preset(s) that need "
+            f"{', '.join(sorted(skipped_generations))}: {preflight.unsupported_reason()}"
+        )
+        records = [record for record in records if record.synth not in skipped_generations]
     all_existing = database.existing_render_notes()
     tasks = []
     skipped = 0
@@ -279,6 +310,8 @@ def render_library(
             )
 
     summary = RenderSummary(
+        skipped_unrenderable_presets=len(skipped_records),
+        unrenderable_generations=",".join(sorted(skipped_generations)),
         selected_presets=len(records),
         queued_presets=len(tasks),
         total_note_pairs=len(records) * len(MIDI_NOTES),

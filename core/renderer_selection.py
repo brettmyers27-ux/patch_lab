@@ -33,7 +33,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal, Mapping, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from core.diagnostics import record_decision, recorder
 from core.platform_env import ENV, PlatformEnv, PluginCandidate
@@ -511,6 +511,56 @@ def require_renderer(
     if not selection.available:
         raise RendererUnavailableError(selection, context=context)
     return selection
+
+
+# ---------------------------------------------------------------------------
+# Opening a renderer: the ONE way any code gets a live plug-in host
+# ---------------------------------------------------------------------------
+
+
+def renderer_candidate(selection: "RendererSelection"):
+    """Rebuild the PluginCandidate a selection chose, without re-discovering it."""
+
+    from core.platform_env import PluginCandidate
+
+    assert selection.selected is not None
+    return PluginCandidate(
+        selection.requested_synth,  # type: ignore[arg-type]
+        selection.selected.format,  # type: ignore[arg-type]
+        Path(str(selection.selected.path)),
+    )
+
+
+def open_renderer(
+    synth: str,
+    *,
+    env: PlatformEnv | None = None,
+    operation_id: str = "",
+    phase: str = "",
+    context: str = "",
+) -> tuple[Any, Any, "RendererSelection"]:
+    """Return ``(engine, processor, selection)`` for ``synth`` on this machine.
+
+    Every user-facing path that needs a live Serum host goes through here:
+    preview, octave pre-render, factory preview, preset export, export
+    verification, library rendering and Match's own render workers.  They used
+    to each run their own ``next(item for item in ENV.plugins_for(...) if
+    item.format == "VST2")``, which raised a bare ``StopIteration`` on a machine
+    without that exact format -- surfacing to users as "StopIteration" with no
+    indication that a Serum install was the problem, and to a multiprocessing
+    initializer as an unexplained dead worker.
+
+    A missing renderer now always raises :class:`RendererUnavailableError`,
+    which carries the full selection report and a sentence a user can act on.
+    """
+
+    from core.plugin_host import make_dawdreamer_processor
+
+    selection = require_renderer(
+        synth, env=env, operation_id=operation_id, phase=phase, context=context
+    )
+    engine, processor = make_dawdreamer_processor(renderer_candidate(selection))
+    return engine, processor, selection
 
 
 # ---------------------------------------------------------------------------

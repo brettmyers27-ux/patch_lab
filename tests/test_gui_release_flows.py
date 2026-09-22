@@ -1239,23 +1239,50 @@ def test_try_again_resends_the_same_saved_report_without_recreating_it(gui: Gui)
     runner.start.assert_called_once_with(saved)
 
 
-def test_not_signed_in_offers_sign_in_and_retries_after_it_succeeds(gui: Gui) -> None:
-    runner = _bug_report_runner(gui, code="not_connected")
+def test_not_signed_in_signs_in_and_resumes_the_same_report_automatically(gui: Gui) -> None:
+    """A tester must not have to re-file a report because of a sign-in they never saw."""
+
+    saved = gui.tmp_path / "PatchLab Bug Report saved.txt"
+    runner = _bug_report_runner(gui, code="not_connected", saved=saved)
     gui.window._reconnect_support_service = MagicMock(return_value=True)
-    FakeMessageBox.choose = "Sign In…"
+    gui.window._bug_report_signin_attempted = False
+
     gui.window._bug_report_failed("PatchLab isn't signed in to the support service on this Mac.")
-    (dialog,) = gui.dialogs("custom")
-    assert dialog["buttons"] == ["Try Again", "Sign In…", "Close"]
+
     gui.window._reconnect_support_service.assert_called_once()
-    runner.start.assert_called_once()
+    runner.start.assert_called_once_with(saved), "the SAME saved report resumes"
+    assert gui.dialogs("custom") == [], "no dead end shown when sign-in fixes it"
+    assert "resuming the saved bug report" in gui.window.log_pane.toPlainText()
 
 
-def test_cancelling_sign_in_does_not_retry(gui: Gui) -> None:
+def test_a_declined_sign_in_keeps_the_local_report_and_explains(gui: Gui) -> None:
     runner = _bug_report_runner(gui, code="not_connected")
     gui.window._reconnect_support_service = MagicMock(return_value=False)
-    FakeMessageBox.choose = "Sign In…"
+    gui.window._bug_report_signin_attempted = False
+    FakeMessageBox.choose = "Close"
+
     gui.window._bug_report_failed("PatchLab isn't signed in to the support service on this Mac.")
+
     runner.start.assert_not_called()
+    (dialog,) = gui.dialogs("custom")
+    assert dialog["text"].startswith("Your bug report was saved on this Mac")
+    assert "Sign In…" in dialog["buttons"]
+
+
+def test_sign_in_is_only_attempted_once_per_report(gui: Gui) -> None:
+    """A wrong passcode must not loop the user through sign-in forever."""
+
+    runner = _bug_report_runner(gui, code="auth_failed")
+    gui.window._reconnect_support_service = MagicMock(return_value=True)
+    gui.window._bug_report_signin_attempted = False
+    gui.window._bug_report_failed("PatchLab couldn't sign in to the support service.")
+    assert runner.start.call_count == 1
+
+    FakeMessageBox.choose = "Close"
+    gui.window._bug_report_failed("PatchLab couldn't sign in to the support service.")
+    assert gui.window._reconnect_support_service.call_count == 1, "asked once, not in a loop"
+    assert runner.start.call_count == 1
+    assert gui.dialogs("custom"), "the second failure explains instead of retrying silently"
 
 
 def test_signing_in_again_lifts_the_local_only_setting_for_the_session(monkeypatch, tmp_path: Path) -> None:

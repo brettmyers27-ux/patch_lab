@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.worker_runtime import emit
 from core.local_library import default_local_paths, process_linked_folder, relay_from_environment
 
 
@@ -61,10 +62,7 @@ def main() -> int:
             current=detail.get("current"),
             total=detail.get("total"),
         )
-        print(
-            "LOCAL_LIBRARY_PROGRESS=" + json.dumps(detail, sort_keys=True),
-            flush=True,
-        )
+        emit("LOCAL_LIBRARY_PROGRESS=" + json.dumps(detail, sort_keys=True))
 
     try:
         result = process_linked_folder(

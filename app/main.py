@@ -123,6 +123,15 @@ def main() -> int:
         if not allowed:
             return 0
         cleanup_stale_match_scratch()
+        # One sign-in, not two: turn the passcode the member already entered into
+        # the support token background workers need, so a bug report never has to
+        # discover mid-upload that PatchLab is "not signed in".
+        try:
+            from core.access_gate import ensure_relay_token
+
+            ensure_relay_token()
+        except Exception:
+            pass
         try:
             validate_runtime_family()
             validate_model_assets()

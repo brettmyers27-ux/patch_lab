@@ -905,20 +905,25 @@ class ExportProcessRunner(_ProcessRunnerBase):
     def running(self) -> bool:
         return self.process.state() != QProcess.ProcessState.NotRunning
 
-    def start(self, result_path: Path, output_path: Path) -> None:
+    def start(
+        self,
+        result_path: Path,
+        output_path: Path,
+        *,
+        existing_match: int | None = None,
+    ) -> None:
         if self.running:
             raise RuntimeError("A preset export is already running")
         self._buffer = ""
         self._result = None
         self._error = None
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
-        self._start_worker(
-            "export",
-            [
-                str(result_path),
-                str(output_path),
-            ],
-        )
+        arguments = [str(result_path), str(output_path)]
+        if existing_match is not None:
+            # One export implementation for both the generated recommendation and
+            # a closest match; only the selector differs.
+            arguments += ["--existing-match", str(int(existing_match))]
+        self._start_worker("export", arguments)
 
     def cancel(self) -> None:
         if self.running:

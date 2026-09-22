@@ -91,13 +91,52 @@ def export_factory_exact(result: dict, recommendation: dict, output: Path) -> di
     }
 
 
+def existing_match_as_recommendation(result: dict, index: int) -> dict:
+    """Describe one closest match so it exports through the same verified path.
+
+    A closest match is an existing preset, so exporting it is the branded exact
+    copy that ``export_factory_exact`` already performs for a factory-only
+    recommendation -- not a second implementation.
+    """
+
+    rows = list(result.get("existing_matches") or [])
+    if not 0 <= index < len(rows):
+        raise RuntimeError("That closest match is no longer part of this result.")
+    row = rows[index]
+    source = row.get("source_path") or ""
+    if not row.get("local_source_available") or not source:
+        raise RuntimeError(
+            f"{row.get('name') or 'This preset'} is not installed on this Mac, so "
+            "PatchLab has no file to copy. Install the pack it came from, then retry."
+        )
+    return {
+        "synth": str(row["synth"]),
+        "content_hash": str(row["content_hash"]),
+        "factory_source_path": str(source),
+        "clap_similarity": float(row.get("similarity", 0.0)),
+        "base_preset_id": int(row.get("preset_id") or 0),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("result", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--existing-match", type=int, default=None,
+        help="Export this closest match (0-based) instead of the generated recommendation.",
+    )
     args = parser.parse_args()
     result = json.loads(args.result.read_text(encoding="utf-8"))
-    recommendation = result.get("recommendation")
+    if args.existing_match is not None:
+        try:
+            recommendation = existing_match_as_recommendation(result, args.existing_match)
+        except RuntimeError as exc:
+            print(f"EXPORT_ERROR={exc}", flush=True)
+            return 1
+        result = {**result, "factory_only": True}
+    else:
+        recommendation = result.get("recommendation")
     if not isinstance(recommendation, dict):
         print("EXPORT_ERROR=There is no recommendation to export", flush=True)
         return 1
@@ -187,7 +226,20 @@ def main() -> int:
             commit_temporary_export(temporary_path, final_output)
             temporary_removed = not temporary_path.exists()
     except Exception as exc:
-        print(f"EXPORT_ERROR={type(exc).__name__}: {exc}", flush=True)
+        from core.worker_failure import report_worker_failure
+
+        synth = ""
+        try:
+            synth = str(result.get("recommendation", {}).get("synth", ""))
+        except Exception:
+            pass
+        detail = report_worker_failure(
+            exc, subsystem="preset-export", operation="saving the preset",
+            synth=synth, requested_renderer=synth, destination=str(args.output),
+        )
+        print("EXPORT_ERROR=" + detail["user_message"], flush=True)
+        print("EXPORT_ERROR_DETAIL=" + json.dumps(
+            {k: v for k, v in detail.items() if k != "traceback"}, default=str), flush=True)
         return 1
     payload["path"] = str(final_output)
     payload["temporary_export_used"] = True

@@ -21,6 +21,7 @@ from core.fxp import build_fxp, parse_fxp
 from core.matcher import loudness_normalize
 from core.platform_env import ENV
 from core.plugin_host import dump_dawdreamer_parameters, make_dawdreamer_processor
+from core.renderer_selection import open_renderer
 from core.serum2_preset import parse_serum2_preset
 from core.serum2_state_reconstruct import (
     DEFAULT_RENDER_STATE_DIR,
@@ -126,12 +127,9 @@ def write_serum1_preset(
             output_path, "serum1", "copied-native-branded", base_preset_id
         )
 
-    candidate = next(
-        item
-        for item in ENV.plugins_for("serum1")
-        if item.format == "VST2" and item.hostable
+    _engine, processor, _selection = open_renderer(
+        "serum1", context="writing a Serum 1 preset"
     )
-    _engine, processor = make_dawdreamer_processor(candidate)
     if processor.load_preset(str(base_path)) is False:
         raise RuntimeError(f"Serum 1 rejected base preset {base_path}")
     for index, value in enumerate(np.asarray(vector, dtype=np.float32)):
@@ -220,16 +218,26 @@ class PresetExportVerifier:
     """Persistent plug-in hosts for mandatory decoded-state and audio checks."""
 
     def __init__(self) -> None:
+        # Hosts are opened lazily, for the one generation actually being
+        # exported. Opening both up front meant a Serum-2-only machine could not
+        # export a Serum 2 preset at all: the Serum 1 lookup raised
+        # StopIteration before any work began, which is exactly what users saw
+        # as "EXPORT_ERROR=StopIteration" from Export Preset and Load in Serum.
         self.hosts: dict[str, tuple[Any, Any]] = {}
-        for synth, required in (("serum1", "VST2"), ("serum2", "VST3")):
-            plugin = next(
-                item
-                for item in ENV.plugins_for(synth)
-                if item.format == required and item.hostable
-            )
-            self.hosts[synth] = make_dawdreamer_processor(plugin)
         self.embedder = ClapEmbedder(ENV)
         self._temporary = tempfile.TemporaryDirectory(prefix="patchlab-export-verify-")
+
+    def host(self, synth: str) -> tuple[Any, Any]:
+        """Open (once) the verified renderer for exactly this generation."""
+
+        cached = self.hosts.get(synth)
+        if cached is None:
+            engine, processor, _selection = open_renderer(
+                synth, context=f"verifying an exported {synth} preset"
+            )
+            cached = (engine, processor)
+            self.hosts[synth] = cached
+        return cached
 
     def close(self) -> None:
         self._temporary.cleanup()
@@ -247,7 +255,7 @@ class PresetExportVerifier:
     ) -> PresetExportVerification:
         target = np.asarray(target_audio, dtype=np.float32).reshape(-1)
         duration = duration_s or min(4.0, len(target) / CLAP_SAMPLE_RATE)
-        engine, processor = self.hosts[export.synth]
+        engine, processor = self.host(export.synth)
         decoded_equal = True
         max_parameter_delta: float | None = None
         coverage = 1.0

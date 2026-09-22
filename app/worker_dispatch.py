@@ -9,6 +9,8 @@ import time
 import traceback
 
 from core.worker_runtime import (
+    PARENT_GONE_EXIT,
+    _silence_stdout,
     WORKER_ENTRY_POINTS,
     WORKER_FLAG,
     WORKER_READY_PREFIX,
@@ -38,6 +40,11 @@ def run_worker(worker_name: str, arguments: list[str]) -> int:
         return int(result or 0)
     except SystemExit as exc:
         return int(exc.code or 0)
+    except BrokenPipeError:
+        # The GUI closed the pipe (it cancelled this job). Ending quietly is the
+        # correct outcome: the work is resumable and nothing failed.
+        _silence_stdout()
+        return PARENT_GONE_EXIT
     except BaseException as exc:
         print(
             f"PATCHLAB_WORKER_ERROR={type(exc).__name__}: {exc}",

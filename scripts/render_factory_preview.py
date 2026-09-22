@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.platform_env import ENV
+from core.renderer_selection import open_renderer, renderer_candidate
 from core.plugin_host import make_dawdreamer_processor
 from core.preview_cache import preview_cache_path
 from core.preset_scan import sha1_file
@@ -60,13 +61,10 @@ def render_preview(
     )
     if output.is_file():
         return output
-    required = "VST2" if synth == "serum1" else "VST3"
-    candidate = next(
-        item
-        for item in ENV.plugins_for(synth)
-        if item.format == required and item.hostable
+    engine, processor, selection = open_renderer(
+        synth, context=f"auditioning a {synth} preset"
     )
-    engine, processor = make_dawdreamer_processor(candidate)
+    candidate = renderer_candidate(selection)
     if synth == "serum1":
         if processor.load_preset(str(source)) is False:
             raise RuntimeError("Serum 1 rejected the local factory preset")
@@ -128,7 +126,15 @@ def main() -> int:
             output_root=args.output_root,
         )
     except Exception as exc:
-        print(f"PREVIEW_ERROR={type(exc).__name__}: {exc}", flush=True)
+        from core.worker_failure import report_worker_failure
+
+        detail = report_worker_failure(
+            exc, subsystem="preview", operation="auditioning this preset",
+            synth=args.synth, requested_renderer=args.synth, midi_note=args.note,
+        )
+        print("PREVIEW_ERROR=" + detail["user_message"], flush=True)
+        print("PREVIEW_ERROR_DETAIL=" + json.dumps(
+            {k: v for k, v in detail.items() if k != "traceback"}, default=str), flush=True)
         return 1
     print(
         "PREVIEW_RESULT="

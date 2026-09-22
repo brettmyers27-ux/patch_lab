@@ -223,13 +223,12 @@ class SequentialSerum1Ingestor:
         )
         assert selection.selected is not None
         self.selection = selection
-        self.candidate = next(
-            item
-            for item in env.plugin_candidates
-            if item.synth == "serum1"
-            and item.format == selection.selected.format
-            and str(item.path) == selection.selected.path
-        )
+        # Rebuild the chosen candidate rather than searching for it again: the
+        # second lookup could miss (and raise a bare StopIteration) whenever the
+        # selector legitimately chose a candidate this filter did not match.
+        from core.renderer_selection import renderer_candidate
+
+        self.candidate = renderer_candidate(selection)
         self.engine, self.processor = make_dawdreamer_processor(self.candidate)
         self.initial = dump_dawdreamer_parameters(self.processor)
 

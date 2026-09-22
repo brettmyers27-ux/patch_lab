@@ -269,6 +269,43 @@ class AccessManager:
 KEYCHAIN_TIMEOUT_S = 15.0
 
 
+def ensure_relay_token(
+    *, store: AccessStore | None = None, timeout: float = KEYCHAIN_TIMEOUT_S
+) -> bool:
+    """Make sure a usable support token exists, using the passcode already saved.
+
+    PatchLab's own sign-in and its support-service sign-in are the same passcode,
+    so a member who unlocked the app should never be told later that PatchLab is
+    "not signed in to the support service". That happened because the token is
+    what background workers use, older versions stored only the passcode, and a
+    keychain read from a worker can be refused or delayed.
+
+    Called once at launch, off the critical path: it mints and stores a token
+    from the saved passcode, and reports whether one is now available. Never
+    raises and never prompts.
+    """
+
+    store = store or AccessStore()
+    state = store.load()
+    if state.local_only or not state.authenticated_once:
+        return False
+    if state.token:
+        return True
+    url = os.environ.get("PATCHLAB_RELAY_URL", "").strip()
+    passcode = stored_passcode(timeout)
+    if not url or not passcode:
+        return False
+    try:
+        token = RelayClient(url, passcode, timeout=15.0).token()
+    except Exception:
+        return False
+    try:
+        store.refresh_token(str(token))
+    except Exception:
+        return False
+    return True
+
+
 def stored_passcode(timeout: float = KEYCHAIN_TIMEOUT_S) -> str | None:
     """Read the saved passcode, but never wait on the keychain indefinitely."""
 

@@ -456,6 +456,37 @@ def _candidate_for(synth: str, plugin_format: str, path: Path | None):
     return PluginCandidate(synth, plugin_format, Path(str(path)))  # type: ignore[arg-type]
 
 
+class RenderWorkerNotReady(RuntimeError):
+    """Raised instead of a bare KeyError when a worker never finished init.
+
+    ``_init_render_worker`` deliberately does not raise (a raising initializer
+    makes multiprocessing.Pool respawn forever), so it records the failure in
+    ``_RENDER["init_failure"]`` and leaves the host table absent. Any code that
+    renders a candidate must report that stored reason; indexing ``hosts``
+    blindly produced "KeyError: 'hosts'", which is what users saw when an
+    audition failed.
+    """
+
+    def __init__(self, detail: dict[str, Any] | None) -> None:
+        detail = detail or {}
+        self.detail = detail
+        self.user_message = str(
+            detail.get("user_message")
+            or "PatchLab couldn't start the Serum renderer needed for this preview."
+        )
+        super().__init__(
+            detail.get("message")
+            or "the render worker was never initialized, and no failure was recorded"
+        )
+
+
+def _require_hosts() -> dict[str, Any]:
+    hosts = _RENDER.get("hosts")
+    if hosts is None:
+        raise RenderWorkerNotReady(_RENDER.get("init_failure"))
+    return hosts
+
+
 
 def _factory_paths_by_hash() -> dict[str, str]:
     """Load this machine's content-hash -> factory preset path mapping once."""
@@ -517,7 +548,7 @@ def _state_root_for(assets: Any, preset_id: int) -> Path:
 
 def _render_candidate_unsafe(payload: tuple[Candidate, int, float]) -> tuple[np.ndarray, float]:
     candidate, midi_note, duration = payload
-    engine, processor = _RENDER["hosts"][candidate.synth]
+    engine, processor = _require_hosts()[candidate.synth]
     assets = _RENDER["assets"]
     if candidate.synth == "serum1":
         with sqlite3.connect(_RENDER["library_db"]) as connection:

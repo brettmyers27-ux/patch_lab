@@ -74,7 +74,11 @@ def render_recommendation(
     with tempfile.TemporaryDirectory(
         prefix="patchlab-recommendation-preview-"
     ) as scratch:
-        _init_render_worker(scratch)
+        # Host ONLY the generation this candidate needs. Defaulting to both
+        # meant a Serum-2-only machine failed to initialise (Serum 1 is absent),
+        # left the host table empty, and every audition then died with
+        # "KeyError: 'hosts'" even though the Serum 2 preview was renderable.
+        _init_render_worker(scratch, required_synths=(candidate.synth,))
         waveform, _coverage = _render_candidate_unsafe(
             (candidate, midi_note, 4.0)
         )
@@ -106,7 +110,21 @@ def main() -> int:
             cache_key=args.cache_key,
         )
     except Exception as exc:
-        print(f"PREVIEW_ERROR={type(exc).__name__}: {exc}", flush=True)
+        from core.worker_failure import report_worker_failure
+
+        synth = ""
+        try:
+            synth = str(json.loads(args.result.read_text(encoding="utf-8"))
+                        .get("recommendation", {}).get("synth", ""))
+        except Exception:
+            pass
+        detail = report_worker_failure(
+            exc, subsystem="preview", operation="auditioning the generated preset",
+            synth=synth, requested_renderer=synth, midi_note=args.note,
+        )
+        print("PREVIEW_ERROR=" + detail["user_message"], flush=True)
+        print("PREVIEW_ERROR_DETAIL=" + json.dumps(
+            {k: v for k, v in detail.items() if k != "traceback"}, default=str), flush=True)
         return 1
     print(
         "PREVIEW_RESULT="

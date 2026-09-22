@@ -91,6 +91,7 @@ from core.update_check import (
     UpdatePreferences,
     load_update_preferences,
     save_update_preferences,
+    update_space_preflight,
 )
 from core.worker_runtime import worker_invocation
 from core.match_batch import (
@@ -517,9 +518,9 @@ class LegacyMainWindow(QMainWindow):
         results_layout = QVBoxLayout(self.match_results)
         self.existing_heading = QLabel("Closest presets you own")
         self.existing_heading.setStyleSheet("font-size: 16px; font-weight: 600;")
-        self.existing_table = QTableWidget(0, 5)
+        self.existing_table = QTableWidget(0, 7)
         self.existing_table.setHorizontalHeaderLabels(
-            ["Preset", "Synth", "Similarity", "Source path", "Audition"]
+            ["Preset", "Synth", "Similarity", "Source path", "Audition", "Export", "Load in Serum"]
         )
         self.existing_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
@@ -1138,6 +1139,18 @@ class LegacyMainWindow(QMainWindow):
         if self.update_download_runner.running:
             QMessageBox.information(self, "Update download", "PatchLab is already downloading this update.")
             return
+        # Never start a multi-gigabyte download that cannot possibly finish.
+        space = update_space_preflight(int(package.get("size") or 0))
+        self._ui_event(
+            "update_space_preflight",
+            "checked free space before downloading an update",
+            **space.as_dict(),
+        )
+        if not space.sufficient:
+            self.append_log("Update not started: " + space.user_message())
+            self.statusBar().showMessage("Not enough free space to install the update.")
+            QMessageBox.warning(self, "Not enough free space", space.user_message())
+            return
         try:
             self.update_download_runner.start(package)
         except (TypeError, ValueError) as exc:
@@ -1174,6 +1187,11 @@ class LegacyMainWindow(QMainWindow):
             "Choose Install Update to close PatchLab and open macOS Installer. "
             "Installer will replace the old PatchLab app while preserving your "
             "settings, library, and rendered audio."
+        )
+        box.setInformativeText(
+            "macOS Installer opens in its own window and you must click through it "
+            "to finish. PatchLab quits first, and you can reopen it once Installer "
+            "reports success."
         )
         install = box.addButton("Install Update", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
@@ -1977,6 +1995,34 @@ class LegacyMainWindow(QMainWindow):
                 play.setToolTip("No rendered preview is shipped; link your own library for audition.")
             self.existing_table.setCellWidget(row_index, 4, play)
 
+            # Every closest match offers the same two product actions as the
+            # generated result, through the same verified export implementation.
+            reason = self._existing_match_export_blocker(item)
+            export = QPushButton("Export")
+            load = QPushButton("Load in Serum")
+            for button in (export, load):
+                button.setObjectName("compactActionButton")
+            if reason:
+                for button in (export, load):
+                    button.setEnabled(False)
+                    button.setToolTip(reason)
+            else:
+                export.setToolTip("Save this preset to a folder you choose.")
+                load.setToolTip(
+                    "Save this preset into your Serum presets folder so Serum's "
+                    "browser finds it."
+                )
+                export.clicked.connect(
+                    lambda _checked=False, index=row_index, detail=dict(item):
+                    self.export_existing_match(index, detail)
+                )
+                load.clicked.connect(
+                    lambda _checked=False, index=row_index, detail=dict(item):
+                    self.load_existing_match_in_serum(index, detail)
+                )
+            self.existing_table.setCellWidget(row_index, 5, export)
+            self.existing_table.setCellWidget(row_index, 6, load)
+
         recommendation = result.get("recommendation")
         self.settings_tree.clear()
         if not isinstance(recommendation, dict):
@@ -2502,6 +2548,105 @@ class LegacyMainWindow(QMainWindow):
             path for path in ENV.existing_preset_roots if token in str(path).casefold()
         ]
         return existing[0] if existing else home
+
+    def _existing_match_export_blocker(self, item: dict) -> str:
+        """Why this closest match cannot be exported, or "" when it can.
+
+        A closest match is an existing preset file, so exporting it means copying
+        the installed file. When PatchLab does not have that file, say exactly
+        that instead of offering an action that cannot work.
+        """
+
+        if not item.get("local_source_available") or not item.get("source_path"):
+            name = str(item.get("name") or "This preset")
+            return (
+                f"{name} is not installed on this Mac, so PatchLab has no file to "
+                "copy. Install the pack it came from and run the match again."
+            )
+        synth = str(item.get("synth") or "")
+        if synth not in ("serum1", "serum2"):
+            return "PatchLab does not recognise this preset's Serum generation."
+        try:
+            from core.synth_capability import capability_for
+
+            capability = capability_for(synth)
+        except Exception:
+            return ""
+        if not capability.available:
+            return capability.user_message()
+        return ""
+
+    def _existing_match_output(self, item: dict, *, folder: Path) -> Path:
+        synth = str(item["synth"])
+        extension = ".fxp" if synth == "serum1" else ".SerumPreset"
+        base = generated_preset_name(synth)
+        output = folder / f"{base}{extension}"
+        counter = 2
+        while output.exists():
+            output = folder / f"{base} {counter}{extension}"
+            counter += 1
+        return output
+
+    def export_existing_match(self, index: int, item: dict) -> None:
+        """Save one closest match to a folder the user chooses."""
+
+        if self._match_result_path is None:
+            return
+        reason = self._existing_match_export_blocker(item)
+        if reason:
+            QMessageBox.information(self, "This preset cannot be exported", reason)
+            return
+        suggested = self._existing_match_output(
+            item, folder=self._patchlab_export_folder(str(item["synth"]))
+        )
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export this closest match",
+            str(suggested),
+            "Serum preset (*.fxp *.SerumPreset)",
+        )
+        if not selected:
+            return
+        output = Path(selected)
+        if output.suffix.casefold() != suggested.suffix.casefold():
+            output = output.with_suffix(suggested.suffix)
+        self._start_existing_match_export(index, output, label="Export")
+
+    def load_existing_match_in_serum(self, index: int, item: dict) -> None:
+        """Write one closest match straight into the local Serum presets folder.
+
+        Never touches a running Serum: it only writes a file Serum's own browser
+        picks up, which is the same supported mechanism the generated result uses.
+        """
+
+        if self._match_result_path is None:
+            return
+        reason = self._existing_match_export_blocker(item)
+        if reason:
+            QMessageBox.information(self, "This preset cannot be loaded", reason)
+            return
+        output = self._existing_match_output(
+            item, folder=self._patchlab_export_folder(str(item["synth"]))
+        )
+        self._start_existing_match_export(index, output, label="Load in Serum")
+
+    def _start_existing_match_export(
+        self, index: int, output: Path, *, label: str
+    ) -> None:
+        if self.export_runner.running:
+            QMessageBox.information(
+                self, "Export in progress", "Wait for the current export to finish."
+            )
+            return
+        self._export_context_uid = None
+        self.append_log(f"{label}: saving closest match #{index + 1} to {output}")
+        self.statusBar().showMessage(f"{label}: writing {output.name}…")
+        try:
+            self.export_runner.start(
+                self._match_result_path, output, existing_match=index
+            )
+        except Exception as exc:
+            self.append_log(f"{label} could not start: {exc}")
 
     def _patchlab_export_folder(self, synth: str) -> Path:
         """Return (and create) the PatchLab subfolder for generated presets.
@@ -5167,6 +5312,7 @@ class MainWindow(LegacyMainWindow):
                 )
                 dialog.accept()
                 return
+            self._bug_report_signin_attempted = False
             self.append_log("Sending user-approved bug report to private support…")
             self.statusBar().showMessage("Bug report saved locally; sending private copy…")
             dialog.accept()
@@ -5175,6 +5321,7 @@ class MainWindow(LegacyMainWindow):
         dialog.exec()
 
     def _bug_report_completed(self, result: dict) -> None:
+        self._bug_report_signin_attempted = False
         ticket_id = str(result.get("ticket_id", ""))
         receipt_id = str(result.get("receipt_id", ""))
         self.append_log(
@@ -5192,8 +5339,36 @@ class MainWindow(LegacyMainWindow):
     def _bug_report_failed(self, error: str) -> None:
         code = getattr(self.bug_report_runner, "error_code", "")
         self.append_log(f"Bug report was saved locally but not uploaded ({code or 'unknown'}): {error}")
-        self.statusBar().showMessage("Bug report saved on this Mac; upload didn't complete.")
         needs_connection = code in {"not_connected", "auth_failed"}
+        request_path = getattr(self.bug_report_runner, "request_path", None)
+
+        # SIGN IN AND RESUME, WITHOUT MAKING THE USER FILE THE REPORT AGAIN.
+        #
+        # A tester submitted a report and only afterwards learned PatchLab was
+        # not signed in to the support service. Sign-in is the whole remedy for
+        # that, so ask for it immediately and resume the SAME saved ticket (same
+        # ticket id, same bytes), which the service treats as one submission.
+        if (
+            needs_connection
+            and request_path is not None
+            and not getattr(self, "_bug_report_signin_attempted", False)
+        ):
+            self._bug_report_signin_attempted = True
+            self.statusBar().showMessage("Signing in to the support service…")
+            self.append_log(
+                "The support service needs a sign-in before this report can upload; "
+                "asking now and then resuming the same report."
+            )
+            if self._reconnect_support_service() and not self.bug_report_runner.running:
+                try:
+                    self.bug_report_runner.start(request_path)
+                    self.append_log("Signed in; resuming the saved bug report upload…")
+                    self.statusBar().showMessage("Sending your bug report…")
+                    return
+                except Exception as exc:
+                    self.append_log(f"Could not resume the bug report upload: {exc}")
+
+        self.statusBar().showMessage("Bug report saved on this Mac; upload didn't complete.")
         box = QMessageBox(self)
         box.setWindowTitle("Bug report not uploaded")
         box.setText(
@@ -5215,7 +5390,6 @@ class MainWindow(LegacyMainWindow):
                 return
         elif clicked is not retry:
             return
-        request_path = getattr(self.bug_report_runner, "request_path", None)
         if request_path is None or self.bug_report_runner.running:
             return
         try:

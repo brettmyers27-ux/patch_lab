@@ -122,15 +122,12 @@ def _serum1_settings(
     base_vector: np.ndarray,
     database_path: Path,
 ) -> dict[str, dict[str, Any]]:
-    from core.platform_env import ENV
-    from core.plugin_host import dump_dawdreamer_parameters, make_dawdreamer_processor
+    from core.plugin_host import dump_dawdreamer_parameters
+    from core.renderer_selection import open_renderer
 
-    plugin = next(
-        item
-        for item in ENV.plugins_for("serum1")
-        if item.format == "VST2" and item.hostable
+    _engine, processor, _selection = open_renderer(
+        "serum1", context="summarising Serum 1 candidate settings"
     )
-    _engine, processor = make_dawdreamer_processor(plugin)
     with sqlite3.connect(database_path) as connection:
         path = connection.execute(
             "SELECT path FROM presets WHERE id=?", (candidate.base_preset_id,)

@@ -165,6 +165,82 @@ def fetch_remote_version(
     return extract_version(body)
 
 
+#: A downloaded installer needs room for itself, for macOS Installer's expanded
+#: payload, and for the replacement app to exist beside the current one while
+#: the swap happens. Measured against a 3.4 GB package whose payload expands to
+#: a ~4.6 GB app bundle: 3.4 (download) + 4.6 (expansion/replacement) is already
+#: over 2x, and Installer needs scratch on top.
+UPDATE_SPACE_MULTIPLIER = 2.5
+#: Absolute headroom so a "just barely fits" disk is still refused.
+UPDATE_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateSpaceCheck:
+    """Whether this Mac can actually complete a package update."""
+
+    required_bytes: int
+    available_bytes: int
+    package_bytes: int
+    path: str
+
+    @property
+    def sufficient(self) -> bool:
+        return self.available_bytes >= self.required_bytes
+
+    @staticmethod
+    def _gb(value: int) -> str:
+        return f"{value / 1e9:.1f} GB"
+
+    def user_message(self) -> str:
+        """One sentence naming both numbers, because 'failed' is not actionable."""
+
+        return (
+            f"PatchLab needs about {self._gb(self.required_bytes)} free to download "
+            f"and install this update, and this disk has {self._gb(self.available_bytes)} "
+            f"available. The installer alone is {self._gb(self.package_bytes)}, and macOS "
+            "needs room to expand it and replace the current app. Free up some space and "
+            "try Check for Updates again."
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "required_bytes": self.required_bytes,
+            "available_bytes": self.available_bytes,
+            "package_bytes": self.package_bytes,
+            "path": self.path,
+            "sufficient": self.sufficient,
+        }
+
+
+def update_space_preflight(
+    package_bytes: int,
+    *,
+    destination: Path | None = None,
+    env: PlatformEnv = ENV,
+) -> UpdateSpaceCheck:
+    """Decide BEFORE downloading whether a multi-gigabyte update can complete.
+
+    The reporting tester had ~4.4 GiB free for a 3.4 GB package: enough to store
+    the download and nothing else, so an update that started would have failed
+    somewhere the user could not interpret.
+    """
+
+    import shutil
+
+    target = Path(destination or Path(env.app_data_dir) / "updates")
+    probe = target
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        available = int(shutil.disk_usage(probe).free)
+    except OSError:
+        available = 0
+    package_bytes = max(int(package_bytes), 0)
+    required = int(package_bytes * UPDATE_SPACE_MULTIPLIER) + UPDATE_SPACE_HEADROOM_BYTES
+    return UpdateSpaceCheck(required, available, package_bytes, str(target))
+
+
 def update_available(current: str, remote: str | None) -> bool:
     if not remote:
         return False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import sys
 from dataclasses import dataclass
 
@@ -125,3 +127,54 @@ def worker_invocation_for_script(arguments: list[str]) -> tuple[str, list[str]]:
     except KeyError as exc:
         raise ValueError(f"No packaged worker entry point for {script}") from exc
     return worker_invocation(worker_name, arguments[1:])
+
+
+#: Exit status a worker uses when its parent closed the pipe. The GUI cancels a
+#: background job by terminating the worker, so "nobody is listening any more"
+#: is a normal end to the job, not a crash to report.
+PARENT_GONE_EXIT = 0
+
+
+def emit(line: str) -> bool:
+    """Print one line to the parent, tolerating a parent that has gone away.
+
+    A cancelled background scan used to die with an unhandled BrokenPipeError
+    from inside its progress callback -- the GUI had closed the pipe on purpose,
+    but the worker treated that as a crash and produced an alarming traceback.
+    Returns False once the parent is gone so a caller can stop early.
+    """
+
+    import sys
+
+    try:
+        print(line, flush=True)
+        return True
+    except (BrokenPipeError, ValueError, OSError):
+        # ValueError/OSError: the stream was already closed underneath us.
+        _silence_stdout()
+        return False
+
+
+def _silence_stdout() -> None:
+    """Point stdout at /dev/null, including its file descriptor.
+
+    Replacing ``sys.stdout`` alone is not enough: the interpreter still flushes
+    the original stream at shutdown, and on a dead pipe that turns a clean exit
+    into status 120 plus an "Exception ignored" message. Re-pointing fd 1 makes
+    every later write, from anywhere, harmlessly succeed.
+    """
+
+    import sys
+
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, 1)
+        finally:
+            os.close(null)
+    except Exception:
+        pass
+    try:
+        sys.stdout = open(os.devnull, "w")  # noqa: SIM115 - process is ending
+    except Exception:
+        pass
