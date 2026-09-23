@@ -81,9 +81,14 @@ class _Control:
 
 
 class _WindowSurface:
+    """Mimics the attributes MainWindow._export_completed's closest-match
+    ("Save Copy") fallback branch touches -- a standalone file save that is
+    deliberately never tied to the primary result's own save-state bookkeeping."""
+
     def __init__(self) -> None:
-        self.save_preset_button = _Control()
-        self.load_in_serum_button = _Control()
+        self._save_incident_context = None
+        self._export_context_uid = None
+        self._batch_state = None
         self._status = _Control()
         self.logs: list[str] = []
 
@@ -307,7 +312,7 @@ class PresetExportLifecycleTest(unittest.TestCase):
             self.assertNotIn("url", metadata)
 
     def test_audio_warning_is_logged_without_modal_error(self) -> None:
-        from app.ui import LegacyMainWindow, QMessageBox
+        from app.ui import MainWindow, QMessageBox
 
         surface = _WindowSurface()
         detail = {
@@ -319,12 +324,12 @@ class PresetExportLifecycleTest(unittest.TestCase):
         }
 
         with patch.object(QMessageBox, "information") as information:
-            LegacyMainWindow._export_completed(surface, detail)
+            MainWindow._export_completed(surface, detail)
 
         information.assert_not_called()
-        self.assertTrue(surface.save_preset_button.enabled)
         self.assertIn("Preset saved:", surface.logs[0])
         self.assertIn("verification note", surface.logs[1].casefold())
+        self.assertIn("Preset saved:", surface.statusBar().messages[0])
 
 
 if __name__ == "__main__":

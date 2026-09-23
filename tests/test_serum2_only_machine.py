@@ -6,8 +6,8 @@ that assumed a renderer instead of asking PatchLab's verified selector for one:
 * audition/preview died with ``KeyError: 'hosts'`` because the preview worker
   demanded BOTH generations, failed to initialise without Serum 1, and then
   indexed the host table that initialisation never created;
-* Export Preset and Load in Serum died with ``StopIteration`` because the export
-  verifier opened a Serum 1 VST2 host up front, for a Serum 2 export;
+* Export Preset died with ``StopIteration`` because the export verifier opened
+  a Serum 1 VST2 host up front, for a Serum 2 export;
 * library rendering could queue work for a generation this machine cannot host.
 
 Matrix: A preview · B/C/D export · E library render · F Serum-1 absence ·
@@ -138,7 +138,7 @@ def test_A_preview_script_asks_for_only_the_candidate_generation() -> None:
     assert "required_synths=(candidate.synth,)" in source
 
 
-# --- B/C/D. export, closest-match export, Load in Serum ----------------------
+# --- B/C/D. export, closest-match export, Open Preset File Location ----------
 
 
 def test_B_export_verifier_opens_only_the_exported_generation(serum2_only, monkeypatch) -> None:
@@ -163,12 +163,18 @@ def test_B_export_verifier_opens_only_the_exported_generation(serum2_only, monke
     verifier.close()
 
 
-def test_D_load_in_serum_and_export_share_one_implementation() -> None:
-    """Load in Serum is the same verified export, written to the Serum folder."""
+def test_D_open_preset_file_location_never_recomputes_the_destination() -> None:
+    """Load in Serum's old bug class -- recomputing a destination this machine
+    can't reach -- is now structurally impossible: Open Preset File Location
+    only ever reveals the Library record's own stored ``exported_preset_path``,
+    never a value derived from today's renderer, synth, or output-folder
+    settings."""
 
     source = Path("app/ui.py").read_text(encoding="utf-8")
-    body = source.split("def load_in_serum(")[1].split("def _start_preset_export(")[0]
-    assert "_start_preset_export(" in body
+    body = source.split("def open_preset_file_location(")[1].split("def save_preset_now(")[0]
+    assert "record.exported_preset_path" in body
+    assert "_patchlab_export_folder(" not in body
+    assert "configured_preset_output_folder(" not in body
     assert "self.export_runner.start" not in body, "it must not re-implement export"
 
 

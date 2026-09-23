@@ -135,12 +135,19 @@ class GeneratedPresetExportLocationTest(unittest.TestCase):
         )
 
     def test_patchlab_folder_prefers_a_user_owned_root(self) -> None:
-        source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
-        self.assertIn("def _patchlab_export_folder", source)
+        ui_source = (PROJECT_ROOT / "app" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _patchlab_export_folder", ui_source)
+        # The actual root-selection logic now lives in core.preset_output --
+        # the one resolver every generated-preset writer (and the Settings UI)
+        # shares -- and _patchlab_export_folder delegates to it.
+        self.assertIn("default_preset_output_root", ui_source)
+        resolver_source = (PROJECT_ROOT / "core" / "preset_output.py").read_text(
+            encoding="utf-8"
+        )
         # Preferring ENV.preset_roots over existing_preset_roots is what allows
         # a user-owned location to win even before it has been created.
-        self.assertIn("for candidate in matching:", source)
-        self.assertIn("under_home", source)
+        self.assertIn("for candidate in matching:", resolver_source)
+        self.assertIn("under_home", resolver_source)
 
 
 if __name__ == "__main__":

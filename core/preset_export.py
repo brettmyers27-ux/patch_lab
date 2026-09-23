@@ -226,7 +226,8 @@ class PresetExportVerifier:
         # exported. Opening both up front meant a Serum-2-only machine could not
         # export a Serum 2 preset at all: the Serum 1 lookup raised
         # StopIteration before any work began, which is exactly what users saw
-        # as "EXPORT_ERROR=StopIteration" from Export Preset and Load in Serum.
+        # as "EXPORT_ERROR=StopIteration" from Export Preset and the generated
+        # result's auto-save.
         self.hosts: dict[str, tuple[Any, Any]] = {}
         self.embedder = ClapEmbedder(ENV)
         self._temporary = tempfile.TemporaryDirectory(prefix="patchlab-export-verify-")

@@ -167,5 +167,67 @@ class AccessGateTest(unittest.TestCase):
             self.assertTrue(store.load().authenticated_once)
 
 
+class DisableKeychainEnvTest(unittest.TestCase):
+    """PATCHLAB_DISABLE_KEYCHAIN: how the whole suite avoids the real login keychain.
+
+    A frozen PatchLab is ad-hoc signed, so every rebuild gets a new code
+    identity and macOS's "Always Allow" cannot survive that -- an automated
+    workflow that rebuilds and relaunches PatchLab repeatedly would otherwise
+    hit a real authorization prompt every run. This is set for the whole
+    suite in conftest.py; these tests pin down exactly what it does.
+    """
+
+    def setUp(self) -> None:
+        self._had = os.environ.get("PATCHLAB_DISABLE_KEYCHAIN")
+
+    def tearDown(self) -> None:
+        if self._had is None:
+            os.environ.pop("PATCHLAB_DISABLE_KEYCHAIN", None)
+        else:
+            os.environ["PATCHLAB_DISABLE_KEYCHAIN"] = self._had
+
+    def test_the_real_keyring_module_is_never_imported_when_set(self) -> None:
+        os.environ["PATCHLAB_DISABLE_KEYCHAIN"] = "1"
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccessStore(marker_path=Path(directory) / "access.json")
+        self.assertIsNone(store.keyring)
+
+    def test_a_disabled_keychain_reads_back_as_no_stored_passcode(self) -> None:
+        os.environ["PATCHLAB_DISABLE_KEYCHAIN"] = "1"
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccessStore(marker_path=Path(directory) / "access.json")
+            self.assertIsNone(store.passcode())
+            # Writing is a no-op too, never an exception, never a real touch.
+            store.save_success("a-passcode", "a-token")
+            self.assertIsNone(store.passcode())
+            self.assertEqual(store.load().token, "a-token")
+
+    def test_unset_still_behaves_like_before(self) -> None:
+        os.environ.pop("PATCHLAB_DISABLE_KEYCHAIN", None)
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccessStore(marker_path=Path(directory) / "access.json")
+        # The real keyring module may or may not be installed in this
+        # environment; either way it must have actually been *attempted*,
+        # not silently skipped, when the override is absent.
+        try:
+            import keyring as real_keyring
+        except Exception:
+            real_keyring = None
+        self.assertIs(store.keyring, real_keyring)
+
+    def test_an_explicit_backend_still_wins_over_the_env_var(self) -> None:
+        os.environ["PATCHLAB_DISABLE_KEYCHAIN"] = "1"
+        fake = MemoryKeyring()
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccessStore(marker_path=Path(directory) / "access.json", keyring_backend=fake)
+        self.assertIs(store.keyring, fake)
+
+    def test_stored_passcode_never_blocks_when_disabled(self) -> None:
+        from core.access_gate import stored_passcode
+
+        os.environ["PATCHLAB_DISABLE_KEYCHAIN"] = "1"
+        self.assertIsNone(stored_passcode(timeout=5.0))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -114,8 +114,8 @@ A list of every saved match, newest first, each row showing:
    Match tab and repopulate it from the archived `result.json` so the user sees the same
    closest-matches list and generated-preset panel they saw when it first ran. Restore
    `_match_result`, `_match_result_path` (pointing at the archived copy) and
-   `_match_audio_path` (pointing at the archived source copy) so that Export Preset,
-   Load in Serum, the octave selector and the source-audio play button all work on the
+   `_match_audio_path` (pointing at the archived source copy) so that Open Preset
+   File Location, the octave selector and the source-audio play button all work on the
    reopened entry exactly as they do on a fresh match.
 6. **Delete** — a per-row action with a confirmation, removing the DB row and the entry
    folder. This is the only way entries are removed.
@@ -137,8 +137,8 @@ On the Match tab, add a control to process a whole folder:
    creating intermediate directories as needed. Sanitize the given name for filesystem
    safety and reject empty/invalid names with a clear message. If the folder already
    exists, ask whether to add to it or choose another name — **never silently overwrite an
-   existing preset file**; disambiguate with a numeric suffix exactly as `load_in_serum`
-   already does.
+   existing preset file**; disambiguate with a numeric suffix exactly as the
+   generated-preset auto-save already does.
 2. **Before starting**, show a confirmation summarizing: how many supported audio files
    were found, the chosen quality tier, the destination folder, and a rough time estimate
    derived from the tier. The user picks the quality tier (Quick / Balanced / Best

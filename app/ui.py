@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -522,7 +523,8 @@ class LegacyMainWindow(QMainWindow):
         self.existing_heading.setStyleSheet("font-size: 16px; font-weight: 600;")
         self.existing_table = QTableWidget(0, 7)
         self.existing_table.setHorizontalHeaderLabels(
-            ["Preset", "Synth", "Similarity", "Source path", "Audition", "Export", "Load in Serum"]
+            ["Preset", "Synth", "Similarity", "Source path", "Audition", "Save Copy",
+             "Open Preset File Location"]
         )
         self.existing_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
@@ -2202,33 +2204,33 @@ class LegacyMainWindow(QMainWindow):
                 play.setToolTip("No rendered preview is shipped; link your own library for audition.")
             self.existing_table.setCellWidget(row_index, 4, play)
 
-            # Every closest match offers the same two product actions as the
-            # generated result, through the same verified export implementation.
+            # A closest match is an existing file PatchLab already found, not
+            # a newly generated one: Save Copy makes an explicit copy
+            # somewhere the user chooses, and Open Preset File Location
+            # reveals the original in place -- never a copy made just so
+            # Finder has something to show.
             reason = self._existing_match_export_blocker(item)
-            export = QPushButton("Export")
-            load = QPushButton("Load in Serum")
-            for button in (export, load):
+            save_copy = QPushButton("Save Copy")
+            open_location = QPushButton("Open Preset File Location")
+            for button in (save_copy, open_location):
                 button.setObjectName("compactActionButton")
             if reason:
-                for button in (export, load):
+                for button in (save_copy, open_location):
                     button.setEnabled(False)
                     button.setToolTip(reason)
             else:
-                export.setToolTip("Save this preset to a folder you choose.")
-                load.setToolTip(
-                    "Save this preset into your Serum presets folder so Serum's "
-                    "browser finds it."
-                )
-                export.clicked.connect(
+                save_copy.setToolTip("Save a copy of this preset to a folder you choose.")
+                open_location.setToolTip("Reveal this preset's file in Finder.")
+                save_copy.clicked.connect(
                     lambda _checked=False, index=row_index, detail=dict(item):
                     self.export_existing_match(index, detail)
                 )
-                load.clicked.connect(
-                    lambda _checked=False, index=row_index, detail=dict(item):
-                    self.load_existing_match_in_serum(index, detail)
+                open_location.clicked.connect(
+                    lambda _checked=False, detail=dict(item):
+                    self.open_existing_match_location(detail)
                 )
-            self.existing_table.setCellWidget(row_index, 5, export)
-            self.existing_table.setCellWidget(row_index, 6, load)
+            self.existing_table.setCellWidget(row_index, 5, save_copy)
+            self.existing_table.setCellWidget(row_index, 6, open_location)
 
         recommendation = result.get("recommendation")
         self.settings_tree.clear()
@@ -2696,16 +2698,26 @@ class LegacyMainWindow(QMainWindow):
     )
 
     def _ensure_patchlab_export_folders(self) -> None:
-        """Create the PatchLab export folders up front, not just on first export.
+        """Create the configured preset-output folder(s) up front.
 
-        A brand-new machine has never run an export, so waiting for that would
-        leave the destination invisible in Serum's browser until the first
-        save. Runs at construction time, before self.log_pane exists — a
-        failure here must never crash or block startup, so it is tolerated
+        A brand-new machine has never run an export, so waiting for that
+        would leave the destination invisible in Serum's browser until the
+        first save. Runs at construction time, before self.log_pane exists —
+        a failure here must never crash or block startup, so it is tolerated
         completely silently; `_patchlab_export_folder` retries the same
         `mkdir` at export time and can report there if it still fails.
         """
 
+        from core.preset_output import load_preset_output_preferences
+
+        if load_preset_output_preferences().folder:
+            # One configured folder serves both generations; creating it
+            # twice via _patchlab_export_folder("serum1"/"serum2") is harmless.
+            try:
+                self._patchlab_export_folder("serum2")
+            except OSError:
+                pass
+            return
         if ENV.branch != "macos":
             return
         for root in (self.MACOS_SERUM1_USER_PRESETS, self.MACOS_SERUM2_USER_PRESETS):
@@ -2715,46 +2727,38 @@ class LegacyMainWindow(QMainWindow):
                 pass
 
     def _default_export_folder(self, synth: str) -> Path:
-        """Return the Serum preset root generated presets belong under.
+        """Return the Serum preset root generated presets belong under when
+        Settings -> Generated Preset Folder has never been changed.
 
-        On macOS this is Serum's own well-known User preset folder — see
-        MACOS_SERUM1_USER_PRESETS / MACOS_SERUM2_USER_PRESETS. Elsewhere, a
-        user-writable root is preferred over a shared/system one.
+        See core.preset_output.default_preset_output_root for the shared
+        implementation (also used by the Settings display).
         """
 
-        if ENV.branch == "macos":
-            return (
-                self.MACOS_SERUM2_USER_PRESETS
-                if synth == "serum2"
-                else self.MACOS_SERUM1_USER_PRESETS
-            )
+        from core.preset_output import default_preset_output_root
 
-        token = "serum 2" if synth == "serum2" else "serum presets"
-        home = Path.home().resolve()
+        return default_preset_output_root(synth, env=ENV)
 
-        def under_home(path: Path) -> bool:
-            try:
-                path.resolve().relative_to(home)
-            except (OSError, ValueError):
-                return False
-            return True
+    def _reveal_in_finder(self, path: Path) -> bool:
+        """Select an exact, already-existing file in Finder. Never a copy,
+        never an export, never Serum or DAW automation -- the standard macOS
+        "Reveal in Finder" mechanism (equivalent to ``open -R``).
 
-        matching = [
-            path for path in ENV.preset_roots if token in str(path).casefold()
-        ]
-        for candidate in matching:
-            if under_home(candidate) and candidate.is_dir():
-                return candidate
-        # Nothing under the user's folder exists yet. Prefer the first
-        # user-owned candidate the platform defines — Serum scans these by
-        # default — rather than falling back to a root we cannot write to.
-        for candidate in matching:
-            if under_home(candidate):
-                return candidate
-        existing = [
-            path for path in ENV.existing_preset_roots if token in str(path).casefold()
-        ]
-        return existing[0] if existing else home
+        Returns whether the file was found and revealed.
+        """
+
+        path = Path(path)
+        if not path.is_file():
+            self.append_log(f"Could not reveal preset: {path} no longer exists")
+            self.statusBar().showMessage("PatchLab can't find this preset file anymore.")
+            return False
+        try:
+            subprocess.run(["open", "-R", str(path)], check=False)
+        except Exception as exc:
+            self.append_log(f"Could not open Finder for {path}: {exc}")
+            self.statusBar().showMessage("PatchLab couldn't open Finder for this preset.")
+            return False
+        self.statusBar().showMessage(f"Revealed in Finder: {path.name}")
+        return True
 
     def _existing_match_export_blocker(self, item: dict) -> str:
         """Why this closest match cannot be exported, or "" when it can.
@@ -2795,20 +2799,28 @@ class LegacyMainWindow(QMainWindow):
         return output
 
     def export_existing_match(self, index: int, item: dict) -> None:
-        """Save one closest match to a folder the user chooses."""
+        """Save a COPY of one closest match to a folder the user chooses.
+
+        A closest match is an existing preset PatchLab already found on this
+        Mac, not a newly generated one -- so unlike the primary result, there
+        is no auto-save and no Retry Saving Preset for it. This exists for
+        the case a copy genuinely helps (organizing a find into the user's
+        own collection); when the user just wants to see the file, Open
+        Preset File Location reveals the original directly, with no copy.
+        """
 
         if self._match_result_path is None:
             return
         reason = self._existing_match_export_blocker(item)
         if reason:
-            QMessageBox.information(self, "This preset cannot be exported", reason)
+            QMessageBox.information(self, "This preset cannot be copied", reason)
             return
         suggested = self._existing_match_output(
             item, folder=self._patchlab_export_folder(str(item["synth"]))
         )
         selected, _ = QFileDialog.getSaveFileName(
             self,
-            "Export this closest match",
+            "Save a copy of this closest match",
             str(suggested),
             "Serum preset (*.fxp *.SerumPreset)",
         )
@@ -2817,25 +2829,22 @@ class LegacyMainWindow(QMainWindow):
         output = Path(selected)
         if output.suffix.casefold() != suggested.suffix.casefold():
             output = output.with_suffix(suggested.suffix)
-        self._start_existing_match_export(index, output, label="Export")
+        self._start_existing_match_export(index, output, label="Save Copy")
 
-    def load_existing_match_in_serum(self, index: int, item: dict) -> None:
-        """Write one closest match straight into the local Serum presets folder.
+    def open_existing_match_location(self, item: dict) -> None:
+        """Reveal a closest match's own existing file -- never a copy.
 
-        Never touches a running Serum: it only writes a file Serum's own browser
-        picks up, which is the same supported mechanism the generated result uses.
+        Every closest match PatchLab can offer this for already has a real
+        local file (the same precondition Save Copy requires), so this
+        always reveals that original file directly rather than writing
+        anything new just so Finder has something to show.
         """
 
-        if self._match_result_path is None:
-            return
         reason = self._existing_match_export_blocker(item)
         if reason:
-            QMessageBox.information(self, "This preset cannot be loaded", reason)
+            QMessageBox.information(self, "This preset cannot be located", reason)
             return
-        output = self._existing_match_output(
-            item, folder=self._patchlab_export_folder(str(item["synth"]))
-        )
-        self._start_existing_match_export(index, output, label="Load in Serum")
+        self._reveal_in_finder(Path(str(item["source_path"])))
 
     def _start_existing_match_export(
         self, index: int, output: Path, *, label: str
@@ -2856,19 +2865,25 @@ class LegacyMainWindow(QMainWindow):
             self.append_log(f"{label} could not start: {exc}")
 
     def _patchlab_export_folder(self, synth: str) -> Path:
-        """Return (and create) the PatchLab subfolder for generated presets.
+        """Return (and create) where a generated preset for ``synth`` saves.
 
-        Every generated preset defaults here so a user's own Serum library is
-        never mixed with PatchLab output. The save dialog still opens on this
-        folder rather than writing blindly, so a name can be changed first.
+        The one shared resolver (core.preset_output) every generated-preset
+        writer uses -- single Match, batch Match, Retry Saving Preset (via
+        the incident's already-fixed target_path), Run Again, and the
+        Settings display all agree on the same answer. With nothing
+        configured this is still Serum's own per-synth "PatchLab" subfolder,
+        exactly as before Settings -> Generated Preset Folder existed.
         """
 
-        folder = self._default_export_folder(synth) / "PatchLab"
+        from core.preset_output import configured_preset_output_folder
+
+        folder = configured_preset_output_folder(synth)
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except OSError:
             # A read-only or missing parent must not block the export dialog;
-            # fall back to the root so the user can still choose a location.
+            # fall back to the (unconfigured) default so a save can still
+            # find somewhere to go.
             return self._default_export_folder(synth)
         return folder
 
@@ -2946,80 +2961,6 @@ class LegacyMainWindow(QMainWindow):
                 )
             return
         self._rename_saved_preset(self._current_match_uid, Path(record.exported_preset_path))
-
-    def load_in_serum(self) -> None:
-        """Write the recommendation straight into the local Serum presets folder.
-
-        This never touches a live/running Serum instance — PatchLab has
-        consistently avoided automating a real DAW/plugin session. This is
-        the same verified export as "Rename Preset" performs, just written
-        to the detected local install folder so Serum's own browser picks
-        it up next time it refreshes, instead of prompting a save dialog.
-        """
-
-        if not self._match_result or self._match_result_path is None:
-            return
-        recommendation = self._match_result.get("recommendation")
-        if not isinstance(recommendation, dict):
-            return
-        synth = str(recommendation["synth"])
-        extension = ".fxp" if synth == "serum1" else ".SerumPreset"
-        name = generated_preset_name(synth)
-        folder = self._patchlab_export_folder(synth)
-        output = folder / f"{name}{extension}"
-        counter = 2
-        while output.exists():
-            output = folder / f"{name} {counter}{extension}"
-            counter += 1
-        self._start_preset_export(
-            output, trigger=self.load_in_serum_button, label="Load in Serum"
-        )
-
-    def _start_preset_export(
-        self, output: Path, *, trigger: QPushButton, label: str
-    ) -> None:
-        self.save_preset_button.setEnabled(False)
-        load_button = getattr(self, "load_in_serum_button", None)
-        if load_button is not None:
-            load_button.setEnabled(False)
-        trigger.setText("Verifying…")
-        self.statusBar().showMessage(
-            "Generating the preset in temporary storage, then saving it to "
-            f"{output.parent}…"
-        )
-        self.export_runner.start(self._match_result_path, output)
-
-    def _export_completed(self, detail: dict) -> None:
-        self.save_preset_button.setEnabled(True)
-        self.save_preset_button.setText("Rename Preset")
-        load_button = getattr(self, "load_in_serum_button", None)
-        if load_button is not None:
-            load_button.setEnabled(True)
-            load_button.setText("Load in Serum")
-        warning = detail.get("verification_warning")
-        message = f"Preset saved: {detail['path']}"
-        self.append_log(message)
-        if warning:
-            self.append_log(f"Preset verification note: {warning}")
-        self.statusBar().showMessage(message)
-        if not warning:
-            QMessageBox.information(self, "Preset ready", message)
-
-    def _export_failed(self, error: str) -> None:
-        self.save_preset_button.setEnabled(True)
-        self.save_preset_button.setText("Rename Preset")
-        load_button = getattr(self, "load_in_serum_button", None)
-        if load_button is not None:
-            load_button.setEnabled(True)
-            load_button.setText("Load in Serum")
-        self.append_log(f"Preset export failed: {error}")
-        self.statusBar().showMessage(error)
-        QMessageBox.critical(
-            self,
-            "Preset was not saved",
-            "PatchLab could not write a valid preset to the selected location.\n\n"
-            + error,
-        )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.runner.cancel()
@@ -3695,15 +3636,22 @@ class MainWindow(LegacyMainWindow):
         self.save_preset_button.setObjectName("compactActionButton")
         self.save_preset_button.setIcon(icon("save"))
         self.save_preset_button.clicked.connect(self.save_match_preset)
-        self.load_in_serum_button = QPushButton("Load in Serum")
-        self.load_in_serum_button.setObjectName("compactActionButton")
-        self.load_in_serum_button.clicked.connect(self.load_in_serum)
+        self.open_preset_location_button = QPushButton("Open Preset File Location")
+        self.open_preset_location_button.setObjectName("compactActionButton")
+        self.open_preset_location_button.clicked.connect(
+            lambda _checked=False: self.open_preset_file_location()
+        )
+        self.save_preset_now_button = QPushButton("Save Preset")
+        self.save_preset_now_button.setObjectName("compactActionButton")
+        self.save_preset_now_button.setVisible(False)
+        self.save_preset_now_button.clicked.connect(lambda _checked=False: self.save_preset_now())
         self.recommendation_more_button = QPushButton("…")
         self.recommendation_more_button.setObjectName("compactActionButton")
         self.recommendation_more_button.setFixedWidth(30)
         self.recommendation_more_button.clicked.connect(self._show_recommendation_more_menu)
+        actions_row.addWidget(self.open_preset_location_button)
         actions_row.addWidget(self.save_preset_button)
-        actions_row.addWidget(self.load_in_serum_button)
+        actions_row.addWidget(self.save_preset_now_button)
         actions_row.addWidget(self.recommendation_more_button)
         details_layout.addLayout(actions_row)
         # Shown only when the automatic save of this result has run out of
@@ -3982,39 +3930,61 @@ class MainWindow(LegacyMainWindow):
             )
             row_layout.addWidget(button)
         # Almost every entry already has an auto-saved preset by the time it
-        # can be clicked, so this reads "Rename Preset" in the normal case;
-        # "Export Preset" only for the rare entry that was never auto-saved.
-        # A save that ran out of automatic recovery offers exactly that
-        # remedy here too; the Library says "Rename" only for a file that exists.
+        # can be clicked: the normal case is Open Preset File Location +
+        # Rename Preset. A save that ran out of automatic recovery offers
+        # Retry Saving Preset / Run Again instead; a record from before
+        # auto-save existed offers Save Preset. Exactly one of these states
+        # applies, never a permanent Export Preset alongside the others.
         incident = getattr(self, "_library_incidents", {}).get(record.match_uid)
         incident_status = incident.status if incident is not None else ""
         saved_file = (
             record.exported_preset_path is not None
             and Path(record.exported_preset_path).is_file()
         )
-        if not saved_file and incident_status == "failed":
-            label, handler = "Retry Saving Preset", self.retry_saving_preset
-        elif not saved_file and incident_status == "unrecoverable":
-            label, handler = "Run Again", self.run_again_from_incident
+        buttons: list[QPushButton] = []
+        if saved_file:
+            open_location = QPushButton("Open Preset File Location")
+            open_location.setObjectName("compactActionButton")
+            open_location.clicked.connect(
+                lambda _checked=False, uid=record.match_uid: self.open_preset_file_location(uid)
+            )
+            rename = QPushButton("Rename Preset")
+            rename.setObjectName("compactActionButton")
+            rename.clicked.connect(
+                lambda _checked=False, uid=record.match_uid: self.export_library_match(uid)
+            )
+            buttons = [open_location, rename]
+        elif incident_status == "failed":
+            retry = QPushButton("Retry Saving Preset")
+            retry.setObjectName("compactActionButton")
+            retry.clicked.connect(
+                lambda _checked=False, uid=record.match_uid: self.retry_saving_preset(uid)
+            )
+            buttons = [retry]
+        elif incident_status == "unrecoverable":
+            again = QPushButton("Run Again")
+            again.setObjectName("compactActionButton")
+            again.clicked.connect(
+                lambda _checked=False, uid=record.match_uid: self.run_again_from_incident(uid)
+            )
+            buttons = [again]
         else:
-            label = "Rename Preset" if saved_file else "Export Preset"
-            handler = self.export_library_match
-        export = QPushButton(label)
-        export.setObjectName("compactActionButton")
-        export.setEnabled(
-            not record.no_confident_match and self._batch_state is None
-        )
-        if self._batch_state is not None:
-            export.setToolTip("Reserved for the active batch. Try again after it finishes.")
-        export.clicked.connect(
-            lambda _checked=False, uid=record.match_uid, act=handler: act(uid)
-        )
+            save_now = QPushButton("Save Preset")
+            save_now.setObjectName("compactActionButton")
+            save_now.clicked.connect(
+                lambda _checked=False, uid=record.match_uid: self.save_preset_now(uid)
+            )
+            buttons = [save_now]
+        for button in buttons:
+            button.setEnabled(not record.no_confident_match and self._batch_state is None)
+            if self._batch_state is not None:
+                button.setToolTip("Reserved for the active batch. Try again after it finishes.")
+            row_layout.addWidget(button)
         delete = QPushButton("Delete")
         delete.setObjectName("compactActionButton")
         delete.clicked.connect(
             lambda _checked=False, uid=record.match_uid: self.delete_library_match(uid)
         )
-        row_layout.addWidget(export)
         row_layout.addWidget(delete)
         return row
 
@@ -4197,44 +4167,26 @@ class MainWindow(LegacyMainWindow):
         self.refresh_match_library()
 
     def export_library_match(self, match_uid: str) -> None:
-        """Rename a library entry's saved preset, or export it if it never got one.
+        """Rename a library entry's already-saved preset in place.
 
-        Every match auto-saves its preset the moment it completes, so the
-        normal case here is a rename. The dialog-based export only remains as
-        a fallback for entries archived before auto-save existed, or where it
-        genuinely failed — there is still no confident recommendation to save.
+        Every match auto-saves its preset the moment it completes, so this is
+        only ever reached once a file genuinely exists (see
+        _build_library_row); a record that never got one offers Save Preset
+        instead, which goes through the save-incident machinery, not a
+        dialog-based export.
         """
 
         if self._batch_state is not None:
             QMessageBox.information(
                 self,
                 "Batch is running",
-                "Exports are reserved for the active batch. Try again after it finishes.",
+                "Renaming is reserved for the active batch. Try again after it finishes.",
             )
             return
         record = Database(self._match_database_path()).get_match_library(match_uid)
-        if record is None:
+        if record is None or record.exported_preset_path is None:
             return
-        if record.exported_preset_path is not None and Path(record.exported_preset_path).is_file():
-            self._rename_saved_preset(match_uid, Path(record.exported_preset_path))
-            return
-        _source, result_path = resolved_record_paths(record, self._match_library_root())
-        extension = ".fxp" if record.recommendation_synth == "serum1" else ".SerumPreset"
-        suggested = (
-            self._patchlab_export_folder(record.recommendation_synth)
-            / f"{generated_preset_name(record.recommendation_synth)}{extension}"
-        )
-        selected, _ = QFileDialog.getSaveFileName(
-            self, "Export preset (never auto-saved)", str(suggested),
-            "Serum preset (*.fxp *.SerumPreset)",
-        )
-        if not selected:
-            return
-        output = Path(selected)
-        if output.suffix.casefold() != extension.casefold():
-            output = output.with_suffix(extension)
-        self._export_context_uid = match_uid
-        self.export_runner.start(result_path, output)
+        self._rename_saved_preset(match_uid, Path(record.exported_preset_path))
 
     def _archive_completed_result(
         self,
@@ -4274,18 +4226,6 @@ class MainWindow(LegacyMainWindow):
             )
             return
         super().start_match()
-
-    def _start_preset_export(
-        self, output: Path, *, trigger: QPushButton, label: str
-    ) -> None:
-        if self._batch_state is not None:
-            QMessageBox.information(
-                self,
-                "Batch is running",
-                "Verified exports are reserved for the active batch. Try again after it finishes.",
-            )
-            return
-        super()._start_preset_export(output, trigger=trigger, label=label)
 
     def _match_completed(self, result_path: str) -> None:
         source = (
@@ -4451,12 +4391,17 @@ class MainWindow(LegacyMainWindow):
             self.append_log(f"Batch verified preset saved: {detail['path']}")
             self._batch_file_completed()
             return
-        super()._export_completed(detail)
-        if self._current_match_uid:
-            Database(self._match_database_path()).set_match_exported_path(
-                self._current_match_uid, Path(detail["path"])
-            )
-            self.refresh_match_library()
+        # Remaining case: a closest match's "Save Copy" -- a plain, standalone
+        # file, deliberately never tied to the primary result's own saved-
+        # preset bookkeeping (_current_match_uid is a different result).
+        message = f"Preset saved: {detail['path']}"
+        self.append_log(message)
+        warning = detail.get("verification_warning")
+        if warning:
+            self.append_log(f"Preset verification note: {warning}")
+        self.statusBar().showMessage(message)
+        if not warning:
+            QMessageBox.information(self, "Preset saved", message)
 
     def _export_failed(self, error: str) -> None:
         context = self._save_incident_context
@@ -4471,7 +4416,14 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None and self._batch_state.get("phase") == "export":
             self._batch_file_failed(f"verified export failed: {error}")
             return
-        super()._export_failed(error)
+        self.append_log(f"Preset save failed: {error}")
+        self.statusBar().showMessage(error)
+        QMessageBox.critical(
+            self,
+            "Preset was not saved",
+            "PatchLab could not write a valid preset to the selected location.\n\n"
+            + error,
+        )
 
     # ------------------------------------------------------------------
     # Generated-preset save lifecycle (core.preset_save)
@@ -4554,12 +4506,56 @@ class MainWindow(LegacyMainWindow):
         self._refresh_save_state()
 
     def _refresh_save_state(self) -> None:
-        """Show Retry Saving Preset / Run Again only for a result that needs it."""
+        """The one place deciding what a generated result's save controls show.
 
-        label = getattr(self, "save_failure_label", None)
-        if label is None:
+        SAVE SUCCEEDED: Open Preset File Location (+ Rename Preset).
+        AUTO SAVE STILL RUNNING: a disabled "Saving…" indicator, nothing else.
+        AUTO SAVE FAILED (recovery exhausted) / a fixable destination issue
+        after a failed manual retry: Retry Saving Preset, with the reason.
+        UNRECOVERABLE: Run Again.
+        A confident recommendation that predates Phase 1's save incidents and
+        was never auto-saved: Save Preset (the same incident machinery, run
+        by hand instead of automatically after a match).
+        No confident match, or this recommendation cannot be saved at all:
+        nothing.
+
+        Never both a permanent Export/Save action and Open Preset File
+        Location for the same result -- exactly one of the states above
+        applies at a time.
+        """
+
+        open_button = getattr(self, "open_preset_location_button", None)
+        if open_button is None:
             return
-        retry, again = self.retry_save_button, self.run_again_button
+        rename, save_now = self.save_preset_button, self.save_preset_now_button
+        label, retry, again = self.save_failure_label, self.retry_save_button, self.run_again_button
+
+        def hide_everything() -> None:
+            for widget in (open_button, rename, save_now, retry, again, label):
+                widget.setVisible(False)
+
+        # Whether a *fresh* recommendation can be saved at all lives on the
+        # recommendation JSON, not the Library row -- it is applied directly
+        # (setEnabled, not hidden) at the one call site that computes it
+        # (_show_match_result), the same way these buttons' enabled state was
+        # always set before this state machine existed. This method itself is
+        # driven purely by _current_match_uid's own saved/incident state, so
+        # it must stay reachable for retries, Run Again and Library rows even
+        # when no recommendation is currently on screen at all.
+
+        record = None
+        if self._current_match_uid:
+            try:
+                record = Database(self._match_database_path()).get_match_library(
+                    self._current_match_uid
+                )
+            except Exception:
+                record = None
+        saved_file = bool(
+            record is not None
+            and record.exported_preset_path is not None
+            and Path(record.exported_preset_path).is_file()
+        )
         incident = None
         if self._current_match_uid:
             try:
@@ -4573,24 +4569,136 @@ class MainWindow(LegacyMainWindow):
             and self._save_incident_context.get("match_uid") == self._current_match_uid
         )
         status = incident.status if incident is not None else ""
-        if saving or status not in ("failed", "unrecoverable"):
-            label.setVisible(False)
-            retry.setVisible(False)
-            again.setVisible(False)
-            if saving and self._save_incident_context.get("trigger") == "manual":
-                retry.setVisible(True)
-                retry.setEnabled(False)
-                retry.setText("Saving…")
-            return
-        from core.preset_save import incident_user_message
 
-        label.setText(incident_user_message(incident))
-        label.setVisible(True)
-        retry.setText("Retry Saving Preset")
-        retry.setEnabled(self._batch_state is None)
-        retry.setVisible(status == "failed")
-        again.setVisible(status == "unrecoverable")
-        again.setEnabled(self._batch_state is None and not self.match_runner.running)
+        hide_everything()
+        if self._batch_state is not None:
+            # A batch drives its own progress UI; these controls describe
+            # whatever single result is merely being displayed underneath it.
+            return
+        if saved_file:
+            open_button.setVisible(True)
+            open_button.setEnabled(True)
+            rename.setText("Rename Preset")
+            rename.setVisible(True)
+            rename.setEnabled(True)
+            return
+        if saving:
+            save_now.setText("Saving…")
+            save_now.setEnabled(False)
+            save_now.setVisible(self._save_incident_context.get("trigger") != "manual")
+            retry.setText("Saving…")
+            retry.setEnabled(False)
+            retry.setVisible(self._save_incident_context.get("trigger") == "manual")
+            return
+        if status in ("failed", "unrecoverable"):
+            from core.preset_save import incident_user_message
+
+            label.setText(incident_user_message(incident))
+            label.setVisible(True)
+            retry.setText("Retry Saving Preset")
+            retry.setEnabled(True)
+            retry.setVisible(status == "failed")
+            again.setEnabled(not self.match_runner.running)
+            again.setVisible(status == "unrecoverable")
+            return
+        if record is not None and not record.no_confident_match:
+            # A Library record from before auto-save existed: offer the same
+            # save machinery, just triggered by hand instead of automatically.
+            save_now.setText("Save Preset")
+            save_now.setEnabled(True)
+            save_now.setVisible(True)
+
+    def open_preset_file_location(self, match_uid: str | None = None) -> None:
+        """Reveal the exact file a generated preset was actually saved to.
+
+        Always reads the Library record's own stored ``exported_preset_path``
+        -- recorded once, at save time -- never recomputed from today's
+        Settings -> Generated Preset Folder, so a later change to that
+        setting never breaks revealing an older result.
+        """
+
+        match_uid = match_uid or self._current_match_uid
+        if not match_uid:
+            return
+        record = Database(self._match_database_path()).get_match_library(match_uid)
+        if record is None or record.exported_preset_path is None:
+            QMessageBox.information(
+                self, "No saved preset", "This result has no saved preset file yet."
+            )
+            return
+        self._reveal_in_finder(Path(record.exported_preset_path))
+
+    def save_preset_now(self, match_uid: str | None = None) -> None:
+        """First save attempt for a Library result that never got one.
+
+        For a record made before auto-save existed (or whose one archiving
+        attempt failed before any incident was recorded): goes through the
+        exact same save-incident machinery as auto-save -- build, verify,
+        atomic commit, up to three automatic attempts -- just triggered by
+        hand instead of running right after a fresh match.
+        """
+
+        from core.preset_save import MAX_AUTOMATIC_ATTEMPTS, SaveIncident
+
+        match_uid = match_uid or self._current_match_uid
+        if not match_uid:
+            return
+        if self._batch_state is not None:
+            QMessageBox.information(
+                self, "Batch is running", "Try saving this preset again after the batch finishes."
+            )
+            return
+        if self.export_runner.running:
+            QMessageBox.information(
+                self, "Still saving", "PatchLab is saving another preset. Try again in a moment."
+            )
+            return
+        record = Database(self._match_database_path()).get_match_library(match_uid)
+        if record is None or record.no_confident_match:
+            return
+        source, result_path = resolved_record_paths(record, self._match_library_root())
+        if not result_path.is_file():
+            QMessageBox.information(
+                self,
+                "Result not found",
+                "PatchLab can no longer find this result on your Mac, so it can't "
+                "save a preset for it.",
+            )
+            return
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        recommendation = result.get("recommendation")
+        if not isinstance(recommendation, dict):
+            return
+        synth = str(recommendation["synth"])
+        extension = ".fxp" if synth == "serum1" else ".SerumPreset"
+        source_stem = sanitize_folder_name(Path(record.source_name).stem) or "Sound"
+        output = disambiguated_preset_path(
+            self._patchlab_export_folder(synth), f"PatchLab - {source_stem}", extension
+        )
+        source_meta = result.get("source") or {}
+        incident = SaveIncident.create(
+            match_uid=match_uid, result_path=result_path, target_path=output, synth=synth,
+            run_again={
+                "source_audio_path": str(source), "target_synth": str(record.target_synth),
+                "budget": str(record.budget),
+                "start_offset_s": float(source_meta.get("start_offset_s", 0.0) or 0.0),
+            },
+        )
+        self._save_incident_context = {
+            "incident_id": incident.incident_id, "match_uid": match_uid, "trigger": "auto",
+        }
+        self.append_log(f"Saving preset for {record.source_name} (incident {incident.incident_id})…")
+        self.statusBar().showMessage("Saving your preset…")
+        try:
+            self.export_runner.start(
+                result_path, output, incident_id=incident.incident_id, trigger="auto",
+                attempts=MAX_AUTOMATIC_ATTEMPTS,
+            )
+        except Exception as exc:
+            self._save_incident_context = None
+            self.append_log(f"Could not start saving the preset: {exc}")
+        self.refresh_match_library()
+        self._refresh_save_state()
 
     def retry_saving_preset(self, match_uid: str | None = None) -> None:
         """Save the SAME generated result again; the Match is not re-run."""
@@ -4965,7 +5073,7 @@ class MainWindow(LegacyMainWindow):
         )
         self.batch_button.setEnabled(False)
         self.save_preset_button.setEnabled(False)
-        self.load_in_serum_button.setEnabled(False)
+        self.open_preset_location_button.setEnabled(False)
         self.library_batch_cancel.setEnabled(True)
         self.nav_tabs.setCurrentIndex(1)
         self.append_log(
@@ -5088,12 +5196,13 @@ class MainWindow(LegacyMainWindow):
             self._match_result.get("recommendation"), dict
         ):
             self.save_preset_button.setEnabled(True)
-            self.load_in_serum_button.setEnabled(True)
+            self.open_preset_location_button.setEnabled(True)
         deferred = list(state.get("prerender", []))
         self._batch_state = None
         self._queue_deferred_prerenders(deferred)
         self.refresh_match_library()
         self.nav_tabs.setCurrentIndex(1)
+        self._refresh_save_state()
 
     def _queue_deferred_prerenders(self, result_paths: list[Path]) -> None:
         """Pre-render octaves for a finished batch, now that nothing competes.
@@ -5267,6 +5376,74 @@ class MainWindow(LegacyMainWindow):
         storage_note.setWordWrap(True)
         storage_layout.addWidget(storage_note)
         layout.addWidget(storage_card)
+
+        from core.preset_output import (
+            PresetOutputPreferences,
+            configured_preset_output_folder,
+            ensure_writable,
+            save_preset_output_preferences,
+        )
+
+        preset_folder_card = QGroupBox("Generated Preset Folder")
+        preset_folder_layout = QVBoxLayout(preset_folder_card)
+        preset_folder_layout.addWidget(
+            QLabel("Where PatchLab saves the presets it creates from a Match")
+        )
+        # A custom folder applies to both Serum generations; either resolves
+        # to the same path once one is configured, so serum2 stands in for
+        # "the configured folder" here.
+        current_preset_folder = configured_preset_output_folder("serum2")
+        preset_folder_location = QLabel(str(current_preset_folder))
+        preset_folder_location.setWordWrap(True)
+        preset_folder_location.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        preset_folder_location.setObjectName("muted")
+        preset_folder_layout.addWidget(preset_folder_location)
+        preset_folder_buttons = QHBoxLayout()
+        change_preset_folder = QPushButton("Change Folder…")
+        change_preset_folder.setObjectName("compactActionButton")
+        preset_folder_buttons.addWidget(change_preset_folder)
+        open_preset_folder = QPushButton("Open Folder")
+        open_preset_folder.setObjectName("compactActionButton")
+        open_preset_folder.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(configured_preset_output_folder("serum2")))
+            )
+        )
+        preset_folder_buttons.addWidget(open_preset_folder)
+        preset_folder_layout.addLayout(preset_folder_buttons)
+        preset_folder_note = QLabel(
+            "Changing this only affects presets PatchLab generates from now on — "
+            "results already saved stay exactly where they are."
+        )
+        preset_folder_note.setObjectName("muted")
+        preset_folder_note.setWordWrap(True)
+        preset_folder_layout.addWidget(preset_folder_note)
+
+        def change_generated_preset_folder() -> None:
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                "Choose Generated Preset Folder",
+                str(current_preset_folder),
+            )
+            if not selected:
+                return
+            destination = Path(selected).expanduser().resolve()
+            reason = ensure_writable(destination)
+            if reason:
+                QMessageBox.critical(
+                    dialog,
+                    "Folder is not writable",
+                    "PatchLab can't save presets in this folder. Choose another folder.",
+                )
+                return
+            save_preset_output_preferences(PresetOutputPreferences(folder=str(destination)))
+            preset_folder_location.setText(str(destination))
+            self.append_log(f"Generated preset folder set to {destination}")
+
+        change_preset_folder.clicked.connect(change_generated_preset_folder)
+        layout.addWidget(preset_folder_card)
 
         auto_update_toggle: QCheckBox | None = None
         if self.distribution_mode:
@@ -6536,11 +6713,12 @@ class MainWindow(LegacyMainWindow):
             )
             self.octave_selector.setEnabled(False)
             self.save_preset_button.setEnabled(False)
-            self.load_in_serum_button.setEnabled(False)
+            self.open_preset_location_button.setEnabled(False)
             self.recommendation_more_button.setEnabled(False)
             self.match_stats.setText(
                 str(result.get("message", "No confident match"))
             )
+            self._refresh_save_state()
             return
 
         similarity = float(recommendation["similarity_percent"])
@@ -6639,8 +6817,9 @@ class MainWindow(LegacyMainWindow):
             )
         )
         export_available = bool(recommendation.get("export_available", True))
+        self._export_available_for_current_match = export_available
         self.save_preset_button.setEnabled(export_available)
-        self.load_in_serum_button.setEnabled(export_available)
+        self.open_preset_location_button.setEnabled(export_available)
         self.recommendation_more_button.setEnabled(bool(recommendation.get("settings")))
         self.parameter_strip.setVisible(False)
         self.settings_tree.setVisible(False)
@@ -6650,7 +6829,7 @@ class MainWindow(LegacyMainWindow):
         self._refresh_workflow_cards()
         if self._batch_state is not None:
             self.save_preset_button.setEnabled(False)
-            self.load_in_serum_button.setEnabled(False)
+            self.open_preset_location_button.setEnabled(False)
         self._refresh_save_state()
 
     def _scan_completed(self, summary: dict) -> None:

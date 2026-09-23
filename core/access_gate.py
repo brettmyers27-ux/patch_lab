@@ -16,6 +16,19 @@ from core.relay_client import RelayClient
 
 SERVICE = "com.patchlab.desktop"
 ACCOUNT = "private-group-passcode"
+#: Set by tests, gate scripts, and the dev harness -- never by the shipped
+#: app -- to keep a freshly (ad-hoc) rebuilt PatchLab from ever touching the
+#: real macOS login keychain. A frozen build's ad-hoc code signature is
+#: content-derived, so every rebuild gets a new identity; macOS's Keychain
+#: "Always Allow" is bound to that identity and cannot survive a rebuild, so
+#: an automated workflow that rebuilds and relaunches PatchLab repeatedly
+#: (as every development/test/gate run in this repo does) would otherwise
+#: hit a fresh authorization prompt on every single run. This mirrors
+#: PATCHLAB_DISABLE_RELAY: an explicit, narrowly-scoped opt-out, absent by
+#: default, that only ever makes PatchLab behave as though no credential is
+#: stored (the same state a first-run user is already in) -- never a way to
+#: read, forge, or weaken a real credential.
+DISABLE_KEYCHAIN_ENV = "PATCHLAB_DISABLE_KEYCHAIN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +46,7 @@ class AccessStore:
         self.marker_path = Path(
             override or marker_path or (ENV.app_data_dir / "access-state.json")
         ).expanduser().resolve()
-        if keyring_backend is None:
+        if keyring_backend is None and os.environ.get(DISABLE_KEYCHAIN_ENV, "").strip() != "1":
             try:
                 import keyring
 
