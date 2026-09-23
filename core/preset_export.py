@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import sqlite3
 import struct
 import tempfile
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from typing import Any
 import librosa
 import numpy as np
 
-from core.db import DEFAULT_DB_PATH
+from core.base_preset_identity import BaseIdentity, resolve_serum1_base
 from core.branding import generated_preset_name
 from core.features import CLAP_SAMPLE_RATE, ClapEmbedder
 from core.fxp import build_fxp, parse_fxp
@@ -23,11 +22,7 @@ from core.platform_env import ENV
 from core.plugin_host import dump_dawdreamer_parameters, make_dawdreamer_processor
 from core.renderer_selection import open_renderer
 from core.serum2_preset import parse_serum2_preset
-from core.serum2_state_reconstruct import (
-    DEFAULT_RENDER_STATE_DIR,
-    decode_host_template,
-    reconstruct_vstpreset,
-)
+from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstpreset
 from core.serum2_preset_writer import Serum2WriteResult, write_serum2_preset
 
 
@@ -43,6 +38,7 @@ class PresetExportResult:
     applied_fields: int = 0
     skipped_fields: tuple[str, ...] = ()
     asset_references: tuple[str, ...] = ()
+    base_identity: BaseIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,16 +57,6 @@ class PresetExportVerification:
         """Whether the native preset decoded and reconstructed safely."""
 
         return self.decoded_graph_equal and self.render_state_coverage >= 0.85
-
-
-def _preset_row(preset_id: int, synth: str, db_path: Path) -> tuple[Path, str]:
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT path,name FROM presets WHERE id=? AND synth=?", (preset_id, synth)
-        ).fetchone()
-    if row is None:
-        raise KeyError(f"Unknown {synth} preset id {preset_id}")
-    return Path(row[0]).resolve(), str(row[1])
 
 
 def _extract_native_vst2_chunk(bank: bytes) -> tuple[bytes, bytes, int]:
@@ -94,9 +80,11 @@ def write_serum1_preset(
     vector: np.ndarray,
     meaningfully_modified: bool,
     name: str | None = None,
-    db_path: Path = DEFAULT_DB_PATH,
 ) -> PresetExportResult:
-    base_path, _base_name = _preset_row(base_preset_id, "serum1", db_path)
+    # ``base_preset_id`` is a synthesis-catalog id; the file is found and
+    # verified by its content hash (core.base_preset_identity).
+    base = resolve_serum1_base(base_preset_id)
+    base_path = base.path
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not meaningfully_modified:
@@ -124,7 +112,8 @@ def write_serum1_preset(
             raise
         parse_fxp(output_path)
         return PresetExportResult(
-            output_path, "serum1", "copied-native-branded", base_preset_id
+            output_path, "serum1", "copied-native-branded", base_preset_id,
+            base_identity=base.identity,
         )
 
     _engine, processor, _selection = open_renderer(
@@ -166,7 +155,8 @@ def write_serum1_preset(
         raise
     parse_fxp(output_path)
     return PresetExportResult(
-        output_path, "serum1", "optimized-native-state", base_preset_id
+        output_path, "serum1", "optimized-native-state", base_preset_id,
+        base_identity=base.identity,
     )
 
 
@@ -179,7 +169,6 @@ def write_native_preset(
     mask: np.ndarray,
     meaningfully_modified: bool,
     name: str | None = None,
-    db_path: Path = DEFAULT_DB_PATH,
     structural_overrides: dict[str, Any] | None = None,
 ) -> PresetExportResult:
     if synth == "serum1":
@@ -189,7 +178,6 @@ def write_native_preset(
             vector=vector,
             meaningfully_modified=meaningfully_modified,
             name=name,
-            db_path=db_path,
         )
     if synth != "serum2":
         raise ValueError(f"Unknown synth {synth!r}")
@@ -200,7 +188,6 @@ def write_native_preset(
         mask=mask,
         meaningfully_modified=meaningfully_modified,
         name=name,
-        db_path=db_path,
         structural_overrides=structural_overrides,
     )
     return PresetExportResult(
@@ -211,7 +198,24 @@ def write_native_preset(
         applied_fields=result.applied_fields,
         skipped_fields=result.skipped_fields,
         asset_references=result.asset_references,
+        base_identity=result.base_identity,
     )
+
+
+def _render_state_template(catalog_id: int) -> Path:
+    """The shipped host template for this catalog preset.
+
+    Only the shipped root is searched.  The app-data root holds states for the
+    user's own presets, numbered by *their* library ids, so a catalog id must
+    never fall through to it.
+    """
+
+    from core.synthesis_assets import resolve_synthesis_assets
+
+    shipped = resolve_synthesis_assets().render_states / f"{int(catalog_id)}.vstpreset"
+    if not shipped.is_file():
+        raise FileNotFoundError(f"No shipped Serum 2 render state for catalog preset {catalog_id}: {shipped}")
+    return shipped
 
 
 class PresetExportVerifier:
@@ -276,9 +280,7 @@ class PresetExportVerifier:
             decoded_equal = max_parameter_delta <= 1e-4
         else:
             parsed = parse_serum2_preset(export.path)
-            template = decode_host_template(
-                (DEFAULT_RENDER_STATE_DIR / f"{export.base_preset_id}.vstpreset").read_bytes()
-            )
+            template = decode_host_template(_render_state_template(export.base_preset_id).read_bytes())
             vstpreset, partition = reconstruct_vstpreset(parsed, template)
             coverage = partition.coverage
             state_path = (
@@ -340,7 +342,6 @@ def write_and_verify_native_preset(
     expected_clap_similarity: float,
     verifier: PresetExportVerifier | None = None,
     name: str | None = None,
-    db_path: Path = DEFAULT_DB_PATH,
     similarity_tolerance: float = 0.15,
     structural_overrides: dict[str, Any] | None = None,
 ) -> PresetExportVerification:
@@ -363,7 +364,6 @@ def write_and_verify_native_preset(
             mask=mask,
             meaningfully_modified=meaningfully_modified,
             name=name,
-            db_path=db_path,
             structural_overrides=structural_overrides,
         )
         verification = verifier.verify(

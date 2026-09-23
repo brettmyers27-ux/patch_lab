@@ -1783,6 +1783,11 @@ class LegacyMainWindow(QMainWindow):
         self.recommendation_details.setVisible(False)
         self.recommendation_placeholder.setVisible(True)
         self.save_preset_button.setEnabled(False)
+        # A new sound is not the previous result: its save state must not linger.
+        self._current_match_uid = None
+        refresh_save_state = getattr(self, "_refresh_save_state", None)
+        if refresh_save_state is not None:
+            refresh_save_state()
         self._refresh_workflow_cards()
 
     def start_match(self) -> None:
@@ -2906,6 +2911,17 @@ class MainWindow(LegacyMainWindow):
         self.bug_report_runner.log.connect(self.append_log)
         self.bug_report_runner.completed.connect(self._bug_report_completed)
         self.bug_report_runner.failed.connect(self._bug_report_failed)
+        # Automatic save-incident reports use their own runner so they can
+        # never pop the manual report's sign-in or failure dialogs.
+        self.incident_report_runner = BugReportProcessRunner(self)
+        self.incident_report_runner.log.connect(self.append_log)
+        self.incident_report_runner.completed.connect(self._incident_report_completed)
+        self.incident_report_runner.failed.connect(self._incident_report_failed)
+        self._incident_report_queue: list[tuple[str, str, Path]] = []
+        self._incident_report_active: tuple[str, str, Path] | None = None
+        self._reported_save_signatures: dict[tuple[str, ...], str] = {}
+        #: The save incident the export worker is running for, if any.
+        self._save_incident_context: dict | None = None
         self.render_runner = RenderProcessRunner(self)
         self.render_runner.log.connect(self.append_log)
         self.render_runner.progress.connect(self._render_progress_changed)
@@ -3040,6 +3056,7 @@ class MainWindow(LegacyMainWindow):
             self._apply_privacy_choice()
             if self.privacy_choice.use_and_share_own_presets is None:
                 QTimer.singleShot(0, self._show_consent_dialog)
+        QTimer.singleShot(0, self._reconcile_save_incidents)
 
     def _rebuild_visual_tree(self) -> None:
         old_central = self.centralWidget()
@@ -3485,6 +3502,27 @@ class MainWindow(LegacyMainWindow):
         actions_row.addWidget(self.load_in_serum_button)
         actions_row.addWidget(self.recommendation_more_button)
         details_layout.addLayout(actions_row)
+        # Shown only when the automatic save of this result has run out of
+        # recovery; a normal save never shows any of this.
+        self.save_failure_label = QLabel("")
+        self.save_failure_label.setWordWrap(True)
+        self.save_failure_label.setObjectName("muted")
+        self.save_failure_label.setVisible(False)
+        self.retry_save_button = QPushButton("Retry Saving Preset")
+        self.retry_save_button.setObjectName("compactActionButton")
+        self.retry_save_button.setVisible(False)
+        self.retry_save_button.clicked.connect(lambda _checked=False: self.retry_saving_preset())
+        self.run_again_button = QPushButton("Run Again")
+        self.run_again_button.setObjectName("compactActionButton")
+        self.run_again_button.setVisible(False)
+        self.run_again_button.clicked.connect(lambda _checked=False: self.run_again_from_incident())
+        save_state_row = QHBoxLayout()
+        save_state_row.setSpacing(6)
+        save_state_row.addWidget(self.retry_save_button)
+        save_state_row.addWidget(self.run_again_button)
+        save_state_row.addStretch(1)
+        details_layout.addWidget(self.save_failure_label)
+        details_layout.addLayout(save_state_row)
         # winner_play_button is retained (hidden) only so older code paths
         # that reference it for enable/disable state don't need special
         # casing; playback is now triggered directly by clicking an octave.
@@ -3742,9 +3780,22 @@ class MainWindow(LegacyMainWindow):
         # Almost every entry already has an auto-saved preset by the time it
         # can be clicked, so this reads "Rename Preset" in the normal case;
         # "Export Preset" only for the rare entry that was never auto-saved.
-        export = QPushButton(
-            "Rename Preset" if record.exported_preset_path is not None else "Export Preset"
+        # A save that ran out of automatic recovery offers exactly that
+        # remedy here too; the Library says "Rename" only for a file that exists.
+        incident = getattr(self, "_library_incidents", {}).get(record.match_uid)
+        incident_status = incident.status if incident is not None else ""
+        saved_file = (
+            record.exported_preset_path is not None
+            and Path(record.exported_preset_path).is_file()
         )
+        if not saved_file and incident_status == "failed":
+            label, handler = "Retry Saving Preset", self.retry_saving_preset
+        elif not saved_file and incident_status == "unrecoverable":
+            label, handler = "Run Again", self.run_again_from_incident
+        else:
+            label = "Rename Preset" if saved_file else "Export Preset"
+            handler = self.export_library_match
+        export = QPushButton(label)
         export.setObjectName("compactActionButton")
         export.setEnabled(
             not record.no_confident_match and self._batch_state is None
@@ -3752,7 +3803,7 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None:
             export.setToolTip("Reserved for the active batch. Try again after it finishes.")
         export.clicked.connect(
-            lambda _checked=False, uid=record.match_uid: self.export_library_match(uid)
+            lambda _checked=False, uid=record.match_uid, act=handler: act(uid)
         )
         delete = QPushButton("Delete")
         delete.setObjectName("compactActionButton")
@@ -3772,6 +3823,12 @@ class MainWindow(LegacyMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        try:
+            from core.preset_save import incidents_by_match
+
+            self._library_incidents = incidents_by_match()
+        except Exception:
+            self._library_incidents = {}
         try:
             database = Database(self._match_database_path())
             records = database.list_match_library()
@@ -3914,6 +3971,7 @@ class MainWindow(LegacyMainWindow):
         self.match_drop.set_playable(True)
         self._show_match_result(self._match_result)
         self.nav_tabs.setCurrentIndex(0)
+        self._refresh_save_state()
 
     def delete_library_match(self, match_uid: str) -> None:
         if QMessageBox.question(
@@ -3953,7 +4011,7 @@ class MainWindow(LegacyMainWindow):
         record = Database(self._match_database_path()).get_match_library(match_uid)
         if record is None:
             return
-        if record.exported_preset_path is not None:
+        if record.exported_preset_path is not None and Path(record.exported_preset_path).is_file():
             self._rename_saved_preset(match_uid, Path(record.exported_preset_path))
             return
         _source, result_path = resolved_record_paths(record, self._match_library_root())
@@ -4076,6 +4134,7 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None:
             self._batch_state["current_uid"] = archived.record.match_uid
         self._auto_save_generated_preset(archived, Path(source))
+        self._refresh_save_state()
 
     def _auto_save_generated_preset(self, archived, source: Path) -> None:
         """Verified-export every generated patch straight into Serum's folder.
@@ -4108,14 +4167,55 @@ class MainWindow(LegacyMainWindow):
             self._batch_state["phase"] = "export"
         else:
             self._export_context_uid = archived.record.match_uid
+        incident = None
         try:
-            self.export_runner.start(archived.result_json_path, output)
+            from core.preset_save import SaveIncident
+
+            source_meta = (self._match_result or {}).get("source") or {}
+            incident = SaveIncident.create(
+                match_uid=archived.record.match_uid,
+                result_path=archived.result_json_path,
+                target_path=output,
+                synth=str(recommendation["synth"]),
+                run_again={
+                    "source_audio_path": str(archived.source_audio_path),
+                    "target_synth": str(archived.record.target_synth),
+                    "budget": str(archived.record.budget),
+                    "start_offset_s": float(source_meta.get("start_offset_s", 0.0) or 0.0),
+                },
+            )
+        except Exception as exc:
+            # The incident is how a failed save stays recoverable; without one
+            # the save still runs, just without automatic retries.
+            self.append_log(f"Save incident could not be recorded: {exc}")
+        try:
+            if incident is not None:
+                from core.preset_save import MAX_AUTOMATIC_ATTEMPTS
+
+                self._save_incident_context = {
+                    "incident_id": incident.incident_id,
+                    "match_uid": archived.record.match_uid,
+                    "trigger": "auto",
+                }
+                self.export_runner.start(
+                    archived.result_json_path, output,
+                    incident_id=incident.incident_id, trigger="auto",
+                    attempts=MAX_AUTOMATIC_ATTEMPTS,
+                )
+            else:
+                self.export_runner.start(archived.result_json_path, output)
         except RuntimeError as exc:
             self.append_log(f"Could not auto-save generated preset: {exc}")
+            self._save_incident_context = None
+            if incident is not None:
+                from core.preset_save import record_worker_crash
+
+                record_worker_crash(incident, f"the save could not start: {exc}", trigger="auto")
             if self._batch_state is not None:
                 self._batch_file_failed(f"auto-save failed: {exc}")
             else:
                 self._export_context_uid = None
+                self._refresh_save_state()
 
     def _match_failed(self, error: str) -> None:
         if self._batch_state is not None:
@@ -4124,6 +4224,10 @@ class MainWindow(LegacyMainWindow):
         super()._match_failed(error)
 
     def _export_completed(self, detail: dict) -> None:
+        context = self._save_incident_context
+        if context is not None and detail.get("incident_id") == context["incident_id"]:
+            self._save_incident_finished(context, detail)
+            return
         uid = self._export_context_uid
         if uid:
             Database(self._match_database_path()).set_match_exported_path(
@@ -4151,6 +4255,10 @@ class MainWindow(LegacyMainWindow):
             self.refresh_match_library()
 
     def _export_failed(self, error: str) -> None:
+        context = self._save_incident_context
+        if context is not None:
+            self._save_incident_failed(context, error)
+            return
         if self._export_context_uid:
             self._export_context_uid = None
             self.append_log(f"Library preset export failed: {error}")
@@ -4160,6 +4268,385 @@ class MainWindow(LegacyMainWindow):
             self._batch_file_failed(f"verified export failed: {error}")
             return
         super()._export_failed(error)
+
+    # ------------------------------------------------------------------
+    # Generated-preset save lifecycle (core.preset_save)
+    # ------------------------------------------------------------------
+
+    def _save_incident_finished(self, context: dict, detail: dict) -> None:
+        """A save incident reached a verified file: record it, then show it saved."""
+
+        from core.preset_save import SaveIncident, finalize_saved_incident
+
+        self._save_incident_context = None
+        if self._export_context_uid == context["match_uid"]:
+            self._export_context_uid = None
+        final_path = Path(detail["path"])
+        recorded = False
+        try:
+            incident = SaveIncident.load(context["incident_id"])
+            recorded = finalize_saved_incident(
+                incident, Database(self._match_database_path()), final_path
+            )
+        except Exception as exc:
+            self.append_log(f"Could not finish recording the saved preset: {exc}")
+        attempts = int(detail.get("attempts") or 1)
+        if recorded:
+            self.append_log(
+                f"Verified preset saved: {final_path}"
+                + (f" (after {attempts} attempts)" if attempts > 1 else "")
+            )
+            self.statusBar().showMessage(f"Preset saved: {final_path.name}")
+        else:
+            # The file is real and verified; only the Library entry is behind.
+            # Reconciliation finishes it without writing a second preset.
+            self.append_log(
+                f"Preset saved at {final_path}, but the Library could not record it yet; "
+                "PatchLab will finish this automatically."
+            )
+            QTimer.singleShot(1500, self._reconcile_save_incidents)
+        warning = detail.get("verification_warning")
+        if warning:
+            self.append_log(f"Preset verification note: {warning}")
+        if self._batch_state is not None and self._batch_state.get("phase") == "export":
+            self.append_log(f"Batch verified preset saved: {final_path}")
+            self._batch_file_completed()
+            return
+        self.refresh_match_library()
+        self._refresh_save_state()
+
+    def _save_incident_failed(self, context: dict, error: str) -> None:
+        """Automatic recovery (or a manual retry) is exhausted for this result."""
+
+        from core.preset_save import SaveIncident, record_worker_crash
+
+        self._save_incident_context = None
+        if self._export_context_uid == context["match_uid"]:
+            self._export_context_uid = None
+        failure = getattr(self.export_runner, "failure", None) or {}
+        try:
+            incident = SaveIncident.load(context["incident_id"])
+            if not failure:
+                # The worker ended without an outcome of its own (it crashed or
+                # never started); record that as this incident's failure.
+                record_worker_crash(incident, error, trigger=context["trigger"])
+        except Exception as exc:
+            self.append_log(f"Save incident could not be read: {exc}")
+            incident = None
+        self.append_log(
+            "Preset save failed"
+            + (f" after {failure.get('attempts')} attempt(s)" if failure.get("attempts") else "")
+            + f" ({failure.get('kind', 'unknown')}/{failure.get('reason', 'unknown')}): {error}"
+        )
+        if incident is not None:
+            self._submit_save_incident_report(
+                incident, followup=context["trigger"] == "manual"
+            )
+        if self._batch_state is not None and self._batch_state.get("phase") == "export":
+            self._batch_file_failed(f"preset could not be saved: {error}")
+            return
+        self.statusBar().showMessage(error)
+        self.refresh_match_library()
+        self._refresh_save_state()
+
+    def _refresh_save_state(self) -> None:
+        """Show Retry Saving Preset / Run Again only for a result that needs it."""
+
+        label = getattr(self, "save_failure_label", None)
+        if label is None:
+            return
+        retry, again = self.retry_save_button, self.run_again_button
+        incident = None
+        if self._current_match_uid:
+            try:
+                from core.preset_save import incident_for_match
+
+                incident = incident_for_match(self._current_match_uid)
+            except Exception:
+                incident = None
+        saving = (
+            self._save_incident_context is not None
+            and self._save_incident_context.get("match_uid") == self._current_match_uid
+        )
+        status = incident.status if incident is not None else ""
+        if saving or status not in ("failed", "unrecoverable"):
+            label.setVisible(False)
+            retry.setVisible(False)
+            again.setVisible(False)
+            if saving and self._save_incident_context.get("trigger") == "manual":
+                retry.setVisible(True)
+                retry.setEnabled(False)
+                retry.setText("Saving…")
+            return
+        from core.preset_save import incident_user_message
+
+        label.setText(incident_user_message(incident))
+        label.setVisible(True)
+        retry.setText("Retry Saving Preset")
+        retry.setEnabled(self._batch_state is None)
+        retry.setVisible(status == "failed")
+        again.setVisible(status == "unrecoverable")
+        again.setEnabled(self._batch_state is None and not self.match_runner.running)
+
+    def retry_saving_preset(self, match_uid: str | None = None) -> None:
+        """Save the SAME generated result again; the Match is not re-run."""
+
+        from core.preset_save import incident_for_match
+
+        match_uid = match_uid or self._current_match_uid
+        if not match_uid:
+            return
+        if self._batch_state is not None:
+            QMessageBox.information(
+                self, "Batch is running", "Try saving this preset again after the batch finishes."
+            )
+            return
+        if self.export_runner.running:
+            QMessageBox.information(
+                self, "Still saving", "PatchLab is saving another preset. Try again in a moment."
+            )
+            return
+        incident = incident_for_match(match_uid)
+        if incident is None or incident.status != "failed":
+            self._refresh_save_state()
+            return
+        # The incident recorded the exact archived result it was saving; that
+        # is what is retried (the Match itself is never re-run here).
+        result_path = Path(incident.result_path)
+        if not result_path.is_file():
+            QMessageBox.information(
+                self,
+                "Result not found",
+                "PatchLab can no longer find this result on your Mac, so it can't "
+                "save it again. Run this sound again to create a new preset.",
+            )
+            return
+        self._save_incident_context = {
+            "incident_id": incident.incident_id,
+            "match_uid": match_uid,
+            "trigger": "manual",
+        }
+        self.append_log(f"Retrying the save of this preset (incident {incident.incident_id})…")
+        self.statusBar().showMessage("Saving your preset again…")
+        try:
+            self.export_runner.start(
+                result_path, Path(incident.target_path),
+                incident_id=incident.incident_id, trigger="manual", attempts=1,
+            )
+        except Exception as exc:
+            self._save_incident_context = None
+            self.append_log(f"Could not start saving the preset again: {exc}")
+        self._refresh_save_state()
+        self.refresh_match_library()
+
+    def run_again_from_incident(self, match_uid: str | None = None) -> None:
+        """Run the same sound again with the same settings, once, on request."""
+
+        from core.preset_save import incident_for_match
+
+        match_uid = match_uid or self._current_match_uid
+        incident = incident_for_match(match_uid) if match_uid else None
+        if incident is None or not incident.run_again:
+            return
+        if self.match_runner.running or self._batch_state is not None:
+            QMessageBox.information(
+                self, "PatchLab is busy", "Run this sound again once the current work finishes."
+            )
+            return
+        config = incident.run_again
+        source = Path(str(config.get("source_audio_path", "")))
+        if not source.is_file():
+            QMessageBox.information(
+                self,
+                "Original sound not found",
+                "PatchLab no longer has the original sound for this result. "
+                "Drop the sound in again to create a new preset.",
+            )
+            return
+        self._set_match_file(str(source))
+        self._select_segment(self.match_synth, str(config.get("target_synth", "")))
+        self._select_segment(self.match_budget, str(config.get("budget", "")))
+        try:
+            self.match_offset.setValue(float(config.get("start_offset_s", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            pass
+        self.nav_tabs.setCurrentIndex(0)
+        self.append_log(
+            f"Running {source.name} again ({config.get('target_synth')}, {config.get('budget')}) "
+            f"because its preset could not be saved (incident {incident.incident_id})."
+        )
+        self.start_match()
+
+    @staticmethod
+    def _select_segment(control, data: str) -> None:
+        for index in range(control.count()):
+            if str(control.itemData(index)) == data:
+                control.setCurrentIndex(index)
+                return
+
+    def _reconcile_save_incidents(self) -> None:
+        """At launch: finish interrupted saves and resend unsent incident reports."""
+
+        try:
+            from core.preset_save import prune_saved_incidents, reconcile_incidents, unfinished_incidents
+
+            if self._save_incident_context is None and not self.export_runner.running:
+                counts = reconcile_incidents(Database(self._match_database_path()))
+                if counts["recorded"]:
+                    self.append_log(
+                        f"Recorded {counts['recorded']} saved preset(s) the Library had missed."
+                    )
+                if counts["marked_failed"]:
+                    self.append_log(
+                        f"{counts['marked_failed']} preset save(s) were interrupted; "
+                        "they can be retried from the Library."
+                    )
+            prune_saved_incidents()
+            for incident in unfinished_incidents():
+                for kind in ("report", "followup"):
+                    entry = getattr(incident, kind) or {}
+                    request = entry.get("request_path")
+                    if entry.get("status") == "saved_locally" and request and Path(request).is_file():
+                        self._queue_incident_report(incident.incident_id, kind, Path(request))
+        except Exception as exc:
+            self.append_log(f"Save incidents could not be checked: {exc}")
+        self.refresh_match_library()
+        self._refresh_save_state()
+
+    # ---- automatic diagnostic reports --------------------------------
+
+    def _submit_save_incident_report(self, incident, *, followup: bool) -> None:
+        """One automatic report per save incident, plus at most one follow-up.
+
+        The first report reuses the incident id as its ticket id. A failed
+        manual retry adds one linked follow-up ticket instead of touching the
+        already-uploaded (immutable) first one. Identical failures within one
+        session share a report rather than uploading duplicates.
+        """
+
+        kind = "followup" if followup else "report"
+        if getattr(incident, kind):
+            return
+        last = incident.attempts[-1] if incident.attempts else {}
+        signature = (
+            kind,
+            str(last.get("failure_kind", "")),
+            str(last.get("failure_reason", "")),
+            str(last.get("exception_type", "")),
+            str(last.get("stage", "")),
+        )
+        existing = self._reported_save_signatures.get(signature)
+        if existing and not followup:
+            incident.report = {"ticket_id": existing, "status": "same_as_earlier_report"}
+            incident.save_reports()
+            self.append_log(
+                f"Save incident {incident.incident_id} matches report {existing}; not sending a duplicate."
+            )
+            return
+        try:
+            import uuid as _uuid
+
+            from core.bug_report import create_request
+            from core.support_bundle import create_support_bundle
+
+            ticket_id = _uuid.uuid4().hex if followup else incident.incident_id
+            original = (incident.report or {}).get("ticket_id", "")
+            if followup:
+                comments = (
+                    "AUTOMATIC FOLLOW-UP REPORT: manual recovery also failed.\n"
+                    f"Original ticket: {original or 'not sent'}\n"
+                    f"Save incident: {incident.incident_id}\n"
+                    "The user pressed Retry Saving Preset and the save failed again."
+                )
+            else:
+                comments = (
+                    "AUTOMATIC REPORT: PatchLab could not save a generated preset after "
+                    "its automatic retries.\n"
+                    f"Save incident: {incident.incident_id}\n"
+                    "No audio or preset content is included."
+                )
+            logs = (
+                "=== SAVE INCIDENT ===\n"
+                + json.dumps(incident.diagnostic_summary(), indent=2, sort_keys=True, default=str)
+                + "\n\n"
+                + self._diagnostic_log_text()
+            )
+            request_path = create_request(comments=comments, logs=logs, ticket_id=ticket_id)
+            try:
+                create_support_bundle(
+                    ticket_id=ticket_id,
+                    comments=comments,
+                    operation="saving the generated preset",
+                    settings=self._diagnostic_settings(),
+                    ticket_path=request_path,
+                )
+            except Exception as exc:
+                self.append_log(f"Save-incident diagnostic bundle could not be written: {exc}")
+            entry = {
+                "ticket_id": ticket_id,
+                "status": "saved_locally",
+                "request_path": str(request_path),
+                "original_ticket_id": original if followup else "",
+            }
+            setattr(incident, kind, entry)
+            incident.save_reports()
+            if not followup:
+                self._reported_save_signatures[signature] = ticket_id
+            self.append_log(f"Saved an automatic report for this save failure: ticket {ticket_id}")
+            self._queue_incident_report(incident.incident_id, kind, request_path)
+        except Exception as exc:
+            # Reporting must never interfere with the save or the UI.
+            self.append_log(f"Automatic save-failure report could not be created: {exc}")
+
+    def _queue_incident_report(self, incident_id: str, kind: str, request_path: Path) -> None:
+        item = (incident_id, kind, Path(request_path))
+        if item == self._incident_report_active or item in self._incident_report_queue:
+            return
+        self._incident_report_queue.append(item)
+        self._start_next_incident_report()
+
+    def _start_next_incident_report(self) -> None:
+        if self._incident_report_active is not None or self.incident_report_runner.running:
+            return
+        while self._incident_report_queue:
+            item = self._incident_report_queue.pop(0)
+            try:
+                self.incident_report_runner.start(item[2])
+            except Exception as exc:
+                self.append_log(f"Automatic report could not be sent now: {exc}")
+                continue
+            self._incident_report_active = item
+            return
+
+    def _update_incident_report(self, status: str, detail: dict) -> None:
+        item = self._incident_report_active
+        self._incident_report_active = None
+        if item is None:
+            return
+        try:
+            from core.preset_save import SaveIncident
+
+            incident = SaveIncident.load(item[0])
+            entry = dict(getattr(incident, item[1]) or {})
+            entry.update({"status": status, **detail})
+            setattr(incident, item[1], entry)
+            incident.save_reports()
+        except Exception as exc:
+            self.append_log(f"Could not record the automatic report's status: {exc}")
+        QTimer.singleShot(0, self._start_next_incident_report)
+
+    def _incident_report_completed(self, result: dict) -> None:
+        self.append_log(
+            f"Automatic save-failure report sent: ticket {result.get('ticket_id', '')}, "
+            f"receipt {result.get('receipt_id', '')}"
+        )
+        self._update_incident_report("uploaded", {"receipt_id": str(result.get("receipt_id", ""))})
+
+    def _incident_report_failed(self, error: str) -> None:
+        # Saved locally already; it is resent at the next launch. Never a dialog.
+        code = getattr(self.incident_report_runner, "error_code", "") or "unknown"
+        self.append_log(f"Automatic save-failure report kept on this Mac for now ({code}).")
+        self._update_incident_report("saved_locally", {"last_upload_error": code})
 
     def _preview_completed(self, path: str) -> None:
         super()._preview_completed(path)
@@ -5962,6 +6449,7 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None:
             self.save_preset_button.setEnabled(False)
             self.load_in_serum_button.setEnabled(False)
+        self._refresh_save_state()
 
     def _scan_completed(self, summary: dict) -> None:
         super()._scan_completed(summary)

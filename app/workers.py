@@ -900,6 +900,10 @@ class ExportProcessRunner(_ProcessRunnerBase):
         self._buffer = ""
         self._result: dict | None = None
         self._error: str | None = None
+        #: The structured EXPORT_FAILURE record of the last failed incident save.
+        self.failure: dict | None = None
+        #: The save incident the running (or last) export belongs to, if any.
+        self.incident_id: str | None = None
 
     @property
     def running(self) -> bool:
@@ -911,18 +915,31 @@ class ExportProcessRunner(_ProcessRunnerBase):
         output_path: Path,
         *,
         existing_match: int | None = None,
+        incident_id: str | None = None,
+        trigger: str = "auto",
+        attempts: int = 1,
     ) -> None:
         if self.running:
             raise RuntimeError("A preset export is already running")
         self._buffer = ""
         self._result = None
         self._error = None
+        self.failure = None
+        self.incident_id = incident_id
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
         arguments = [str(result_path), str(output_path)]
         if existing_match is not None:
             # One export implementation for both the generated recommendation and
             # a closest match; only the selector differs.
             arguments += ["--existing-match", str(int(existing_match))]
+        if incident_id:
+            # The generated-preset save lifecycle: bounded retries, classified
+            # failures, one incident record (core.preset_save).
+            arguments += [
+                "--incident", str(incident_id),
+                "--trigger", str(trigger),
+                "--attempts", str(max(1, int(attempts))),
+            ]
         self._start_worker("export", arguments)
 
     def cancel(self) -> None:
@@ -940,6 +957,11 @@ class ExportProcessRunner(_ProcessRunnerBase):
                 self._result = json.loads(line.split("=", 1)[1])
             elif line.startswith("EXPORT_ERROR="):
                 self._error = line.split("=", 1)[1]
+            elif line.startswith("EXPORT_FAILURE="):
+                try:
+                    self.failure = json.loads(line.split("=", 1)[1])
+                except ValueError:
+                    self.failure = None
             if line:
                 self.log.emit(line)
 

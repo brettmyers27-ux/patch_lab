@@ -611,12 +611,24 @@ class Database:
 
     def set_match_exported_path(
         self, match_uid: str, exported_preset_path: Path
-    ) -> None:
+    ) -> bool:
+        """Record where a match's preset was saved; True only if a row now says so.
+
+        An UPDATE that matches no row succeeds silently in SQLite, so the value
+        is read back rather than trusted: the Library must never point at a
+        path the caller did not actually record.
+        """
+
         with self.connect() as connection:
             connection.execute(
                 "UPDATE match_library SET exported_preset_path=? WHERE match_uid=?",
                 (str(exported_preset_path), match_uid),
             )
+            row = connection.execute(
+                "SELECT exported_preset_path FROM match_library WHERE match_uid=?",
+                (match_uid,),
+            ).fetchone()
+        return row is not None and str(row[0]) == str(exported_preset_path)
 
     def create_match_batch(
         self,

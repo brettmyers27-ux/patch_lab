@@ -7,7 +7,6 @@ import hashlib
 import json
 import math
 import os
-import sqlite3
 import struct
 import tempfile
 from dataclasses import dataclass
@@ -18,7 +17,7 @@ import cbor2
 import numpy as np
 import zstandard
 
-from core.db import DEFAULT_DB_PATH, Database
+from core.base_preset_identity import BaseIdentity, resolve_serum2_base
 from core.branding import (
     APP_NAME,
     GENERATED_PRESET_DESCRIPTION,
@@ -30,8 +29,6 @@ from core.serum2_targets import ASSET_KEYS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "data" / "models" / "serum2_target_schema.json"
-DEFAULT_TARGET_PATH = PROJECT_ROOT / "data" / "features" / "serum2_targets.npz"
 MEANINGFUL_DELTA = 1e-4
 
 
@@ -44,6 +41,15 @@ class Serum2WriteResult:
     skipped_fields: tuple[str, ...]
     graph_sha256: str
     asset_references: tuple[str, ...]
+    base_identity: BaseIdentity | None = None
+
+
+def _runtime_schema_path() -> Path:
+    """The Serum 2 schema of the runtime family this build ships and matches with."""
+
+    from core.synthesis_assets import resolve_synthesis_assets
+
+    return resolve_synthesis_assets().serum2_schema
 
 
 def _json_fingerprint(value: Any) -> str:
@@ -297,83 +303,6 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         raise
 
 
-def _resolve_serum2_base(
-    base_preset_id: int, db_path: Path
-) -> tuple[Path, dict[str, Any]]:
-    """Return the base preset's file path and decoded settings.
-
-    A developer checkout answers both from `data/library.db`. A packaged or
-    git-clone install has no such database, and its synthesis catalog carries
-    only Serum 1 automation targets — so every Serum 2 export failed there with
-    "Unknown Serum 2 base preset". The already-shipped factory bundle holds the
-    same settings/metadata/payload_version this needs, and the locally scanned
-    factory mapping resolves the file itself, so fall back to both rather than
-    shipping a second copy of a 177 MB table.
-    """
-
-    from core.synthesis_assets import resolve_synthesis_assets
-
-    resolved_db = Path(db_path)
-    if resolved_db.is_file():
-        try:
-            database = Database(resolved_db)
-            with database.connect() as connection:
-                row = connection.execute(
-                    "SELECT path FROM presets WHERE id=? AND synth='serum2'",
-                    (base_preset_id,),
-                ).fetchone()
-            if row is not None:
-                return (
-                    Path(str(row["path"])).resolve(),
-                    database.serum2_full_settings(base_preset_id),
-                )
-        except (KeyError, sqlite3.Error):
-            pass  # fall through to the bundle
-
-    assets = resolve_synthesis_assets()
-    from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
-
-    bundle_path = DEFAULT_FACTORY_BUNDLE
-    if not Path(bundle_path).is_file():
-        raise KeyError(f"Unknown Serum 2 base preset {base_preset_id}")
-    bundle = FactoryBundle(bundle_path)
-    try:
-        preset = bundle.preset_by_id(base_preset_id)
-        settings, metadata, payload_version = bundle.settings(base_preset_id)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise KeyError(
-            f"Unknown Serum 2 base preset {base_preset_id}"
-        ) from exc
-
-    local_path = _factory_path_for_hash(
-        assets.factory_mapping, str(preset.content_hash)
-    )
-    if local_path is None:
-        raise KeyError(
-            f"Serum 2 base preset {base_preset_id} is not installed on this "
-            "machine; its factory preset file could not be located by content hash"
-        )
-    return local_path, {
-        "settings": settings,
-        "metadata": metadata if metadata is not None else {},
-        "payload_version": int(payload_version or 0),
-    }
-
-
-def _factory_path_for_hash(mapping_path: Path | None, content_hash: str) -> Path | None:
-    if mapping_path is None or not Path(mapping_path).is_file():
-        return None
-    try:
-        raw = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    value = raw.get("local_paths_by_hash", {}).get(content_hash)
-    if not value:
-        return None
-    candidate = Path(str(value))
-    return candidate.resolve() if candidate.is_file() else None
-
-
 def write_serum2_preset(
     output_path: Path,
     *,
@@ -382,24 +311,33 @@ def write_serum2_preset(
     mask: np.ndarray,
     meaningfully_modified: bool,
     name: str | None = None,
-    db_path: Path = DEFAULT_DB_PATH,
-    schema_path: Path = DEFAULT_SCHEMA_PATH,
-    target_path: Path = DEFAULT_TARGET_PATH,
+    schema_path: Path | None = None,
+    catalog_path: Path | None = None,
+    bundle_path: Path | None = None,
+    target_path: Path | None = None,
     structural_overrides: Mapping[str, Any] | None = None,
 ) -> Serum2WriteResult:
     """Write a native preset and decode it back before returning success."""
 
-    base_path, base = _resolve_serum2_base(base_preset_id, db_path)
-    base_graph = base["settings"]
+    # ``base_preset_id`` is a synthesis-catalog id.  The base is resolved by
+    # content identity and cross-checked, never by reusing that integer as a
+    # row id in another store (see core.base_preset_identity).
+    base = resolve_serum2_base(
+        base_preset_id,
+        catalog_path=catalog_path,
+        bundle_path=bundle_path,
+        targets_path=target_path,
+    )
+    base_graph = base.settings
     output_path = Path(output_path).expanduser().resolve()
 
     output_name = name or generated_preset_name("serum2")
     structural_overrides = dict(structural_overrides or {})
     if not meaningfully_modified and not structural_overrides:
         payload = encode_serum2_preset(
-            branded_serum2_metadata(base["metadata"], name=output_name),
+            branded_serum2_metadata(base.metadata, name=output_name),
             base_graph,
-            int(base["payload_version"]),
+            base.payload_version,
         )
         _atomic_write(output_path, payload)
         parsed = parse_serum2_preset(output_path)
@@ -410,19 +348,15 @@ def write_serum2_preset(
             path=output_path,
             mode="copied-native-branded",
             base_preset_id=base_preset_id,
+            base_identity=base.identity,
             applied_fields=0,
             skipped_fields=(),
             graph_sha256=_json_fingerprint(parsed.data),
             asset_references=asset_references(parsed.data),
         )
 
-    schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
-    stored_targets = np.load(target_path)
-    target_ids = np.asarray(stored_targets["preset_ids"], dtype=np.int64)
-    matches = np.flatnonzero(target_ids == base_preset_id)
-    if len(matches) != 1:
-        raise RuntimeError(f"Serum 2 target store has no unique row for {base_preset_id}")
-    base_vector = np.asarray(stored_targets["vectors"][int(matches[0])], dtype=np.float32)
+    schema = json.loads(Path(schema_path or _runtime_schema_path()).read_text(encoding="utf-8"))
+    base_vector = base.base_vector
     intended, applied, skipped = overlay_vector(
         base_graph, schema, vector, mask, base_vector
     )
@@ -433,9 +367,9 @@ def write_serum2_preset(
         applied += len(structural_overrides)
     intended_assets = asset_references(intended)
 
-    metadata = branded_serum2_metadata(base["metadata"], name=output_name)
+    metadata = branded_serum2_metadata(base.metadata, name=output_name)
 
-    payload = encode_serum2_preset(metadata, intended, int(base["payload_version"]))
+    payload = encode_serum2_preset(metadata, intended, base.payload_version)
     _atomic_write(output_path, payload)
     parsed = parse_serum2_preset(output_path)
     if parsed.data != intended:
@@ -453,6 +387,7 @@ def write_serum2_preset(
         path=output_path,
         mode="optimized-overlay",
         base_preset_id=base_preset_id,
+        base_identity=base.identity,
         applied_fields=applied,
         skipped_fields=skipped,
         graph_sha256=_json_fingerprint(parsed.data),

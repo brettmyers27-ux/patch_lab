@@ -53,13 +53,21 @@ def _report_contents(*, ticket_id: str, comments: str, logs: str) -> str:
     )
 
 
-def create_request(*, comments: str, logs: str) -> Path:
-    """Create the one durable local ticket before attempting any network call."""
+def create_request(*, comments: str, logs: str, ticket_id: str | None = None) -> Path:
+    """Create the one durable local ticket before attempting any network call.
+
+    ``ticket_id`` lets an automatic report reuse an identifier it already
+    owns (a save incident's id), so the ticket and the incident are one name.
+    """
 
     cleaned_comments = comments.strip()
     if not cleaned_comments:
         raise ValueError("A description is required before sending a bug report.")
-    ticket_id = uuid.uuid4().hex
+    if ticket_id is not None and (
+        len(ticket_id) != 32 or any(char not in "0123456789abcdef" for char in ticket_id)
+    ):
+        raise ValueError("Bug report ticket identifier is invalid.")
+    ticket_id = ticket_id or uuid.uuid4().hex
     root = reports_root()
     path = root / f"PatchLab Bug Report {ticket_id}.txt"
     temporary = path.with_name(f".{path.name}.tmp")
