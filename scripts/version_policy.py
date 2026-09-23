@@ -48,6 +48,39 @@ def next_version(version: tuple[int, int, int]) -> tuple[int, int, int]:
     )
 
 
+def is_valid_transition(
+    old: tuple[int, int, int],
+    new: tuple[int, int, int],
+    *,
+    base: tuple[int, int, int] | None = None,
+) -> bool:
+    """Whether ``old -> new`` is an acceptable version change for one commit.
+
+    A single release (say 1.5.6) is normally built across many commits, so
+    once a branch has actually moved past the last *released* version
+    (``base``, typically what origin/main ships), staying at that same
+    version is fine -- most commits touch no version-worthy behavior change,
+    or are additional work belonging to the same still-unpublished release.
+
+    Advancing by exactly one step (:func:`next_version`) is always allowed,
+    whether that is the commit that first leaves ``base`` or a later commit
+    that decides the release needs to be renumbered again before it ships.
+
+    Going backward, skipping a step, or staying at ``base`` itself (which
+    would mean the branch never actually started preparing a new release) is
+    never allowed. When ``base`` is unknown (no released reference could be
+    found), the strict historical rule applies: every commit must advance --
+    the safe default rather than silently accepting "no change".
+    """
+
+    if new == old:
+        return base is not None and old != base
+    try:
+        return new == next_version(old)
+    except ValueError:
+        return False
+
+
 def replace_version(text: str, version: tuple[int, int, int]) -> str:
     if VERSION_PATTERN.search(text) is None:
         raise ValueError("app/__version__.py does not contain a valid __version__")

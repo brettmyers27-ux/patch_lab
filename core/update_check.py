@@ -13,6 +13,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -44,6 +45,142 @@ class MacOSPackageRelease:
     version: str
     size: int
     sha256: str
+
+
+class UpdateCheckState(str, Enum):
+    """The four outcomes a version check can actually have.
+
+    A tester on 1.5.5 hit a real ``TimeoutError`` reaching the private
+    release catalog, and PatchLab reported ``update_available: false`` --
+    indistinguishable from genuinely being current. Whatever produces a
+    check result must say which of these four happened, never collapse
+    a failure into "no update".
+    """
+
+    CURRENT = "current"
+    UPDATE_AVAILABLE = "update_available"
+    CHECK_FAILED = "check_failed"
+    AUTH_REQUIRED = "auth_required"
+
+
+#: Why a CHECK_FAILED happened, for diagnostics and for picking a message.
+#: Never a raw exception class or traceback -- see UpdateCheckOutcome.user_message.
+FailureCategory = str  # one of: "", "timeout", "network", "invalid_response", "unknown"
+
+_FAILURE_MESSAGES: dict[str, str] = {
+    "timeout": (
+        "PatchLab couldn't reach the update service in time. "
+        "Check your internet connection and try again."
+    ),
+    "network": (
+        "PatchLab couldn't check for updates right now. "
+        "Check your internet connection and try again."
+    ),
+    "invalid_response": (
+        "PatchLab couldn't understand the update service's response. Try again later."
+    ),
+    "unknown": (
+        "PatchLab couldn't check for updates right now. Try again in a moment."
+    ),
+}
+_DEFAULT_CHECK_FAILED_MESSAGE = _FAILURE_MESSAGES["unknown"]
+_AUTH_REQUIRED_MESSAGE = (
+    "PatchLab needs you to sign in to the support service to check for updates."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateCheckOutcome:
+    """One update check's result: exactly one of the four states above.
+
+    ``as_dict()`` is what workers print as ``UPDATE_CHECK_RESULT=``. It keeps
+    the historical ``update_available`` boolean for any older reader, but
+    ``state`` is authoritative -- a boolean alone can never distinguish
+    "current" from "the check failed".
+    """
+
+    state: UpdateCheckState
+    current_version: str
+    remote_version: str | None = None
+    package: dict[str, Any] | None = None
+    failure_category: FailureCategory = ""
+    user_message: str = ""
+
+    @classmethod
+    def current(cls, current_version: str) -> "UpdateCheckOutcome":
+        return cls(UpdateCheckState.CURRENT, current_version)
+
+    @classmethod
+    def available(
+        cls, current_version: str, remote_version: str, package: dict[str, Any] | None = None
+    ) -> "UpdateCheckOutcome":
+        return cls(
+            UpdateCheckState.UPDATE_AVAILABLE, current_version,
+            remote_version=remote_version, package=package,
+        )
+
+    @classmethod
+    def failed(
+        cls, current_version: str, *, category: FailureCategory = "unknown"
+    ) -> "UpdateCheckOutcome":
+        message = _FAILURE_MESSAGES.get(category, _DEFAULT_CHECK_FAILED_MESSAGE)
+        return cls(
+            UpdateCheckState.CHECK_FAILED, current_version,
+            failure_category=category or "unknown", user_message=message,
+        )
+
+    @classmethod
+    def auth_required(cls, current_version: str) -> "UpdateCheckOutcome":
+        return cls(
+            UpdateCheckState.AUTH_REQUIRED, current_version,
+            user_message=_AUTH_REQUIRED_MESSAGE,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "state": self.state.value,
+            "current_version": self.current_version,
+            "remote_version": self.remote_version,
+            # Historical field: only ever true for UPDATE_AVAILABLE. A reader
+            # that still only checks this boolean degrades safely to "no
+            # update to offer" for CHECK_FAILED/AUTH_REQUIRED, same as before
+            # -- it just no longer *claims* those states mean "current".
+            "update_available": self.state is UpdateCheckState.UPDATE_AVAILABLE,
+        }
+        if self.package is not None:
+            payload["package"] = self.package
+        if self.failure_category:
+            payload["failure_category"] = self.failure_category
+        if self.user_message:
+            payload["user_message"] = self.user_message
+        return payload
+
+
+def classify_update_check_exception(exc: BaseException) -> FailureCategory:
+    """Sort a relay-check exception into one plain, non-secret category.
+
+    Never returns exception text -- ``str(exc)`` for an HTTP or connection
+    error can include the request URL, which stays in structured diagnostics
+    only (see ``scripts/check_for_update.py``), never in what this returns.
+    """
+
+    # A read/connect timeout surfaces either as a bare TimeoutError (Python's
+    # http.client raising directly) or wrapped in URLError(reason=timeout()).
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, urllib.error.HTTPError):
+        # 401 means the stored passcode/token can no longer authenticate --
+        # nothing a retry can fix. Any other status is a service problem.
+        return "auth" if exc.code == 401 else "network"
+    if isinstance(exc, urllib.error.URLError):
+        if isinstance(exc.reason, TimeoutError):
+            return "timeout"
+        return "network"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "network"
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return "invalid_response"
+    return "unknown"
 
 
 def macos_package_releases(rows: Iterable[dict[str, Any]]) -> list[MacOSPackageRelease]:

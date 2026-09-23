@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.db import DEFAULT_DB_PATH, Database, PresetRecord
 from core.render import DEFAULT_AUDIO_ROOT, RenderControl, render_library, summary_dict
+from core.privacy import distribution_mode
 
 
 REFERENCE_SERUM2_NAMES = {
@@ -86,10 +87,43 @@ def handle_signal(signum: int, _frame: object) -> None:
         _CONTROL.cancel()
 
 
+def _resolve_local_paths(args: argparse.Namespace) -> tuple[Path, Path, Path | None]:
+    """Where this run's database, audio, and Serum 2 render states live.
+
+    ``--db``/``--audio-root``/``--state-dir`` are for tests and the gate
+    scripts that intentionally point this at a disposable location; every
+    other caller (the GUI, or this script invoked directly) must land on the
+    one place PatchLab actually keeps a user's data. A packaged app has no
+    ``data/`` checkout beside its own source for ``DEFAULT_DB_PATH`` et al.
+    to mean anything -- a missing ``--db`` there must not silently create and
+    render into a brand-new, empty database at a path nobody will find.
+
+    A development checkout keeps today's convenience of its own populated
+    ``data/library.db`` for manual testing without touching a real user's
+    app data, which the GUI itself never depended on: it always passes these
+    three explicitly once ``self.distribution_mode`` is true.
+    """
+
+    from core.local_library import default_local_paths
+
+    if distribution_mode():
+        packaged = default_local_paths()
+        return (
+            args.db or packaged["db"],
+            args.audio_root or packaged["audio"],
+            args.state_dir or packaged["states"],
+        )
+    return (
+        args.db or DEFAULT_DB_PATH,
+        args.audio_root or DEFAULT_AUDIO_ROOT,
+        args.state_dir,  # None keeps render_library()'s own dev-checkout fallback
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
-    parser.add_argument("--audio-root", type=Path, default=DEFAULT_AUDIO_ROOT)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--audio-root", type=Path)
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--preset-id", type=int, action="append")
@@ -101,7 +135,9 @@ def main() -> int:
     print(f"RENDER_PROCESS_PID={os.getpid()}", flush=True)
     if args.gate50 and args.preset_id:
         parser.error("--gate50 and --preset-id are mutually exclusive")
-    database = Database(args.db)
+    db_path, audio_root, state_dir = _resolve_local_paths(args)
+    args.db, args.audio_root, args.state_dir = db_path, audio_root, state_dir
+    database = Database(db_path)
     preset_ids = gate_selection(database) if args.gate50 else args.preset_id
     if preset_ids is not None:
         selected = [record for record in database.renderable_presets() if record.id in set(preset_ids)]

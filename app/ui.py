@@ -325,7 +325,9 @@ class LegacyMainWindow(QMainWindow):
         self.update_check_runner = UpdateCheckProcessRunner(self)
         self.update_check_runner.log.connect(self.append_log)
         self.update_check_runner.completed.connect(self._update_check_completed)
-        self.update_check_runner.failed.connect(self.append_log)
+        self.update_check_runner.failed.connect(self._update_check_failed)
+        self._update_check_manual = False
+        self._update_check_auth_retry_attempted = False
         self.update_download_runner = UpdateDownloadProcessRunner(self)
         self.update_download_runner.log.connect(self.append_log)
         self.update_download_runner.progress.connect(self._update_download_progress)
@@ -1065,19 +1067,102 @@ class LegacyMainWindow(QMainWindow):
             return
         if self.update_check_runner.running:
             return
+        self._start_update_check(manual=False)
+
+    def _start_update_check(self, *, manual: bool) -> None:
+        """The one place that launches a check, so completion knows its origin.
+
+        A manual click and a quiet startup check share the same worker and
+        the same completion signal; only ``manual`` decides whether a
+        CHECK_FAILED or AUTH_REQUIRED result gets a dialog. A manual check
+        always resolves to something the user sees -- see
+        ``_update_check_completed``/``_update_check_failed``.
+
+        Does not touch ``_update_check_auth_retry_attempted``: this is also
+        how the sign-in retry itself re-launches the check, and resetting
+        the flag here would let that retry's own result trigger a second,
+        unbounded sign-in attempt. Only a genuinely new manual request (the
+        button) resets it.
+        """
+
+        self._update_check_manual = manual
         self.update_check_runner.start()
 
     def _update_check_completed(self, result: dict, *, env: PlatformEnv = ENV) -> None:
-        remote = result.get("remote_version")
-        if not result.get("update_available") or not remote:
+        manual = getattr(self, "_update_check_manual", False)
+        state = str(
+            result.get("state")
+            or ("update_available" if result.get("update_available") else "current")
+        )
+        if state == "update_available":
+            remote = result.get("remote_version")
+            if not remote:
+                return
+            # A manual click means the user wants the real answer now, even
+            # for a version they previously chose to skip.
+            if not manual and load_update_preferences(env).skipped_version == remote:
+                return
+            self._update_check_auth_retry_attempted = False
+            package = result.get("package")
+            if isinstance(package, dict):
+                self._prompt_update_available(str(remote), package=package, env=env)
+            else:
+                self._prompt_update_available(str(remote), env=env)
             return
-        if load_update_preferences(env).skipped_version == remote:
+        if state == "auth_required":
+            self._handle_update_check_auth_required(manual=manual)
             return
-        package = result.get("package")
-        if isinstance(package, dict):
-            self._prompt_update_available(str(remote), package=package, env=env)
+        if state == "check_failed":
+            message = str(
+                result.get("user_message")
+                or "PatchLab couldn't check for updates right now. Try again in a moment."
+            )
+            self.append_log(
+                f"Update check failed ({result.get('failure_category', 'unknown')}): {message}"
+            )
+            if manual:
+                QMessageBox.information(self, "Couldn't check for updates", message)
+            return
+        # CURRENT: automatic checks stay silent; a manual click still needs
+        # an answer, or clicking the button would look like nothing happened.
+        self._update_check_auth_retry_attempted = False
+        if manual:
+            QMessageBox.information(
+                self, "You're up to date", f"PatchLab is up to date (v{__version__})."
+            )
+
+    def _update_check_failed(self, error: str) -> None:
+        """The worker process itself did not complete (a crash, not CHECK_FAILED)."""
+
+        self.append_log(error)
+        if getattr(self, "_update_check_manual", False):
+            QMessageBox.information(
+                self,
+                "Couldn't check for updates",
+                "PatchLab couldn't check for updates right now. Try again in a moment.",
+            )
+
+    def _handle_update_check_auth_required(self, *, manual: bool) -> None:
+        if not manual:
+            # Startup checks must never pop a sign-in dialog unprompted --
+            # core.access_gate.ensure_relay_token() already tried silently at
+            # launch. Just record it; a manual check will surface this.
+            self.append_log("Update check needs sign-in; try Check for Updates Now.")
+            return
+        if getattr(self, "_update_check_auth_retry_attempted", False):
+            QMessageBox.information(
+                self,
+                "Sign-in needed",
+                "PatchLab needs you to sign in to the support service to check for updates.",
+            )
+            return
+        self._update_check_auth_retry_attempted = True
+        self.append_log("Update check needs sign-in; asking now…")
+        if self._reconnect_support_service() and not self.update_check_runner.running:
+            self.append_log("Signed in; re-checking for updates…")
+            self._start_update_check(manual=True)
         else:
-            self._prompt_update_available(str(remote), env=env)
+            self.append_log("Sign-in was not completed; couldn't check for updates.")
 
     def _prompt_update_available(
         self,
@@ -1918,14 +2003,131 @@ class LegacyMainWindow(QMainWindow):
             ),
         )
 
+    #: One plain sentence per playback failure kind. Never a PortAudio error
+    #: code or an exception class -- those stay in diagnostics (see
+    #: ``_report_playback_failure``).
+    _PLAYBACK_MESSAGES = {
+        "missing_file": "PatchLab can't find this audio file anymore.",
+        "unsupported_audio": (
+            "PatchLab can't play this audio file. It may be corrupted or in "
+            "an unsupported format."
+        ),
+        "no_device": "PatchLab couldn't find an audio output device.",
+        "device_error": (
+            "PatchLab couldn't use your current audio output. Check your "
+            "speakers or headphones and try again."
+        ),
+        "unknown": (
+            "PatchLab couldn't play this audio. Check that your audio output "
+            "device is connected, then try again."
+        ),
+    }
+
     @staticmethod
-    def _play_audio(path: Path) -> None:
+    def _reset_audio_devices() -> None:
+        """Force PortAudio to re-enumerate host APIs and devices.
+
+        The documented workaround (there is no public API for it) for a
+        stream that fails after the OS default output device changed or
+        disappeared mid-session -- exactly the shape of the tester's
+        "paErrorCode -9986" report. Never touches the user's actual system
+        audio settings; it only makes this process forget its stale view of
+        them.
+        """
+
+        import sounddevice as sd
+
+        for step in (sd._terminate, sd._initialize):
+            try:
+                step()
+            except Exception:
+                pass
+
+    def _classify_playback_exception(self, exc: BaseException) -> str:
+        """Ask PortAudio itself whether a device exists, rather than parsing text."""
+
+        import sounddevice as sd
+
+        if isinstance(exc, sd.PortAudioError):
+            try:
+                sd.query_devices(kind="output")
+            except Exception:
+                return "no_device"
+            return "device_error"
+        return "unknown"
+
+    def _report_playback_failure(
+        self, category: str, *, exc: BaseException | None = None, path: Path | None = None
+    ) -> None:
+        message = self._PLAYBACK_MESSAGES.get(category, self._PLAYBACK_MESSAGES["unknown"])
+        self.append_log(f"Playback failed ({category}): {exc if exc is not None else message}")
+        self.statusBar().showMessage(message)
+        try:
+            from core.diagnostics import recorder
+
+            recorder().record(
+                "playback", "playback_failed",
+                f"audio playback failed: {category}",
+                severity="warning",
+                failure_category=category,
+                path=str(path) if path is not None else "",
+                exception_type=type(exc).__name__ if exc is not None else "",
+            )
+        except Exception:
+            pass
+
+    def _record_playback_recovered(self, path: Path) -> None:
+        try:
+            from core.diagnostics import recorder
+
+            recorder().record(
+                "playback", "playback_recovered",
+                "audio device reset succeeded on retry", severity="info",
+                path=str(path),
+            )
+        except Exception:
+            pass
+
+    def _play_audio(self, path: Path) -> bool:
+        """Play one audio file. The one place every audition surface calls.
+
+        Handles every failure kind this app's audition, preview, and Library
+        playback share: a missing/unreadable file, unsupported or corrupt
+        audio, no output device, or a PortAudio/device error -- for which
+        exactly one bounded recovery attempt (reset PortAudio's device view,
+        retry once) is made before giving up. Returns whether playback
+        started; a caller may still show its own success message on True,
+        but never needs to handle failure itself -- this already has.
+        """
+
         import sounddevice as sd
         import soundfile as sf
 
-        audio, rate = sf.read(path, dtype="float32", always_2d=True)
-        sd.stop()
-        sd.play(audio, rate, blocking=False)
+        path = Path(path)
+        if not path.is_file():
+            self._report_playback_failure("missing_file", path=path)
+            return False
+        try:
+            audio, rate = sf.read(path, dtype="float32", always_2d=True)
+        except Exception as exc:
+            self._report_playback_failure("unsupported_audio", exc=exc, path=path)
+            return False
+
+        last_exc: BaseException | None = None
+        for attempt in (1, 2):
+            try:
+                sd.stop()
+                sd.play(audio, rate, blocking=False)
+                if attempt == 2:
+                    self._record_playback_recovered(path)
+                return True
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 1:
+                    self._reset_audio_devices()
+        category = self._classify_playback_exception(last_exc) if last_exc else "unknown"
+        self._report_playback_failure(category, exc=last_exc, path=path)
+        return False
 
     def _match_completed(self, result_path: str) -> None:
         self._ui_event(
@@ -2257,10 +2459,10 @@ class LegacyMainWindow(QMainWindow):
 
         cached = preview_cache_path(self._preview_cache_root(), cache_key, note)
         if cached.is_file():
-            self._play_audio(cached)
-            self.statusBar().showMessage(
-                f"Playing cached C{1 + (note - 24) // 12} preview"
-            )
+            if self._play_audio(cached):
+                self.statusBar().showMessage(
+                    f"Playing cached C{1 + (note - 24) // 12} preview"
+                )
             return
 
         # Migrate existing durable/local renders without asking Serum to render
@@ -2281,10 +2483,10 @@ class LegacyMainWindow(QMainWindow):
         for source in migration_sources:
             if source.is_file():
                 self._copy_preview_into_cache(source, cached)
-                self._play_audio(cached)
-                self.statusBar().showMessage(
-                    f"Playing cached C{1 + (note - 24) // 12} preview"
-                )
+                if self._play_audio(cached):
+                    self.statusBar().showMessage(
+                        f"Playing cached C{1 + (note - 24) // 12} preview"
+                    )
                 return
 
         original_text = button.text() if button is not None else ""
@@ -2897,7 +3099,9 @@ class MainWindow(LegacyMainWindow):
         self.update_check_runner = UpdateCheckProcessRunner(self)
         self.update_check_runner.log.connect(self.append_log)
         self.update_check_runner.completed.connect(self._update_check_completed)
-        self.update_check_runner.failed.connect(self.append_log)
+        self.update_check_runner.failed.connect(self._update_check_failed)
+        self._update_check_manual = False
+        self._update_check_auth_retry_attempted = False
         self.update_download_runner = UpdateDownloadProcessRunner(self)
         self.update_download_runner.log.connect(self.append_log)
         self.update_download_runner.progress.connect(self._update_download_progress)
@@ -3910,8 +4114,8 @@ class MainWindow(LegacyMainWindow):
         if record is None:
             return
         source, _result = resolved_record_paths(record, self._match_library_root())
-        self._play_audio(source)
-        self.statusBar().showMessage(f"Playing archived source — {record.source_name}")
+        if self._play_audio(source):
+            self.statusBar().showMessage(f"Playing archived source — {record.source_name}")
 
     def play_library_octave(
         self, match_uid: str, note: int, button: QPushButton
@@ -5084,7 +5288,10 @@ class MainWindow(LegacyMainWindow):
                     )
                     return
                 self.append_log("Checking for a PatchLab update…")
-                self.update_check_runner.start()
+                # A genuinely new request from the user: any earlier sign-in
+                # attempt (this session, an earlier click) no longer applies.
+                self._update_check_auth_retry_attempted = False
+                self._start_update_check(manual=True)
 
             check_now = QPushButton("Check for Updates Now")
             check_now.setObjectName("compactActionButton")
@@ -6126,17 +6333,12 @@ class MainWindow(LegacyMainWindow):
         if self._match_audio_path is None:
             return
         if not self._match_audio_path.is_file():
-            message = "The uploaded audio file is no longer available."
-            self.append_log(message)
-            self.statusBar().showMessage(message)
+            # Specific to this surface: the drop zone itself should stop
+            # offering to replay a file that is provably gone, not just this
+            # one click. _play_audio's own missing-file message covers any
+            # other caller that hits the same path.
             self.match_drop.set_playable(False)
-            return
-        try:
-            self._play_audio(self._match_audio_path)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the user below
-            message = f"Could not play the uploaded audio: {exc}"
-            self.append_log(message)
-            self.statusBar().showMessage(message)
+        if not self._play_audio(self._match_audio_path):
             return
         self.statusBar().showMessage(
             f"Playing uploaded audio — {self._match_audio_path.name}"
