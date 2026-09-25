@@ -209,6 +209,12 @@ def freeze_app(*, work_root: Path, allow_dirty: bool) -> Path:
 
     _require_tool("xcrun")
     environment = dict(os.environ)
+    # PyInstaller imports optional Hugging Face modules while analyzing the
+    # application. A release build must use the same bundled, offline model
+    # contract as the frozen app and must never turn a local build into a
+    # network retry because a tokenizer metadata probe is unavailable.
+    environment.setdefault("HF_HUB_OFFLINE", "1")
+    environment.setdefault("TRANSFORMERS_OFFLINE", "1")
     # PyInstaller otherwise cleans its shared per-user cache before a build.
     # A stale cache created by another macOS sandboxed process can be
     # undeletable, aborting a perfectly valid release build before it reaches
