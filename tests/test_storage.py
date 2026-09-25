@@ -13,6 +13,9 @@ import soundfile as sf
 
 from core.db import Database
 from core.factory_match import _local_search_rows
+from core.library_state import mark_preset_prepared, reconcile_source_tree
+from core.plugin_host import ParameterValue
+from core.prepared_state import REQUIRED_FINGERPRINT_NOTES
 from core.render import MIDI_NOTES
 from core.storage import (
     StoragePreferences,
@@ -324,23 +327,26 @@ def test_compacted_local_match_stays_searchable_without_a_full_render(
     database = Database(tmp_path / "app-data" / "library.db")
     source = tmp_path / "Preset.fxp"
     source.write_bytes(b"preset")
-    preset_id, _ = database.insert_preset(
-        path=source,
-        name="Real Preset Name",
-        synth="serum1",
-        content_hash="searchable-hash",
-    )
-    database.upsert_fingerprint(
+    preset_id = reconcile_source_tree(tmp_path, database).entries[0].preset_id
+    database.replace_params(
         preset_id,
-        0,
-        np.ones(512, dtype=np.float32).tobytes(),
-        np.zeros(10, dtype=np.float32).tobytes(),
+        [ParameterValue(0, "Volume", 0.5, "50%")],
+        "test",
     )
+    for note in REQUIRED_FINGERPRINT_NOTES:
+        database.upsert_fingerprint(
+            preset_id,
+            note,
+            np.ones(512, dtype=np.float32).tobytes(),
+            np.zeros(9, dtype=np.float32).tobytes(),
+        )
     with database.connect() as connection:
         connection.execute(
-            "UPDATE presets SET status='embedded',is_factory=0 WHERE id=?",
+            "UPDATE presets SET status='embedded',is_factory=0,name='Real Preset Name' "
+            "WHERE id=?",
             (preset_id,),
         )
+    assert mark_preset_prepared(database, preset_id)
 
     matrix, rows = _local_search_rows(database.path, tmp_path / "external-audio")
 

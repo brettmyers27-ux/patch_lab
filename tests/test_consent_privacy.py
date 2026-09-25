@@ -22,7 +22,9 @@ import pytest
 from core import local_library as library
 from core.db import Database
 from core.factory_match import _local_search_rows
+from core.library_state import mark_preset_prepared, reconcile_source_tree
 from core.plugin_host import ParameterValue
+from core.prepared_state import REQUIRED_FINGERPRINT_NOTES
 from core.preset_scan import sha1_file
 from core.privacy import (
     PrivacyStore,
@@ -59,14 +61,20 @@ def _add(database: Database, folder: Path, name: str, *, factory: bool, rendered
     path = folder / f"{name}.fxp"
     path.write_bytes(b"CcnK" + name.encode() * 4)
     preset_id, _ = database.insert_preset(path=path, name=name, synth="serum1", content_hash=sha1_file(path))
+    reconcile_source_tree(folder, database)
     database.replace_params(preset_id, [ParameterValue(0, "Master", 0.5, "50%")], "test")
     database.set_factory_status(preset_id, factory)
     if rendered:
-        database.upsert_fingerprint(
-            preset_id, 0, np.ones(512, dtype=np.float32).tobytes(), np.zeros(10, dtype=np.float32).tobytes()
-        )
+        for note in REQUIRED_FINGERPRINT_NOTES:
+            database.upsert_fingerprint(
+                preset_id,
+                note,
+                np.ones(512, dtype=np.float32).tobytes(),
+                np.zeros(9, dtype=np.float32).tobytes(),
+            )
         with database.connect() as connection:
             connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+        assert mark_preset_prepared(database, preset_id)
     return preset_id
 
 
@@ -157,7 +165,9 @@ def test_B_off_makes_stored_presets_inactive_but_deletes_nothing(consent, librar
     assert {r.id for r in database.presets_with_status(["rendered"])} == {ids["factory"]}
     assert _rows(database) == before, "OFF never deletes or edits stored data"
     with sqlite3.connect(database.path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM fingerprints").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM fingerprints").fetchone()[0] == (
+            2 * len(REQUIRED_FINGERPRINT_NOTES)
+        )
 
 
 def test_B_off_stops_scan_render_and_upload_entry_points(consent, library_db, tmp_path: Path) -> None:

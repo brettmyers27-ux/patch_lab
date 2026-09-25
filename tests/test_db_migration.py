@@ -1,4 +1,4 @@
-"""Upgrading an existing library to the 1.5.4 schema must never lose or reinterpret data.
+"""Upgrading an existing library to schema 7 must never lose user data.
 
 A user upgrading has thousands of learned presets and a Match library. This is a
 release blocker: the migration must succeed automatically, keep every row, keep
@@ -53,12 +53,16 @@ TABLES = (
 def build_schema5_library(path: Path, *, presets: int = 40) -> None:
     """A populated library in exactly the layout the last production build wrote.
 
-    ``SCHEMA_SQL`` has not changed since schema 5 (the new columns are added by
-    ALTER), so executing it and recording version 5 reproduces that layout.
+    The current base schema still describes every legacy table. The two schema-7
+    state tables are removed below so the fixture reproduces the old layout.
     """
 
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA_SQL)
+    # SCHEMA_SQL describes the current new-database shape. A real schema-5
+    # database predates the two schema-7 state tables.
+    connection.execute("DROP TABLE prepared_presets")
+    connection.execute("DROP TABLE preset_sources")
     connection.execute("INSERT INTO schema_migrations(version) VALUES (5)")
     statuses = ("scanned", "params_dumped", "rendered", "embedded", "failed_load", "failed_silent")
     for index in range(1, presets + 1):
@@ -165,7 +169,7 @@ def test_upgrade_preserves_every_row_and_adds_the_new_columns(tmp_path: Path) ->
     assert dump(path) == before, "no existing row may change in any table"
     assert set(NEW_COLUMNS) <= columns_of(path)
     assert versions_of(path) == [5, SCHEMA_VERSION]
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_new_fields_start_empty_and_nothing_is_marked_pending(tmp_path: Path) -> None:
@@ -345,7 +349,7 @@ def test_a_copy_of_a_real_pre_upgrade_library_migrates_cleanly(tmp_path: Path) -
 
     path = tmp_path / "real-copy.db"
     shutil.copy2(REAL_BACKUP, path)
-    assert 6 not in versions_of(path) and not columns_of(path) & set(NEW_COLUMNS)
+    assert 7 not in versions_of(path) and not columns_of(path) & set(NEW_COLUMNS)
     before = dump(path)
     assert len(before["presets"]) > 1000
 

@@ -16,7 +16,7 @@ from core.plugin_host import ParameterValue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "library.db"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +137,30 @@ CREATE TABLE IF NOT EXISTS fingerprints (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (preset_id,midi_note)
 );
+CREATE TABLE IF NOT EXISTS preset_sources (
+  id INTEGER PRIMARY KEY,
+  preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
+  normalized_path TEXT NOT NULL,
+  source_root TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  last_seen_scan TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(normalized_path,content_hash)
+);
+CREATE TABLE IF NOT EXISTS prepared_presets (
+  preset_id INTEGER PRIMARY KEY REFERENCES presets(id) ON DELETE CASCADE,
+  render_revision TEXT NOT NULL,
+  fingerprint_revision TEXT NOT NULL,
+  clap_revision TEXT NOT NULL,
+  handcrafted_revision TEXT NOT NULL,
+  serum1_schema_revision TEXT NOT NULL,
+  serum2_schema_revision TEXT NOT NULL,
+  prepared_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS favorites (
   content_hash TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -177,6 +201,12 @@ CREATE INDEX IF NOT EXISTS idx_serum2_full_settings_sha256
   ON serum2_full_settings(settings_sha256);
 CREATE INDEX IF NOT EXISTS idx_renders_preset ON renders(preset_id);
 CREATE INDEX IF NOT EXISTS idx_fingerprints_preset ON fingerprints(preset_id);
+CREATE INDEX IF NOT EXISTS idx_preset_sources_preset_active
+  ON preset_sources(preset_id,active);
+CREATE INDEX IF NOT EXISTS idx_preset_sources_root_active
+  ON preset_sources(source_root,active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_preset_sources_one_active_path
+  ON preset_sources(normalized_path) WHERE active=1;
 CREATE INDEX IF NOT EXISTS idx_match_library_created ON match_library(created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_match_library_batch ON match_library(batch_id);
 CREATE INDEX IF NOT EXISTS idx_match_library_hash ON match_library(source_content_hash);
@@ -250,13 +280,19 @@ class Database:
 
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            current_version = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(version),0) FROM schema_migrations"
+                ).fetchone()[0]
+            )
             existing = self._preset_columns(connection)
             missing = [
                 (name, definition)
                 for name, definition in self._PRESET_COLUMNS_ADDED_LATER
                 if name not in existing
             ]
-            if missing:
+            needs_schema_7 = current_version < 7
+            if missing or needs_schema_7:
                 connection.execute("BEGIN IMMEDIATE")
                 # Re-read under the lock: another PatchLab process may have
                 # finished the same migration while this one waited.
@@ -266,6 +302,8 @@ class Database:
                         connection.execute(
                             f"ALTER TABLE presets ADD COLUMN {name} {definition}"
                         )
+                if needs_schema_7:
+                    self._migrate_schema_7_state(connection)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS presets_pending_reason "
                 "ON presets(pending_reason)"
@@ -274,6 +312,76 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                 (SCHEMA_VERSION,),
             )
+
+    @staticmethod
+    def _migrate_schema_7_state(connection: sqlite3.Connection) -> None:
+        """Seed source snapshots and justified revisions for schema-6 rows."""
+
+        import hashlib
+        import os
+
+        from core.prepared_state import record_prepared_revision
+
+        rows = connection.execute(
+            "SELECT id,path,content_hash FROM presets ORDER BY id"
+        ).fetchall()
+        by_path: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            path = Path(str(row["path"])).expanduser().resolve()
+            normalized = os.path.normcase(str(path))
+            by_path.setdefault(normalized, []).append(row)
+
+        for normalized, path_rows in by_path.items():
+            path = Path(normalized)
+            try:
+                stat = path.stat()
+            except OSError:
+                size, mtime_ns, current_hash, file_exists = 0, 0, None, False
+            else:
+                size, mtime_ns = stat.st_size, stat.st_mtime_ns
+                file_exists = True
+                current_hash = None
+                if len(path_rows) > 1:
+                    try:
+                        digest = hashlib.sha1()
+                        with path.open("rb") as handle:
+                            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                    except OSError:
+                        file_exists = False
+                    else:
+                        current_hash = digest.hexdigest()
+            for row in path_rows:
+                # Old databases can contain several content rows with the same
+                # path after an in-place edit. Hash only those ambiguous paths;
+                # activate the row that still matches the bytes on disk.
+                active = int(
+                    file_exists
+                    and (
+                        len(path_rows) == 1
+                        or str(row["content_hash"]) == current_hash
+                    )
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO preset_sources(
+                      preset_id,normalized_path,source_root,file_size,mtime_ns,
+                      content_hash,active,last_seen_scan
+                    ) VALUES (?,?,?,?,?,?,?,NULL)
+                    """,
+                    (
+                        int(row["id"]),
+                        normalized,
+                        os.path.normcase(str(path.parent)),
+                        int(size),
+                        int(mtime_ns),
+                        str(row["content_hash"]),
+                        active,
+                    ),
+                )
+                # Fully learned legacy data receives the current revision without
+                # rerendering. Partial data deliberately remains unprepared.
+                record_prepared_revision(connection, int(row["id"]))
 
     @staticmethod
     def _preset_columns(connection: sqlite3.Connection) -> set[str]:

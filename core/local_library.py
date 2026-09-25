@@ -18,6 +18,7 @@ from core.contribution_bundle import LEDGER_NAME
 from core.db import Database
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.features import ClapEmbedder, handcrafted_features, load_audio_48k_mono
+from core.library_state import mark_preset_prepared, reconcile_source_tree
 from core.platform_env import ENV, PlatformEnv
 from core.plugin_host import ParameterValue
 from core.privacy import UserPresetsDisabled, require_user_presets, user_presets_enabled
@@ -26,7 +27,6 @@ from core.preset_scan import (
     SilentPresetError,
     discover_presets,
     sha1_file,
-    synth_for,
 )
 from core.render import MIDI_NOTES, render_library, summary_dict
 from core.serum2_preset import parse_serum2_preset
@@ -221,6 +221,7 @@ def _fingerprint_preset(
         np.ascontiguousarray(mean_embedding, dtype=np.float32).tobytes(),
         np.ascontiguousarray(mean_handcrafted, dtype=np.float32).tobytes(),
     )
+    mark_preset_prepared(database, preset_id)
     return True
 
 
@@ -816,8 +817,11 @@ def _process_linked_folder(
             **coverage,
         )
 
+    discovery = reconcile_source_tree(
+        root, database, paths=paths, hash_file=sha1_file
+    )
     id_to_path: dict[int, Path] = {}
-    new_or_pending: list[int] = []
+    new_or_pending_set: set[int] = set()
     pending_updates: dict[int, str | None] = {}
     if progress is not None:
         progress(
@@ -828,18 +832,15 @@ def _process_linked_folder(
                 "text": f"Scanning 0 of {len(paths):,} presets",
             }
         )
-    for discovered_index, path in enumerate(paths, start=1):
+    for discovered_index, entry in enumerate(discovery.entries, start=1):
         if discovered_index % 25 == 1:
             require_user_presets("scanning")
+        path = entry.path
         identity = identities[path]
         synth = identity.origin_generation
         assert synth is not None
-        digest = sha1_file(path)
-        preset_id, inserted = database.insert_preset(
-            path=path, name=path.stem, synth=synth, content_hash=digest
-        )
-        if not inserted:
-            summary.deduped_local += 1
+        digest = entry.content_hash
+        preset_id = entry.preset_id
         database.set_factory_status(preset_id, digest in known_factory)
         database.record_identity(
             preset_id,
@@ -856,7 +857,7 @@ def _process_linked_folder(
                 ).fetchone()[0]
             )
         if status in {"scanned", "failed_load"} and pending_updates[preset_id] is None:
-            new_or_pending.append(preset_id)
+            new_or_pending_set.add(preset_id)
         if progress is not None:
             progress(
                 {
@@ -868,6 +869,8 @@ def _process_linked_folder(
                     ),
                 }
             )
+    new_or_pending = sorted(new_or_pending_set)
+    summary.deduped_local = len(discovery.entries) - discovery.new_content
     # One transaction records every pending reason, so a 5,000-preset library
     # costs one write rather than 5,000.
     database.set_pending_reasons(pending_updates)
@@ -888,7 +891,10 @@ def _process_linked_folder(
             ),
             pending_by_reason=pending_counts,
         )
-    log(f"Local catalog: {len(paths)} files; {summary.deduped_local} already known locally")
+    log(
+        f"Local catalog: {len(paths)} files; {summary.deduped_local} already known locally; "
+        f"{discovery.hashes_computed} content hashes computed"
+    )
 
     # Route by the identity's compatible renderer, not by extension alone.
     serum1_ids = [

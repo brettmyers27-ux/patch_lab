@@ -277,19 +277,22 @@ def scan_and_ingest(
     paths = discover_presets(root)
     summary.found = len(paths)
     log(f"Found {summary.found} preset files under {root}")
-    for index, path in enumerate(paths, start=1):
-        synth = synth_for(path)
-        assert synth is not None
-        _preset_id, inserted = database.insert_preset(
-            path=path, name=path.stem, synth=synth, content_hash=sha1_file(path)
-        )
-        if inserted:
-            summary.inserted += 1
-        else:
-            summary.deduped += 1
+    # Local import avoids a module cycle: library_state uses this module's
+    # cheap discovery, classification, and hash helpers.
+    from core.library_state import reconcile_source_tree
+
+    discovery = reconcile_source_tree(
+        root, database, paths=paths, hash_file=sha1_file
+    )
+    summary.inserted = discovery.new_content
+    summary.deduped = len(discovery.entries) - discovery.new_content
+    for index, _entry in enumerate(discovery.entries, start=1):
         if progress:
             progress(index, max(len(paths), 1))
-    log(f"Cataloged {summary.inserted}; content-hash duplicates {summary.deduped}")
+    log(
+        f"Cataloged {summary.inserted}; content-hash duplicates {summary.deduped}; "
+        f"computed {discovery.hashes_computed} hashes"
+    )
 
     pending = database.presets_with_status(("scanned",))
     capabilities = load_capabilities()

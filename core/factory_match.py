@@ -19,6 +19,7 @@ from core.features import CLAP_SAMPLE_RATE, ClapEmbedder
 from core.match import cosine_topk
 from core.matcher import detect_midi_note, loudness_normalize
 from core.platform_env import ENV
+from core.prepared_state import prepared_predicate
 from core.serum2_targets import encode_graph_with_schema
 
 
@@ -97,14 +98,16 @@ def _local_search_rows(
     database_path = Path(database_path).resolve()
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
+    prepared, prepared_parameters = prepared_predicate("p")
     rows = connection.execute(
-        """
+        f"""
         SELECT p.id,p.content_hash,p.name,p.synth,p.path,f.embedding_f32
         FROM presets p JOIN fingerprints f ON f.preset_id=p.id
         WHERE f.midi_note=0 AND p.is_factory=0
-          AND p.status IN ('rendered','embedded')
+          AND {prepared}
         ORDER BY p.id
-        """
+        """,
+        prepared_parameters,
     ).fetchall()
     connection.close()
     if not rows:

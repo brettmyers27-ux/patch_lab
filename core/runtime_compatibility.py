@@ -17,6 +17,9 @@ from pathlib import Path
 RUNTIME_FAMILY_ID = "v1-legacy-stock-clap"
 CLAP_CHECKPOINT_NAME = "music_audioset_epoch_15_esc_90.14.pt"
 CLAP_CHECKPOINT_BYTES = 2_352_471_003
+CLAP_CHECKPOINT_SHA256 = (
+    "fbaf3a305704890450ec4604fe9a1ab806515b68827ec44a73f500c06c042baf"
+)
 
 
 @dataclass(frozen=True, slots=True)
