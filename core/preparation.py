@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock, get_ident
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
@@ -66,6 +68,15 @@ class RecoverySummary:
     cleanup_failures: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _PipelineItem:
+    """One durable job moving through the bounded render/analyze handoff."""
+
+    preset: PresetRecord
+    index: int
+    temp_dir: Path
+
+
 def analysis_temp_root(env: PlatformEnv = ENV) -> Path:
     return (Path(env.app_data_dir) / ANALYSIS_DIRECTORY_NAME).expanduser().resolve()
 
@@ -75,7 +86,9 @@ def _ensure_analysis_root(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     marker = root / ANALYSIS_MARKER_NAME
     if not marker.exists():
-        temporary = root / f".{ANALYSIS_MARKER_NAME}.tmp"
+        # Two bounded pipeline children can initialize the workspace together.
+        # Give the atomic marker write a private temporary name before replace.
+        temporary = root / f".{ANALYSIS_MARKER_NAME}.{get_ident()}.tmp"
         temporary.write_text(
             json.dumps({"owner": "PatchLab", "purpose": "temporary preset analysis"}),
             encoding="utf-8",
@@ -467,11 +480,145 @@ def recover_preparation_state(
     return summary
 
 
+def prepare_work_queue(
+    *,
+    db_path: Path,
+    analysis_root: Path,
+    legacy_audio_root: Path,
+    state_dir: Path,
+    env: PlatformEnv = ENV,
+    preset_ids: Sequence[int] | None = None,
+    render_processes: int = 1,
+    allow_render: bool = True,
+    log: LogCallback = print,
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck = lambda: False,
+    stage_hook: StageHook = lambda _stage, _preset_id: None,
+    render_function: RenderFunction = render_library,
+    fingerprint_function: FingerprintFunction = fingerprint_render_rows,
+    embedder_factory: Callable[[PlatformEnv], Any] = ClapEmbedder,
+    free_space_provider: FreeSpaceProvider = lambda path: int(shutil.disk_usage(path).free),
+    minimum_free_bytes: int = MINIMUM_WORKING_FREE_BYTES,
+    unlink_file: UnlinkFile = Path.unlink,
+    revision: PreparedRevision = CURRENT_PREPARED_REVISION,
+) -> PreparationSummary:
+    """Run a capacity-one render handoff over the durable serial lifecycle.
+
+    Each child still uses the established per-preset transaction and recovery
+    path.  Two adjacent children are permitted in flight: locks ensure that
+    only one owns Serum and only one owns CLAP analysis.  Consequently the
+    second child's render can overlap the first child's analysis, while no
+    unbounded rendered backlog or simultaneous Serum host is possible.
+    """
+
+    database = Database(Path(db_path).expanduser().resolve())
+    queue = get_presets_needing_preparation(database, revision=revision)
+    if preset_ids is not None:
+        wanted = {int(item) for item in preset_ids}
+        queue = [preset for preset in queue if preset.id in wanted]
+    if len(queue) < 2:
+        return _prepare_work_queue_serial(
+            db_path=db_path, analysis_root=analysis_root, legacy_audio_root=legacy_audio_root,
+            state_dir=state_dir, env=env, preset_ids=preset_ids,
+            render_processes=render_processes, allow_render=allow_render, log=log,
+            progress=progress, cancel_check=cancel_check, stage_hook=stage_hook,
+            render_function=render_function, fingerprint_function=fingerprint_function,
+            embedder_factory=embedder_factory, free_space_provider=free_space_provider,
+            minimum_free_bytes=minimum_free_bytes, unlink_file=unlink_file, revision=revision,
+        )
+
+    render_lock = Lock()
+    analysis_lock = Lock()
+    state_lock = Lock()
+    shared_embedder: Any | None = None
+    terminal = 0
+    aggregate = PreparationSummary(queued=len(queue))
+
+    def shared_embedder_factory(requested_env: PlatformEnv) -> Any:
+        nonlocal shared_embedder
+        with analysis_lock:
+            if shared_embedder is None:
+                shared_embedder = embedder_factory(requested_env)
+            return shared_embedder
+
+    def one_renderer(**kwargs: Any) -> RenderSummary:
+        with render_lock:
+            # A successor may already be waiting at the capacity-one handoff
+            # when consent is withdrawn. Never begin that renderer.
+            if cancel_check():
+                return RenderSummary(cancelled=True)
+            return render_function(**kwargs)
+
+    def one_analyzer(target_db: Database, embedder: Any, preset_id: int) -> bool:
+        with analysis_lock:
+            return fingerprint_function(target_db, embedder, preset_id)
+
+    def merge(summary: PreparationSummary) -> None:
+        for name in (
+            "attempted", "prepared", "rendered_notes", "reused_render_notes",
+            "fingerprints_created", "failed", "cleanup_failures", "cleaned_files",
+            "cleaned_bytes",
+        ):
+            setattr(aggregate, name, getattr(aggregate, name) + getattr(summary, name))
+        aggregate.peak_temp_bytes = max(aggregate.peak_temp_bytes, summary.peak_temp_bytes)
+        aggregate.cancelled = aggregate.cancelled or summary.cancelled
+
+    def run_one(preset: PresetRecord) -> PreparationSummary:
+        def child_progress(detail: dict[str, Any]) -> None:
+            nonlocal terminal
+            stage = str(detail.get("current_stage", ""))
+            with state_lock:
+                if stage in {"complete", "failed"}:
+                    terminal += 1
+                current = terminal
+            if progress is not None:
+                copied = dict(detail)
+                copied["current"] = current
+                copied["total"] = len(queue)
+                progress(copied)
+
+        return _prepare_work_queue_serial(
+            db_path=db_path, analysis_root=analysis_root, legacy_audio_root=legacy_audio_root,
+            state_dir=state_dir, env=env, preset_ids=[preset.id],
+            render_processes=render_processes, allow_render=allow_render, log=log,
+            progress=child_progress, cancel_check=cancel_check, stage_hook=stage_hook,
+            render_function=one_renderer, fingerprint_function=one_analyzer,
+            embedder_factory=shared_embedder_factory, free_space_provider=free_space_provider,
+            minimum_free_bytes=minimum_free_bytes, unlink_file=unlink_file, revision=revision,
+        )
+
+    next_index = 0
+    active: dict[Future[PreparationSummary], PresetRecord] = {}
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="patchlab-preparation") as executor:
+        while (next_index < len(queue) or active) and not aggregate.cancelled:
+            while next_index < len(queue) and len(active) < 2 and not cancel_check():
+                preset = queue[next_index]
+                next_index += 1
+                active[executor.submit(run_one, preset)] = preset
+            if not active:
+                aggregate.cancelled = cancel_check()
+                break
+            future = next(iter(active))
+            active.pop(future)
+            result = future.result()  # Preserve BaseException crash semantics.
+            with state_lock:
+                merge(result)
+            if result.cancelled:
+                aggregate.cancelled = True
+        # Executor shutdown waits only for the one other bounded item.  Its
+        # durable state remains recoverable even when cancellation won the race.
+        for future in active:
+            result = future.result()
+            with state_lock:
+                merge(result)
+    return aggregate
+
+
 def _disk_free(path: Path) -> int:
     return int(shutil.disk_usage(path).free)
 
 
-def prepare_work_queue(
+def _prepare_work_queue_serial(
     *,
     db_path: Path,
     analysis_root: Path,

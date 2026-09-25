@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import soundfile as sf
+from threading import Lock
+import time
 
 from core.db import Database, RenderRecord
 from core.factory_match import _local_search_rows
@@ -180,12 +182,19 @@ def test_one_hundred_interrupt_after_sixty_then_only_forty_resume(
             return connection.execute("SELECT COUNT(*) FROM prepared_presets").fetchone()[0] >= 60
 
     first = _run(tmp_path, database, cancel_check=cancelled)
+    with database.connect() as connection:
+        completed_before_resume = {
+            int(row[0]) for row in connection.execute("SELECT preset_id FROM prepared_presets")
+        }
     render_calls: list[tuple[int, int]] = []
     second = _run(tmp_path, database, render=_renderer(render_calls))
 
-    assert first.prepared == 60 and first.cancelled
-    assert second.queued == 40 and second.prepared == 40
-    assert {preset_id for preset_id, _count in render_calls} == set(ids[60:])
+    # The bounded handoff can finish one already-scheduled neighbor before
+    # cancellation takes effect; no later preset is started.
+    assert first.prepared in {60, 61} and first.cancelled
+    assert second.queued == 100 - first.prepared
+    assert second.prepared == second.queued
+    assert {preset_id for preset_id, _count in render_calls}.isdisjoint(completed_before_resume)
 
 
 @pytest.mark.parametrize(
@@ -460,6 +469,49 @@ def test_one_failure_does_not_stop_other_presets(tmp_path: Path) -> None:
     assert is_preset_prepared(database, ids[2])
 
 
+def test_bounded_handoff_overlaps_one_render_with_one_analysis(tmp_path: Path) -> None:
+    database, _root, ids = _catalog(tmp_path, 3)
+    events: list[tuple[str, int, float]] = []
+    guard = Lock()
+    active_renders = 0
+    maximum_renders = 0
+
+    def render(**kwargs):
+        nonlocal active_renders, maximum_renders
+        preset_id = int(kwargs["preset_ids"][0])
+        with guard:
+            active_renders += 1
+            maximum_renders = max(maximum_renders, active_renders)
+            events.append(("render-start", preset_id, time.monotonic()))
+        result = _renderer()(**kwargs)
+        time.sleep(0.08)
+        with guard:
+            active_renders -= 1
+            events.append(("render-end", preset_id, time.monotonic()))
+        return result
+
+    def fingerprint(db: Database, embedder, preset_id: int) -> bool:
+        with guard:
+            events.append(("analyze-start", preset_id, time.monotonic()))
+        time.sleep(0.08)
+        return _fingerprinter()(db, embedder, preset_id)
+
+    summary = _run(tmp_path, database, render=render, fingerprint=fingerprint)
+
+    assert summary.prepared == 3
+    assert maximum_renders == 1
+    render_starts = {event[1]: event[2] for event in events if event[0] == "render-start"}
+    render_ends = {event[1]: event[2] for event in events if event[0] == "render-end"}
+    analyze_starts = [event for event in events if event[0] == "analyze-start"]
+    assert any(
+        render_starts[preset_id] < at < render_ends[preset_id]
+        for _kind, analyzed_id, at in analyze_starts
+        for preset_id in render_starts
+        if preset_id != analyzed_id
+    )
+    assert all(is_preset_prepared(database, preset_id) for preset_id in ids)
+
+
 def test_cancel_keeps_completed_work_and_current_renders_recoverable(
     tmp_path: Path,
 ) -> None:
@@ -474,8 +526,9 @@ def test_cancel_keeps_completed_work_and_current_renders_recoverable(
     first = _run(tmp_path, database, cancel_check=cancel)
     second = _run(tmp_path, database)
 
-    assert first.prepared == 1 and first.cancelled
-    assert second.queued == 2 and second.prepared == 2
+    assert first.prepared <= 1 and first.cancelled
+    assert second.queued == 3 - first.prepared
+    assert second.prepared == second.queued
     assert all(is_preset_prepared(database, preset_id) for preset_id in ids)
 
 
@@ -497,7 +550,9 @@ def test_five_gb_and_bounded_temp_storage(tmp_path: Path) -> None:
     )
 
     assert summary.prepared == len(ids)
-    assert summary.peak_temp_bytes == single.peak_temp_bytes
+    # One render may wait while one prior preset is analyzed, but the handoff
+    # never retains more than two preset work directories.
+    assert single.peak_temp_bytes <= summary.peak_temp_bytes <= 2 * single.peak_temp_bytes
     assert summary.peak_temp_bytes < 5 * 1024**2
     assert not list((library_root / "analysis").rglob("*.wav"))
 

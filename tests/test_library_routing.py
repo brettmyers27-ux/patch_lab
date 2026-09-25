@@ -460,7 +460,10 @@ def test_streaming_pipeline_commits_before_cleanup() -> None:
 
     import core.preparation as preparation_module
 
-    source = inspect.getsource(preparation_module.prepare_work_queue)
+    # The bounded handoff delegates each durable per-preset transaction to the
+    # established lifecycle; that lifecycle owns the commit-before-cleanup
+    # ordering rather than the scheduler itself.
+    source = inspect.getsource(preparation_module._prepare_work_queue_serial)
     tree = ast.parse(inspect.cleandoc(source))
     calls = sorted(
         (

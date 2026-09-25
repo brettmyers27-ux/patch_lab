@@ -214,9 +214,9 @@ def main() -> int:
         )
     result = {
         "baseline_config": {
-            "phase3_active_presets": 1,
+            "phase3_active_presets": 2,
             "render_processes_argument": args.render_processes,
-            "note": "Phase 3 deliberately renders one preset at a time; the compatibility argument is not used by prepare_work_queue.",
+            "note": "One Serum render and one analysis may overlap; the handoff holds at most one adjacent preset.",
         },
         "sample": {"requested": args.sample_size, "selected": len(base), "by_synth": synth_counts},
         "baseline": baseline,
