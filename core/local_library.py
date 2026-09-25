@@ -42,6 +42,7 @@ from core.storage import configured_audio_root, preview_cache_root
 
 LogCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
+PreparationStageHook = Callable[[str, int], None]
 
 AUTO_SCAN_MARKER_FILENAME = "last-auto-link-scan.json"
 DEFAULT_AUTO_SCAN_INTERVAL_HOURS = 24.0
@@ -604,6 +605,7 @@ def _process_linked_folder(
     progress: ProgressCallback | None = None,
     render_processes: int = 4,
     preparation_ids: list[int] | None = None,
+    preparation_stage_hook: PreparationStageHook = lambda _stage, _preset_id: None,
     compact_mode: bool | None = None,
     operation_id: str = "",
     upload_sleep: Callable[[float], None] = time.sleep,
@@ -912,6 +914,7 @@ def _process_linked_folder(
         render_function=render_library,
         fingerprint_function=fingerprint_render_rows,
         embedder_factory=ClapEmbedder,
+        stage_hook=preparation_stage_hook,
     )
     summary.fingerprints_created += preparation.fingerprints_created
     summary.failed_load += preparation.failed

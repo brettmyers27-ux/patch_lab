@@ -179,7 +179,7 @@ def test_fully_learned_library_reads_complete_even_after_a_stale_failure(
     linked = _library(tmp_path, presets=6, fingerprinted=6)
     state = _resolve(tmp_path, linked=linked, render_failed_detail="old failure")
     assert state.render.phase == "complete"
-    assert "learned" in state.render.text
+    assert "ready" in state.render.text
 
 
 # ---------------------------------------------------------------------------
