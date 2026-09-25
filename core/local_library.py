@@ -603,6 +603,7 @@ def _process_linked_folder(
     log: LogCallback = print,
     progress: ProgressCallback | None = None,
     render_processes: int = 4,
+    preparation_ids: list[int] | None = None,
     compact_mode: bool | None = None,
     operation_id: str = "",
     upload_sleep: Callable[[float], None] = time.sleep,
@@ -753,6 +754,11 @@ def _process_linked_folder(
                 }
             )
     new_or_pending = sorted(new_or_pending_set)
+    if preparation_ids is not None:
+        wanted_preparation_ids = {int(item) for item in preparation_ids}
+        new_or_pending = [
+            preset_id for preset_id in new_or_pending if preset_id in wanted_preparation_ids
+        ]
     summary.deduped_local = len(discovery.entries) - discovery.new_content
     # One transaction records every pending reason, so a 5,000-preset library
     # costs one write rather than 5,000.
@@ -895,7 +901,10 @@ def _process_linked_folder(
         legacy_audio_root=audio_root,
         state_dir=state_dir,
         env=env,
-        preset_ids=list(id_to_path),
+        # The UI snapshots this Phase 2 queue before a run. Restricting the
+        # lifecycle to that snapshot keeps its denominator stable if files are
+        # added while preparation is already under way.
+        preset_ids=preparation_ids if preparation_ids is not None else list(id_to_path),
         render_processes=render_processes,
         log=log,
         progress=progress,

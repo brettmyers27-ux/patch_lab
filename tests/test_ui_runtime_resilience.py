@@ -137,8 +137,8 @@ def test_large_library_job_requires_explicit_confirmation(
 
         start.assert_not_called()
         assert prompts
-        assert "1–4 hours" in prompts[0]
-        assert "matching may be noticeably slower" in prompts[0]
+        assert "will not prepare them" in prompts[0]
+        assert "Prepare Preset Library" in prompts[0]
         assert "was not started" in window.log_pane.toPlainText()
     finally:
         window.close()

@@ -44,7 +44,7 @@ def test_starts_a_quiet_scan_when_a_folder_is_already_linked(
     start.assert_called_once()
     args, kwargs = start.call_args
     assert args[0] == Path(window.privacy_choice.linked_folder)
-    assert kwargs.get("local_library") is True
+    assert kwargs.get("refresh_only") is True
     assert kwargs.get("workers") == 1
     assert window._automatic_link_scan_active is True
     assert "link" not in window._workflow_activities
@@ -191,6 +191,7 @@ def test_distribution_render_button_uses_bounded_link_pipeline(
     window.storage_preferences = StoragePreferences(compact_mode=True)
     with (
         patch("app.ui.storage_status") as status,
+        patch("app.ui.preparation_queue_ids", return_value=[41, 42]),
         patch.object(window.runner, "start") as linked_start,
         patch.object(window.render_runner, "start") as direct_render_start,
     ):
@@ -199,6 +200,8 @@ def test_distribution_render_button_uses_bounded_link_pipeline(
         window.start_render()
 
     linked_start.assert_called_once_with(
-        Path(window.privacy_choice.linked_folder), local_library=True
+        Path(window.privacy_choice.linked_folder),
+        local_library=True,
+        preset_ids=[41, 42],
     )
     direct_render_start.assert_not_called()

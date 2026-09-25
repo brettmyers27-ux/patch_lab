@@ -28,6 +28,7 @@ class WorkerEntryPoint:
 WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "scan": WorkerEntryPoint("app.workers", "worker_main"),
     "local-library": WorkerEntryPoint("scripts.process_local_library"),
+    "refresh-library": WorkerEntryPoint("scripts.refresh_preset_library"),
     "process-pending": WorkerEntryPoint("scripts.process_pending_presets"),
     "factory-verify": WorkerEntryPoint("scripts.verify_factory_runtime"),
     "render-library": WorkerEntryPoint("scripts.render_library"),

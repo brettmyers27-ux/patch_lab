@@ -174,6 +174,8 @@ class ScanProcessRunner(_ProcessRunnerBase):
         *,
         local_library: bool = False,
         fingerprint_only: bool = False,
+        refresh_only: bool = False,
+        preset_ids: list[int] | None = None,
         workers: int = 4,
         pending_generation: str | None = None,
     ) -> None:
@@ -192,6 +194,9 @@ class ScanProcessRunner(_ProcessRunnerBase):
                 "process-pending",
                 ["--generation", pending_generation, "--workers", str(max(1, workers))],
             )
+        elif refresh_only:
+            assert root is not None
+            self._start_worker("refresh-library", [str(root)])
         elif fingerprint_only:
             # No folder to scan here: this fingerprints whatever is already
             # rendered but missing from the fingerprints table, regardless of
@@ -203,14 +208,10 @@ class ScanProcessRunner(_ProcessRunnerBase):
             assert root is not None
             if workers < 1:
                 raise ValueError("workers must be positive")
-            self._start_worker(
-                "local-library",
-                [
-                    str(root),
-                    "--workers",
-                    str(workers),
-                ],
-            )
+            arguments = [str(root), "--workers", str(workers)]
+            for preset_id in preset_ids or ():
+                arguments.extend(["--preset-id", str(preset_id)])
+            self._start_worker("local-library", arguments)
         else:
             assert root is not None
             self._start_worker("scan", ["--scan", str(root)])

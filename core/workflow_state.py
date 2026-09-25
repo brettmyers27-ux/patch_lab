@@ -15,6 +15,7 @@ from core.factory_bundle import DEFAULT_FACTORY_BUNDLE
 from core.model_assets import ModelAssetsError, validate_model_assets
 from core.runtime_compatibility import RuntimeCompatibilityError, validate_runtime_family
 from core.privacy import PrivacyChoice
+from core.library_status import preset_library_status
 from core.render import MIDI_NOTES
 
 
@@ -60,6 +61,8 @@ class _LocalCounts:
     presets: int = 0
     rendered: int = 0
     fingerprinted: int = 0
+    prepared: int = 0
+    queued: int = 0
     error: str = ""
 
 
@@ -98,10 +101,19 @@ def _local_counts(database_path: Path, linked_folder: Path) -> _LocalCounts:
             ).fetchall()
         }
         connection.close()
+        status = preset_library_status(database_path)
+        # A pre-Phase-2 database has no source rows yet. Preserve a truthful
+        # transitional screen until its first lightweight refresh adopts it.
+        prepared = status.ready if status.found else len(preset_ids.intersection(fingerprinted_ids))
+        queued = status.needs_preparation if status.found else max(
+            len(preset_ids) - prepared, 0
+        )
         return _LocalCounts(
             len(preset_ids),
             len(preset_ids.intersection(rendered_ids)),
             len(preset_ids.intersection(fingerprinted_ids)),
+            prepared,
+            queued,
         )
     except (OSError, sqlite3.Error) as exc:
         return _LocalCounts(error=f"{type(exc).__name__}: {exc}")
@@ -233,48 +245,27 @@ def resolve_workflow_state(
         render = WorkflowCardState(
             "not-required", "No linked presets need rendering", 1, 1
         )
-    elif audio_storage_error and not compact_mode:
-        render = WorkflowCardState(
-            "needs-action",
-            "Audio storage is disconnected",
-            counts.rendered,
-            counts.presets,
-            audio_storage_error,
-        )
-    elif (counts.fingerprinted if compact_mode else counts.rendered) >= counts.presets:
-        ready = counts.fingerprinted if compact_mode else counts.rendered
+    elif counts.queued == 0:
         render = WorkflowCardState(
             "complete",
-            (
-                f"All {counts.presets:,} presets learned · compact storage"
-                if compact_mode
-                else f"All {counts.presets:,} linked presets rendered"
-            ),
-            ready,
+            f"{counts.prepared:,} presets ready · up to date",
+            counts.prepared,
             counts.presets,
         )
     elif render_failed_detail:
-        ready = counts.fingerprinted if compact_mode else counts.rendered
         render = WorkflowCardState(
             "failed",
-            "Rendering stopped — click the status badge to retry",
-            ready,
-            counts.presets,
+            "Preparation stopped — click to retry",
+            counts.prepared,
+            max(counts.prepared + counts.queued, 1),
             render_failed_detail,
         )
     else:
-        ready = counts.fingerprinted if compact_mode else counts.rendered
-        remaining = counts.presets - ready
         render = WorkflowCardState(
             "needs-action",
-            (
-                f"{remaining:,} of {counts.presets:,} presets still need learning"
-                if compact_mode
-                else f"{remaining:,} of {counts.presets:,} presets still need rendering"
-            ),
-            ready,
-            counts.presets,
-            audio_storage_error,
+            f"{counts.queued:,} preset(s) need preparation",
+            counts.prepared,
+            max(counts.prepared + counts.queued, 1),
         )
     render = _activity_or("render", live, render)
 

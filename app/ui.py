@@ -88,6 +88,7 @@ from core.build_info import current_build_info
 from core.db import DEFAULT_DB_PATH, Database
 from core.factory_verify import FactoryVerification
 from core.local_library import auto_scan_due, default_local_paths, record_auto_scan
+from core.library_status import preparation_queue_ids, preset_library_status
 from core.update_check import (
     UpdatePreferences,
     load_update_preferences,
@@ -363,6 +364,10 @@ class LegacyMainWindow(QMainWindow):
         # True while Render Sound Library is driving the shared scan runner,
         # so its progress and failures land on the Render card rather than Link.
         self._compact_render_active = False
+        self._prepare_active = False
+        self._prepare_total = 0
+        self._prepare_completed = 0
+        self._prepare_started_at = 0.0
         # Last capability snapshot, so a later check can tell that a synth
         # newly became available rather than merely being present.
         self._capability_snapshot = None
@@ -799,11 +804,12 @@ class LegacyMainWindow(QMainWindow):
                 activities=sorted(self._workflow_activities),
             )
         self._last_card_phases = phases
-        for key, card in zip(
-            ("link", "render", "analyze", "match"),
-            self.hero_cards,
-            strict=True,
-        ):
+        card_keys = (
+            ("link", "render", "match")
+            if len(self.hero_cards) == 3
+            else ("link", "render", "analyze", "match")
+        )
+        for key, card in zip(card_keys, self.hero_cards, strict=True):
             resolved: WorkflowCardState = resolved_cards[key]
             card.setWorkflowState(
                 resolved.phase,
@@ -844,6 +850,38 @@ class LegacyMainWindow(QMainWindow):
         current = int(detail.get("current", 0))
         total = int(detail.get("total", 0))
         text = str(detail.get("text", stage.replace("-", " ").title()))
+        if getattr(self, "_prepare_active", False) and stage == "prepare":
+            # Phase 3 reports a terminal item only after durable PREPARED
+            # commit (or a per-preset failure). The UI keeps the initial queue
+            # denominator and clamps the numerator so progress never regresses.
+            self._prepare_completed = max(self._prepare_completed, current)
+            completed = min(self._prepare_completed, self._prepare_total)
+            self.render_progress.setRange(0, max(self._prepare_total, 1))
+            self.render_progress.setValue(completed)
+            elapsed = max(time.monotonic() - self._prepare_started_at, 0.0)
+            eta_text = "Estimating time…"
+            if completed >= 2 and elapsed > 0:
+                remaining = max(self._prepare_total - completed, 0)
+                seconds = int((elapsed / completed) * remaining)
+                if seconds < 90:
+                    eta_text = "About 1 minute remaining"
+                elif seconds < 3600:
+                    eta_text = f"About {max(1, round(seconds / 60))} minutes remaining"
+                else:
+                    eta_text = f"About {max(1, round(seconds / 3600))} hours remaining"
+            stage_label = str(detail.get("current_stage", "prepare")).replace("_", " ")
+            name = str(detail.get("preset_name", ""))
+            current_text = f"{stage_label.title()} “{name}”" if name else text
+            self.render_stats.setText(
+                f"{eta_text} · {completed} / {self._prepare_total} prepared · {current_text}"
+            )
+            self._set_workflow_activity(
+                "render",
+                completed,
+                self._prepare_total,
+                f"Preparing Preset Library · {completed} / {self._prepare_total} prepared",
+            )
+            return
         if stage == "render":
             self._workflow_activities.pop("link", None)
             self._workflow_activities.pop("analyze", None)
@@ -940,13 +978,9 @@ class LegacyMainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Start local preset-library processing?",
-                "PatchLab will scan and locally render every eligible preset in this "
-                "folder. A large factory library can take 1–4 hours and keep four "
-                "processor workers busy. Compact storage learns presets in small "
-                "batches and removes regenerable WAVs as it proceeds.\n\n"
-                "You can continue matching while it runs, but matching may be "
-                "noticeably slower until library processing finishes.\n\n"
-                "Start the library job now?",
+                "PatchLab will check this folder and show presets that need "
+                "preparation. It will not prepare them until you click Prepare "
+                "Preset Library.\n\nContinue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -957,29 +991,26 @@ class LegacyMainWindow(QMainWindow):
             self.privacy_choice = self.privacy_store.save(
                 True, linked_folder=Path(selected)
             )
-        self._set_workflow_activity("link", 0, 0, "Starting preset scan…")
+        self._set_workflow_activity("link", 0, 0, "Checking preset library…")
         self.append_log(
-            f"Starting local-first preset processing for {selected}"
+            f"Checking linked preset library for {selected}"
             if self.distribution_mode
             else f"Starting isolated scan worker for {selected}"
         )
         self.statusBar().showMessage(
-            "Processing your presets locally…"
+            "Checking your preset library…"
             if self.distribution_mode
             else "Scanning and dumping parameters…"
         )
-        self.runner.start(Path(selected), local_library=self.distribution_mode)
+        self.runner.start(
+            Path(selected), refresh_only=self.distribution_mode
+        )
 
     def maybe_start_automatic_link_scan(self, *, env: PlatformEnv = ENV) -> None:
         """Quietly catch up an already-linked folder on launch, at most once a day.
 
-        choose_folder() always confirms with a "1-4 hours" warning because it
-        may be the first time this folder has ever been scanned. This path
-        never shows that dialog or a file picker: process_linked_folder() is
-        already incremental -- it skips every preset it has already seen --
-        so a daily catch-up is normally fast. Its entire purpose is picking
-        up presets someone added since they last opened PatchLab and getting
-        them shared without anyone having to remember to click Link again.
+        This only reconciles the folder manifest after consent. Preparation
+        remains an explicit action from the Prepare Preset Library button.
         """
 
         if not self.distribution_mode:
@@ -1009,7 +1040,7 @@ class LegacyMainWindow(QMainWindow):
         self.append_log("Background preset check started; matching remains ready.")
         # One worker deliberately leaves processor and disk headroom for an
         # immediate Match request. Manual library processing still uses four.
-        self.runner.start(folder, local_library=True, workers=1)
+        self.runner.start(folder, refresh_only=True, workers=1)
 
     def maybe_verify_factory_install(self) -> None:
         """Build local factory-path mapping after the window is interactive."""
@@ -1309,8 +1340,33 @@ class LegacyMainWindow(QMainWindow):
     def _scan_completed(self, summary: dict) -> None:
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
         compact_render = bool(getattr(self, "_compact_render_active", False))
+        preparing = bool(getattr(self, "_prepare_active", False))
         self._automatic_link_scan_active = False
         self._compact_render_active = False
+        self._prepare_active = False
+        if preparing:
+            self._workflow_activities.pop("render", None)
+            self.render_cancel_button.setEnabled(False)
+            status = preset_library_status(self.local_paths["db"])
+            prepared = int(summary.get("fingerprints_created", 0) or 0)
+            failed = int(summary.get("failed_load", 0) or 0)
+            if status.needs_preparation == 0:
+                text = f"{status.ready:,} presets ready · your preset library is up to date."
+            else:
+                text = (
+                    f"{status.ready:,} presets ready · {status.needs_preparation:,} still need "
+                    "preparation"
+                )
+                if failed:
+                    text += f" · {failed} couldn't be processed"
+            self.render_stats.setText(text)
+            self.statusBar().showMessage(text)
+            self.append_log(
+                f"Preset Library preparation finished: {prepared:,} prepared, "
+                f"{status.needs_preparation:,} remaining."
+            )
+            self._refresh_workflow_cards()
+            return
         if summary.get("user_presets_disabled"):
             # The worker refused (or stopped) because personal presets are off.
             # That is the user's choice working, not a failure and not "0 found".
@@ -1418,11 +1474,20 @@ class LegacyMainWindow(QMainWindow):
     def _scan_failed(self, error: str) -> None:
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
         compact_render = bool(getattr(self, "_compact_render_active", False))
+        preparing = bool(getattr(self, "_prepare_active", False))
         self._automatic_link_scan_active = False
         self._compact_render_active = False
+        self._prepare_active = False
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
+        if preparing:
+            self._render_failure_detail = self._user_facing_error(error)
+            self.render_cancel_button.setEnabled(False)
+            self.render_stats.setText(self._render_failure_detail)
+            self.statusBar().showMessage(self._render_failure_detail)
+            self._refresh_workflow_cards()
+            return
         if compact_render:
             # A Render failure must leave the Link card's success alone and put
             # the Render card into a retryable failed state. Nothing here
@@ -1523,6 +1588,49 @@ class LegacyMainWindow(QMainWindow):
             self._ui_event("render_blocked", "personal presets are off")
             self._explain_personal_presets_off()
             return
+        if self.distribution_mode:
+            linked_folder = self.privacy_choice.linked_folder
+            if not linked_folder or not Path(linked_folder).is_dir():
+                QMessageBox.information(
+                    self,
+                    "Link a preset folder first",
+                    "Link your preset folder first. PatchLab will then prepare "
+                    "only new or changed presets for matching.",
+                )
+                return
+            if self.runner.running:
+                self.append_log("Preset Library preparation is already running")
+                return
+            preset_ids = preparation_queue_ids(self.local_paths["db"])
+            if not preset_ids:
+                self.render_stats.setText("Your preset library is up to date.")
+                self.statusBar().showMessage("Your preset library is up to date.")
+                self._refresh_workflow_cards()
+                return
+            self._prepare_active = True
+            self._compact_render_active = False
+            self._prepare_total = len(preset_ids)
+            self._prepare_completed = 0
+            self._prepare_started_at = time.monotonic()
+            self._render_failure_detail = ""
+            self.render_progress.setRange(0, self._prepare_total)
+            self.render_progress.setValue(0)
+            self.render_cancel_button.setEnabled(True)
+            self.render_pause_button.setVisible(False)
+            self.render_stats.setText(f"Estimating time… · 0 / {self._prepare_total} prepared")
+            self._set_workflow_activity(
+                "render",
+                0,
+                self._prepare_total,
+                f"Preparing Preset Library · 0 / {self._prepare_total} prepared",
+            )
+            self.statusBar().showMessage("Preparing your preset library…")
+            self.runner.start(
+                Path(linked_folder),
+                local_library=True,
+                preset_ids=preset_ids,
+            )
+            return
         self._ui_event(
             "render_requested",
             "Render Sound Library selected",
@@ -1614,6 +1722,10 @@ class LegacyMainWindow(QMainWindow):
 
     def cancel_render(self) -> None:
         self.render_cancel_button.setEnabled(False)
+        if getattr(self, "_prepare_active", False):
+            self.render_stats.setText("Cancelling after the current preset…")
+            self.runner.cancel()
+            return
         self.render_stats.setText("Cancelling after current notes…")
         self.render_runner.cancel()
 
@@ -3102,6 +3214,10 @@ class MainWindow(LegacyMainWindow):
         # True while Render Sound Library is driving the shared scan runner,
         # so its progress and failures land on the Render card rather than Link.
         self._compact_render_active = False
+        self._prepare_active = False
+        self._prepare_total = 0
+        self._prepare_completed = 0
+        self._prepare_started_at = 0.0
         # Last capability snapshot, so a later check can tell that a synth
         # newly became available rather than merely being present.
         self._capability_snapshot = None
@@ -3148,6 +3264,7 @@ class MainWindow(LegacyMainWindow):
         self.render_pause_button = QPushButton("Pause")
         self.render_pause_button.setEnabled(False)
         self.render_pause_button.clicked.connect(self.toggle_render_pause)
+        self.render_pause_button.setVisible(False)
         self.render_cancel_button = QPushButton("Cancel")
         self.render_cancel_button.setEnabled(False)
         self.render_cancel_button.clicked.connect(self.cancel_render)
@@ -3263,25 +3380,18 @@ class MainWindow(LegacyMainWindow):
                 step=1,
             ),
             HeroCard(
-                "Render Sound Library",
+                "Prepare Preset Library",
                 "waveform",
                 "violet",
                 enabled=True,
                 step=2,
             ),
             HeroCard(
-                "Analyze & Learn",
-                "brain",
-                "amber",
-                enabled=True,
-                step=3,
-            ),
-            HeroCard(
                 "Match a Sound",
                 "search-wave",
                 "blue",
                 enabled=True,
-                step=4,
+                step=3,
             ),
         )
         hero_layout = QHBoxLayout()
@@ -3289,23 +3399,24 @@ class MainWindow(LegacyMainWindow):
         for card in cards:
             hero_layout.addWidget(card, 1)
         root_layout.addLayout(hero_layout)
-        scan_card, render_card, learn_card, match_card = cards
+        scan_card, render_card, match_card = cards
         self.hero_cards = cards
         self.scan_button, self.scan_progress = scan_card.button, scan_card.progress
         self.render_button, self.render_progress = (
             render_card.button,
             render_card.progress,
         )
-        self.learn_button, self.learn_progress = learn_card.button, learn_card.progress
+        # Deep training remains available in its settings panel, but personal
+        # preset preparation is one operation and no longer has an Analyze card.
+        self.learn_button, self.learn_progress = QPushButton(), QProgressBar()
+        self.learn_button.setVisible(False)
         self.match_button, self.match_progress = match_card.button, match_card.progress
         self.scan_box = scan_card
         self.scan_card_status = scan_card.status
         self.render_card_status = render_card.status
-        self.learn_card_status = learn_card.status
         self.match_card_status = match_card.status
         self.scan_button.clicked.connect(self.choose_folder)
         self.render_button.clicked.connect(self.start_render)
-        self.learn_button.clicked.connect(self.start_analyze)
         self.match_button.clicked.connect(self.choose_match_file)
         if render_card.step_badge is not None:
             render_card.step_badge.clicked.connect(self._render_badge_clicked)

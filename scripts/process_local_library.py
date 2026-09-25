@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--audio-root", type=Path, default=defaults["audio"])
     parser.add_argument("--state-dir", type=Path, default=defaults["states"])
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--preset-id", type=int, action="append", default=[])
     args = parser.parse_args()
 
     from core.diagnostic_env import capture_environment, write_environment
@@ -75,6 +76,7 @@ def main() -> int:
             operation_id=operation_id,
             log=lambda message: print(message, flush=True),
             progress=_progress,
+            preparation_ids=args.preset_id or None,
         )
     except BaseException as exc:
         write_postmortem(

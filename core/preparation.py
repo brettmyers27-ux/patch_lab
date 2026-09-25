@@ -519,6 +519,29 @@ def prepare_work_queue(
     summary = PreparationSummary(queued=len(queue))
     embedder: Any | None = None
 
+    def report(stage: str, preset: PresetRecord, completed: int) -> None:
+        if progress is None:
+            return
+        labels = {
+            "render": "Rendering",
+            "analyze": "Analyzing",
+            "commit": "Saving",
+            "cleanup": "Cleaning up",
+            "complete": "Prepared",
+            "failed": "Couldn't prepare",
+        }
+        progress(
+            {
+                "stage": "prepare",
+                "current": completed,
+                "total": len(queue),
+                "current_stage": stage,
+                "preset_id": preset.id,
+                "preset_name": preset.name,
+                "text": f"{labels[stage]} {preset.name}",
+            }
+        )
+
     for index, preset in enumerate(queue, start=1):
         if cancel_check():
             summary.cancelled = True
@@ -574,6 +597,7 @@ def prepare_work_queue(
                     summary.cleaned_files += files
                     summary.cleaned_bytes += bytes_removed
                     summary.cleanup_failures += int(cleanup_failed)
+                    report("complete", preset, index)
                     continue
 
             with database.connect() as connection:
@@ -662,6 +686,7 @@ def prepare_work_queue(
                     temp_dir=temp_dir,
                     revision_token=revision_token,
                 )
+                report("render", preset, index - 1)
                 stage_hook("before_render", preset.id)
                 rendered = render_function(
                     db_path=database.path,
@@ -698,6 +723,7 @@ def prepare_work_queue(
                 temp_dir=temp_dir,
                 revision_token=revision_token,
             )
+            report("analyze", preset, index - 1)
             if cancel_check():
                 _set_job(
                     database,
@@ -727,6 +753,7 @@ def prepare_work_queue(
             stage_hook("after_features", preset.id)
             if _verified_source(database, preset) is None:
                 raise RuntimeError("source changed while preparation was running")
+            report("commit", preset, index - 1)
             if not _commit_prepared(
                 database,
                 preset,
@@ -737,6 +764,7 @@ def prepare_work_queue(
                 raise RuntimeError("authoritative prepared-state validation failed")
             summary.prepared += 1
             stage_hook("after_prepared_commit", preset.id)
+            report("cleanup", preset, index - 1)
             files, bytes_removed, cleanup_failed = _finish_cleanup(
                 database,
                 preset,
@@ -748,6 +776,7 @@ def prepare_work_queue(
             summary.cleaned_bytes += bytes_removed
             summary.cleanup_failures += int(cleanup_failed)
             stage_hook("after_cleanup", preset.id)
+            report("complete", preset, index)
         except Exception as exc:
             summary.failed += 1
             _set_job(
@@ -759,13 +788,5 @@ def prepare_work_queue(
                 error=f"{type(exc).__name__}: {exc}",
             )
             log(f"Preparation failed for {preset.name}: {exc}")
-        if progress is not None:
-            progress(
-                {
-                    "stage": "prepare",
-                    "current": index,
-                    "total": len(queue),
-                    "text": f"Preparing {index:,} of {len(queue):,} presets",
-                }
-            )
+            report("failed", preset, index)
     return summary

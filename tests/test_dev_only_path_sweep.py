@@ -25,8 +25,8 @@ def test_the_scan_worker_uses_dev_defaults_only_outside_distribution_mode() -> N
     """app/ui.py's one remaining bare-scan call site: guarded by distribution_mode."""
 
     source = _source("app/ui.py")
-    call = source.split("self.runner.start(Path(selected), local_library=")[1][:40]
-    assert call.startswith("self.distribution_mode)"), (
+    call = source.split("self.runner.start(\n            Path(selected), refresh_only=")[1][:40]
+    assert call.startswith("self.distribution_mode"), (
         "the plain 'scan' worker (which falls back to core.db.DEFAULT_DB_PATH, "
         "a checkout-relative path) must only run when NOT in distribution mode -- "
         "a packaged app has no such checkout to fall back to"

@@ -104,8 +104,8 @@ def test_linked_folder_counts_real_remaining_renders(tmp_path: Path) -> None:
     assert "My Presets" in state.link.text
     assert "3 presets" in state.link.text
     assert state.render.phase == "needs-action"
-    assert state.render.text == "2 of 3 presets still need rendering"
-    assert (state.render.current, state.render.total) == (1, 3)
+    assert state.render.text == "3 preset(s) need preparation"
+    assert (state.render.current, state.render.total) == (0, 3)
 
 
 def test_analyze_card_reflects_rendered_vs_fingerprinted_truthfully(tmp_path: Path) -> None:
@@ -221,7 +221,7 @@ def test_render_failure_surfaces_as_a_distinct_retryable_phase(tmp_path: Path) -
         "render-library worker did not confirm startup within 90s"
     )
     # Progress already made before the failure is preserved, not reset to zero.
-    assert (state.render.current, state.render.total) == (1, 3)
+    assert (state.render.current, state.render.total) == (0, 3)
 
     # A live retry in progress must win over a stale failure message.
     with patch("core.workflow_state.validate_model_assets"):
@@ -271,4 +271,4 @@ def test_compact_mode_counts_durable_fingerprints_as_complete(tmp_path: Path) ->
         )
 
     assert state.render.phase == "complete"
-    assert state.render.text == "All 2 presets learned · compact storage"
+    assert state.render.text == "2 presets ready · up to date"
