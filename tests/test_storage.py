@@ -29,6 +29,7 @@ from core.storage import (
     save_storage_preferences,
     storage_status,
 )
+from core.preview_cache import touch_preview
 
 
 def _write_wav(path: Path, *, amplitude: float = 0.5, seconds: float = 0.05) -> None:
@@ -150,15 +151,17 @@ def test_compact_cleanup_only_removes_learned_renders_inside_root(
 
     summary = compact_render_library(database.path, audio)
 
-    assert summary.files == 1
-    assert not (audio / str(ids[0]) / "60.wav").exists()
+    # A mean fingerprint alone is not the prepared-state contract; recovery
+    # needs this legacy render until all required permanent data exists.
+    assert summary.files == 0
+    assert (audio / str(ids[0]) / "60.wav").exists()
     assert (audio / str(ids[1]) / "60.wav").is_file()
     with database.connect() as connection:
         statuses = dict(connection.execute("SELECT id,status FROM presets"))
         render_ids = {row[0] for row in connection.execute("SELECT preset_id FROM renders")}
-    assert statuses[ids[0]] == "embedded"
+    assert statuses[ids[0]] == "rendered"
     assert statuses[ids[1]] == "rendered"
-    assert render_ids == {ids[1]}
+    assert render_ids == set(ids)
 
 
 def test_compact_cleanup_reclaims_only_safe_interrupted_and_legacy_residue(
@@ -204,18 +207,18 @@ def test_compact_cleanup_reclaims_only_safe_interrupted_and_legacy_residue(
 
     summary = compact_render_library(database.path, audio)
 
-    assert summary.files == 4  # tracked render, old temp, two legacy previews
-    assert not render.exists()
+    assert summary.files == 3  # old temp and two legacy previews only
+    assert render.exists()
     assert not old_temporary.exists()
     assert recent_temporary.exists()
     assert not legacy_generated.exists()
     assert not legacy_hash.exists()
     assert unknown_complete.read_bytes() == b"keep"
     with database.connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 1
         assert connection.execute(
             "SELECT status FROM presets WHERE id=?", (preset_id,)
-        ).fetchone()[0] == "embedded"
+        ).fetchone()[0] == "rendered"
 
 
 def test_compact_cleanup_discards_failed_silent_wavs_but_keeps_the_failure(
@@ -245,10 +248,10 @@ def test_compact_cleanup_discards_failed_silent_wavs_but_keeps_the_failure(
 
     summary = compact_render_library(database.path, audio)
 
-    assert summary.files == 1
-    assert not render.exists()
+    assert summary.files == 0
+    assert render.exists()
     with database.connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 1
         row = connection.execute(
             "SELECT status,error FROM presets WHERE id=?", (preset_id,)
         ).fetchone()
@@ -292,15 +295,15 @@ def test_compaction_keeps_database_durable_when_wav_cleanup_fails(
     compact_render_library(database.path, audio)
 
     with database.connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 1
         assert connection.execute(
             "SELECT status FROM presets WHERE id=?", (preset_id,)
-        ).fetchone()[0] == "embedded"
+        ).fetchone()[0] == "rendered"
     assert render.exists()
 
     monkeypatch.setattr(Path, "unlink", original_unlink)
     compact_render_library(database.path, audio)
-    assert not render.exists()
+    assert render.exists()
 
 
 def test_preview_cache_has_a_hard_lru_limit(tmp_path: Path) -> None:
@@ -319,6 +322,43 @@ def test_preview_cache_has_a_hard_lru_limit(tmp_path: Path) -> None:
     assert summary.files == 1
     assert not older.exists()
     assert newer.exists()
+
+
+def test_preview_cache_hit_refreshes_lru_recency(tmp_path: Path) -> None:
+    audio = tmp_path / "preview" / "audio" / "hash"
+    audio.mkdir(parents=True)
+    older = audio / "48.wav"
+    cached = audio / "60.wav"
+    older.write_bytes(b"a" * 700_000)
+    cached.write_bytes(b"b" * 700_000)
+    os.utime(older, (2, 2))
+    os.utime(cached, (1, 1))
+    touch_preview(cached)
+
+    with patch("core.storage.MIN_PREVIEW_CACHE_MB", 1):
+        prune_preview_cache(tmp_path / "preview", 1)
+
+    assert not older.exists()
+    assert cached.exists()
+
+
+def test_clear_preview_cache_leaves_analysis_and_source_files_untouched(tmp_path: Path) -> None:
+    from core.storage import clear_preview_cache, preview_cache_usage
+
+    preview = tmp_path / "preview-cache" / "audio" / "key" / "60.wav"
+    analysis = tmp_path / "analysis-work" / "jobs" / "1" / "60.wav"
+    source = tmp_path / "source.fxp"
+    preview.parent.mkdir(parents=True)
+    analysis.parent.mkdir(parents=True)
+    preview.write_bytes(b"preview")
+    analysis.write_bytes(b"analysis")
+    source.write_bytes(b"source")
+
+    summary = clear_preview_cache(tmp_path / "preview-cache")
+
+    assert summary.files == 1
+    assert preview_cache_usage(tmp_path / "preview-cache") == 0
+    assert analysis.is_file() and source.is_file()
 
 
 def test_compacted_local_match_stays_searchable_without_a_full_render(
@@ -347,6 +387,23 @@ def test_compacted_local_match_stays_searchable_without_a_full_render(
             (preset_id,),
         )
     assert mark_preset_prepared(database, preset_id)
+    audio = tmp_path / "legacy-audio"
+    render = audio / str(preset_id) / "60.wav"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"obsolete-analysis-render")
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO renders VALUES (?,?,?,?,?,?)",
+            (preset_id, 60, str(render.resolve()), -1.0, -12.0, 5.0),
+        )
+
+    summary = compact_render_library(database.path, audio)
+
+    assert summary.files == 1
+    assert summary.bytes == len(b"obsolete-analysis-render")
+    assert not render.exists()
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
 
     matrix, rows = _local_search_rows(database.path, tmp_path / "external-audio")
 

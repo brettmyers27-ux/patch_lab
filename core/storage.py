@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from core.platform_env import ENV, PlatformEnv
+from core.prepared_state import prepared_predicate
 
 
 STORAGE_SCHEMA = 1
@@ -84,6 +85,42 @@ def preview_cache_root(env: PlatformEnv = ENV) -> Path:
     """Root consumed by preview_cache_path(); audio lives below this root."""
 
     return (Path(env.app_data_dir) / "preview-cache").expanduser().resolve()
+
+
+def preview_cache_usage(root: Path) -> int:
+    """Return bytes owned by the preview cache, never by analysis work."""
+
+    audio = Path(root).expanduser().resolve() / "audio"
+    if not audio.is_dir():
+        return 0
+    return sum(path.stat().st_size for path in audio.rglob("*.wav") if path.is_file())
+
+
+def clear_preview_cache(root: Path) -> StorageOperationSummary:
+    """Delete only disposable preview-cache WAVs and their empty directories."""
+
+    audio = Path(root).expanduser().resolve() / "audio"
+    if not audio.is_dir():
+        return StorageOperationSummary()
+    files = 0
+    byte_count = 0
+    for path in audio.rglob("*.wav"):
+        if not path.is_file():
+            continue
+        byte_count += path.stat().st_size
+        path.unlink()
+        files += 1
+    for directory in sorted((path for path in audio.rglob("*") if path.is_dir()),
+                            key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    try:
+        audio.rmdir()
+    except OSError:
+        pass
+    return StorageOperationSummary(files=files, bytes=byte_count)
 
 
 def load_storage_preferences(env: PlatformEnv = ENV) -> StoragePreferences:
@@ -337,28 +374,23 @@ def compact_render_library(
         return StorageOperationSummary()
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
+    prepared_sql, prepared_parameters = prepared_predicate("p")
     rows = connection.execute(
-        """
+        f"""
         SELECT r.preset_id,r.wav_path,p.status,
-          EXISTS (
-            SELECT 1 FROM fingerprints f
-            WHERE f.preset_id=r.preset_id AND f.midi_note=0
-          ) AS has_fingerprint
+          ({prepared_sql}) AS is_prepared
         FROM renders r
         JOIN presets p ON p.id=r.preset_id
-        WHERE p.status='failed_silent'
-           OR EXISTS (
-             SELECT 1 FROM fingerprints f
-             WHERE f.preset_id=r.preset_id AND f.midi_note=0
-           )
-        """
+        WHERE ({prepared_sql})
+        """,
+        prepared_parameters,
     ).fetchall()
     paths_by_preset: dict[int, list[Path]] = {}
     learned_preset_ids: set[int] = set()
     unsafe_presets: set[int] = set()
     for row in rows:
         preset_id = int(row["preset_id"])
-        if bool(row["has_fingerprint"]):
+        if bool(row["is_prepared"]):
             learned_preset_ids.add(preset_id)
         path = Path(str(row["wav_path"])).expanduser().resolve()
         try:
@@ -395,22 +427,13 @@ def compact_render_library(
     cleanupable_preset_ids = {
         int(row[0])
         for row in connection.execute(
-            """
+            f"""
             SELECT p.id FROM presets p
-            WHERE p.status='embedded'
-              AND EXISTS (
-                SELECT 1 FROM fingerprints f
-                WHERE f.preset_id=p.id AND f.midi_note=0
-              )
-            """
+            WHERE ({prepared_sql})
+            """,
+            prepared_parameters,
         ).fetchall()
     }
-    cleanupable_preset_ids.update(
-        int(row[0])
-        for row in connection.execute(
-            "SELECT id FROM presets WHERE status='failed_silent'"
-        ).fetchall()
-    )
     connection.close()
 
     removed_files = 0

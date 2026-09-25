@@ -112,8 +112,10 @@ from core.match_library import (
 from core.platform_env import ENV, PlatformEnv
 from core.preview_cache import (
     PREVIEW_NOTES,
+    preview_cache_identity,
     preview_cache_path,
     recommendation_cache_key,
+    touch_preview,
     unmodified_recommendation_basis_index,
 )
 from core.privacy import PrivacyStore, distribution_mode, set_active_store, user_presets_enabled
@@ -121,9 +123,11 @@ from core.runtime_log import append_runtime_log
 from core.storage import (
     StoragePreferences,
     audio_root_size,
+    clear_preview_cache,
     load_storage_preferences,
     prepare_audio_root,
     prune_preview_cache,
+    preview_cache_usage,
     save_storage_preferences,
     storage_status,
 )
@@ -2571,8 +2575,10 @@ class LegacyMainWindow(QMainWindow):
     ) -> None:
         """Single cache/resolve/render/play path for every octave control."""
 
-        cached = preview_cache_path(self._preview_cache_root(), cache_key, note)
+        storage_key = preview_cache_identity(cache_key, synth)
+        cached = preview_cache_path(self._preview_cache_root(), storage_key, note)
         if cached.is_file():
+            touch_preview(cached)
             if self._play_audio(cached):
                 self.statusBar().showMessage(
                     f"Playing cached C{1 + (note - 24) // 12} preview"
@@ -2607,7 +2613,7 @@ class LegacyMainWindow(QMainWindow):
         if button is not None:
             button.setText("Rendering…")
             button.setEnabled(False)
-        target = (cache_key, note)
+        target = (storage_key, note)
         existing_request = self._preview_inflight.get(target)
         if existing_request:
             self._preview_requests[existing_request].append(
@@ -2626,7 +2632,7 @@ class LegacyMainWindow(QMainWindow):
                     source,
                     synth=synth,
                     midi_note=note,
-                    content_hash=cache_key,
+                    content_hash=storage_key,
                     output_root=self._preview_cache_root(),
                 )
             elif result_path is not None:
@@ -2634,7 +2640,7 @@ class LegacyMainWindow(QMainWindow):
                     result_path,
                     note,
                     output_root=self._preview_cache_root(),
-                    cache_key=cache_key,
+                    cache_key=storage_key,
                 )
             else:
                 raise RuntimeError("No verified render source is available for this preview")
@@ -2662,86 +2668,6 @@ class LegacyMainWindow(QMainWindow):
             synth=str(detail["synth"]),
             preview_source_path=detail.get("preview_source_path"),
             button=button,
-        )
-
-    def prerender_recommendation_octaves(
-        self,
-        result_path: Path,
-        *,
-        cache_key: str,
-        synth: str,
-        preview_source_path: str | Path | None = None,
-    ) -> int:
-        """Queue every octave of a generated patch so none waits on a click.
-
-        Returns the number of renders actually queued. Already-cached octaves
-        are skipped, so re-running the same sound costs nothing and a batch
-        only pays for genuinely new audio. These are queued silently: unlike a
-        clicked octave, a finished pre-render must not start playing audio at
-        the user, which would be a barrage during a batch.
-        """
-
-        queued = 0
-        for note in PREVIEW_NOTES:
-            try:
-                cached = preview_cache_path(self._preview_cache_root(), cache_key, note)
-            except ValueError:
-                continue
-            if cached.is_file():
-                continue
-            if (cache_key, note) in self._preview_inflight:
-                continue
-            try:
-                if preview_source_path:
-                    source = Path(preview_source_path).expanduser()
-                    if not source.is_absolute():
-                        source = resolve_result_path(result_path, source)
-                    request_id = self.preview_runner.start(
-                        source,
-                        synth=synth,
-                        midi_note=note,
-                        content_hash=cache_key,
-                        output_root=self._preview_cache_root(),
-                    )
-                else:
-                    request_id = self.preview_runner.start_recommendation(
-                        result_path,
-                        note,
-                        output_root=self._preview_cache_root(),
-                        cache_key=cache_key,
-                    )
-            except Exception as exc:
-                self.append_log(f"Could not queue C{1 + (note - 24) // 12} preview: {exc}")
-                continue
-            self._preview_requests[request_id] = [(None, "", note)]
-            self._preview_inflight[(cache_key, note)] = request_id
-            self._preview_request_targets[request_id] = (cache_key, note)
-            self._preview_silent_requests.add(request_id)
-            queued += 1
-        if queued:
-            self.append_log(f"Pre-rendering {queued} octave preview(s) for this patch")
-        return queued
-
-    def _queue_recommendation_prerender(
-        self, result_path: Path, result: dict
-    ) -> int:
-        """Pre-render the generated patch's octaves; returns renders queued."""
-
-        recommendation = result.get("recommendation")
-        if not isinstance(recommendation, dict):
-            return 0  # no-confident-match results have nothing to render
-        try:
-            cache_key = recommendation_cache_key(result_path, recommendation)
-        except Exception as exc:
-            self.append_log(f"Could not derive a preview cache key: {exc}")
-            return 0
-        if not cache_key:
-            return 0
-        return self.prerender_recommendation_octaves(
-            result_path,
-            cache_key=cache_key,
-            synth=str(recommendation.get("synth") or "serum2"),
-            preview_source_path=recommendation.get("preview_source_path"),
         )
 
     def _preview_request_completed(self, request_id: str, path: str) -> None:
@@ -4369,23 +4295,8 @@ class MainWindow(LegacyMainWindow):
             archived.result_json_path.read_text(encoding="utf-8")
         )
         self._current_match_uid = archived.record.match_uid
-        # Every octave of the generated patch is queued now, so the whole range
-        # is playable without waiting on a click. Single matches and batch
-        # files both come through here, which keeps the two consistent.
-        if self._batch_state is None:
-            self._queue_recommendation_prerender(
-                archived.result_json_path, self._match_result
-            )
-        else:
-            # Defer during a batch. Queueing seven CLAP-loading render
-            # subprocesses per file put ~360 of them in flight against the
-            # batch's own match and export workers, and the export worker's
-            # bounded startup handshake then timed out — reporting healthy
-            # matches as failures. The batch's job is matches and presets;
-            # octaves are rendered once it is done and the machine is free.
-            self._batch_state.setdefault("prerender", []).append(
-                archived.result_json_path
-            )
+        # Audition previews are rendered only after an octave is clicked.
+        # Prepared Match data never depends on this disposable cache.
         if self._batch_state is not None:
             self._batch_state["current_uid"] = archived.record.match_uid
         self._auto_save_generated_preset(archived, Path(source))
@@ -5308,35 +5219,10 @@ class MainWindow(LegacyMainWindow):
         ):
             self.save_preset_button.setEnabled(True)
             self.open_preset_location_button.setEnabled(True)
-        deferred = list(state.get("prerender", []))
         self._batch_state = None
-        self._queue_deferred_prerenders(deferred)
         self.refresh_match_library()
         self.nav_tabs.setCurrentIndex(1)
         self._refresh_save_state()
-
-    def _queue_deferred_prerenders(self, result_paths: list[Path]) -> None:
-        """Pre-render octaves for a finished batch, now that nothing competes.
-
-        Cleared _batch_state before this runs, so these queue exactly like a
-        single match's would. Anything already cached is skipped, so a resumed
-        or repeated batch costs nothing here.
-        """
-
-        if not result_paths:
-            return
-        queued = 0
-        for result_path in result_paths:
-            try:
-                result = json.loads(Path(result_path).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            queued += self._queue_recommendation_prerender(result_path, result) or 0
-        if queued:
-            self.append_log(
-                f"Batch finished — pre-rendering octaves for {len(result_paths)} "
-                "generated patch(es) in the background"
-            )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if self.storage_runner.running:
@@ -5475,6 +5361,14 @@ class MainWindow(LegacyMainWindow):
         cache_row.addWidget(cache_limit)
         cache_row.addStretch(1)
         storage_layout.addLayout(cache_row)
+        cache_usage = QLabel(
+            f"Preview cache: {preview_cache_usage(self._preview_cache_root()) / (1024 ** 2):.1f} MB"
+        )
+        cache_usage.setObjectName("muted")
+        storage_layout.addWidget(cache_usage)
+        clear_cache = QPushButton("Clear Preview Cache")
+        clear_cache.setObjectName("compactActionButton")
+        storage_layout.addWidget(clear_cache)
         free_space = QPushButton("Free Space Now")
         free_space.setObjectName("compactActionButton")
         storage_layout.addWidget(free_space)
@@ -5705,8 +5599,16 @@ class MainWindow(LegacyMainWindow):
             )
             self.statusBar().showMessage("Freeing PatchLab render space…")
 
+        def clear_cache_now() -> None:
+            summary = clear_preview_cache(self._preview_cache_root())
+            cache_usage.setText("Preview cache: 0.0 MB")
+            message = f"Cleared {summary.files:,} preview file(s)"
+            self.append_log(message)
+            self.statusBar().showMessage(message)
+
         choose_storage.clicked.connect(choose_storage_location)
         free_space.clicked.connect(free_space_now)
+        clear_cache.clicked.connect(clear_cache_now)
         if self.distribution_mode:
             toggle = QCheckBox("Use && share my own presets")
             toggle.setChecked(self.share_toggle.isChecked())

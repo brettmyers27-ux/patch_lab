@@ -177,12 +177,14 @@ def test_missing_file_never_triggers_a_device_reset(playback, tmp_path) -> None:
 
 
 def test_E_closest_match_audition_uses_the_shared_player(playback, monkeypatch) -> None:
-    from core.preview_cache import preview_cache_path
+    from core.preview_cache import preview_cache_identity, preview_cache_path
 
     window = playback.window
     called = MagicMock(return_value=True)
     monkeypatch.setattr(window, "_play_audio", called)
-    cached = preview_cache_path(window._preview_cache_root(), "abc", 60)
+    cached = preview_cache_path(
+        window._preview_cache_root(), preview_cache_identity("abc", "serum2"), 60
+    )
     cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_bytes(b"x")
 

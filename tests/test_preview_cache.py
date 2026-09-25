@@ -3,13 +3,26 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
 
 from core.db import Database
 from core.match_library import archive_match, delete_archived_match
-from core.preview_cache import preview_cache_path, result_cache_keys
+from core.preview_cache import preview_cache_identity, preview_cache_path, result_cache_keys
+
+
+def test_preview_identity_changes_with_content_synth_and_render_spec() -> None:
+    original = preview_cache_identity("a" * 40, "serum2")
+    assert preview_cache_identity("a" * 40, "serum1") != preview_cache_identity(
+        "a" * 40, "serum2"
+    )
+    assert preview_cache_identity("a" * 40, "serum2") != preview_cache_identity(
+        "b" * 40, "serum2"
+    )
+    with patch("core.preview_cache.PREVIEW_RENDER_SPEC", "octave-preview-v3"):
+        assert preview_cache_identity("a" * 40, "serum2") != original
 
 
 def _match_fixture(

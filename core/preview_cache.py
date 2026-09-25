@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from collections import Counter
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from core.match_library import resolve_entry_path, resolve_result_path
 
 PREVIEW_NOTES = (24, 36, 48, 60, 72, 84, 96)
 GENERATED_PREFIX = "generated-"
+PREVIEW_RENDER_SPEC = "octave-preview-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,24 @@ def preview_cache_path(cache_root: Path, cache_key: str, midi_note: int) -> Path
     if int(midi_note) not in PREVIEW_NOTES:
         raise ValueError(f"Unsupported preview note {midi_note}")
     return Path(cache_root).expanduser().resolve() / "audio" / key / f"{int(midi_note)}.wav"
+
+
+def preview_cache_identity(content_key: str, synth: str) -> str:
+    """Namespace a preview by content, synth, and the audible render contract."""
+
+    digest = hashlib.sha256(
+        f"{PREVIEW_RENDER_SPEC}:{synth}:{content_key}".encode("utf-8")
+    ).hexdigest()
+    return f"preview-{digest}"
+
+
+def touch_preview(path: Path) -> None:
+    """Record a cache hit for LRU eviction without changing audio bytes."""
+
+    try:
+        os.utime(Path(path), None)
+    except OSError:
+        pass
 
 
 def _generated_key_from_candidate(
