@@ -344,7 +344,7 @@ def test_withdrawing_consent_between_render_batches_stops_further_user_work(cons
     folder = tmp_path / "linked"
     folder.mkdir()
     database = Database(tmp_path / "library.db")
-    for index in range(30):  # two compact batches of 24 and 6
+    for index in range(30):
         _add(database, folder, f"User{index:02d}", factory=False, rendered=False)
     consent.set(True, folder=folder)
     batches: list[list[int]] = []
@@ -364,6 +364,6 @@ def test_withdrawing_consent_between_render_batches_stops_further_user_work(cons
             folder, db_path=database.path, audio_root=tmp_path / "audio", state_dir=tmp_path / "states",
             relay=_Relay(), render_processes=1, compact_mode=True, log=lambda _m: None,
         )
-    assert len(batches) == 1 and len(batches[0]) == 24, "the second batch never started"
+    assert len(batches) == 1 and len(batches[0]) == 1, "the next preset never started"
     assert summary.user_presets_disabled is True
     assert len(_rows(database)) == 30, "nothing was deleted"

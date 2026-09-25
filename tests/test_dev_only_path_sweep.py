@@ -47,19 +47,23 @@ def test_render_library_core_function_is_reached_with_dev_defaults_only_from_one
     defaults must only ever be reachable via the already-guarded CLI wrapper,
     never called bare from anywhere else GUI-reachable."""
 
-    for path in ("core/local_library.py",):
-        source = _source(path)
-        # Every call in this file supplies db_path/audio_root/state_dir
-        # explicitly (the enclosing functions require them as keyword-only
-        # arguments with no default at all -- see _process_linked_folder).
-        assert "render_library(\n" in source or "render_library(" in source
-        assert "def _process_linked_folder(" in source
-        # A regression here would look like a new default appearing on
-        # db_path/audio_root/state_dir in that signature.
-        signature = source.split("def _process_linked_folder(")[1].split(") -> ")[0]
-        assert "db_path: Path,\n" in signature or "db_path: Path," in signature
-        assert "= DEFAULT_DB_PATH" not in signature
-        assert "= DEFAULT_AUDIO_ROOT" not in signature
+    local_source = _source("core/local_library.py")
+    assert "render_function=render_library" in local_source
+    assert "def _process_linked_folder(" in local_source
+    signature = local_source.split("def _process_linked_folder(")[1].split(") -> ")[0]
+    assert "db_path: Path,\n" in signature or "db_path: Path," in signature
+    assert "= DEFAULT_DB_PATH" not in signature
+    assert "= DEFAULT_AUDIO_ROOT" not in signature
+
+    # Phase 3 routes rendering through the crash-safe lifecycle. The injected
+    # renderer still receives every runtime path explicitly.
+    preparation_source = _source("core/preparation.py")
+    render_call = preparation_source.split("rendered = render_function(", 1)[1].split(
+        ")", 1
+    )[0]
+    assert "db_path=database.path" in render_call
+    assert "audio_root=jobs_root" in render_call
+    assert "state_dir=state_dir" in render_call
 
 
 def test_factory_bundle_default_resolves_from_the_runtime_family_not_a_checkout_path() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 
@@ -48,6 +50,23 @@ class PreparedRevision:
 
 
 CURRENT_PREPARED_REVISION = PreparedRevision()
+
+
+def prepared_revision_token(
+    revision: PreparedRevision = CURRENT_PREPARED_REVISION,
+) -> str:
+    """Stable job token proving which data contract an interrupted run targeted."""
+
+    payload = {
+        "clap": revision.clap,
+        "fingerprint": revision.fingerprint,
+        "handcrafted": revision.handcrafted,
+        "render": revision.render,
+        "serum1": revision.serum1,
+        "serum2": revision.serum2,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def prepared_predicate(

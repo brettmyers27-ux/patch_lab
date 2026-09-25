@@ -452,46 +452,24 @@ def test_successfully_learned_presets_survive_a_later_failure(
     assert count == 6
 
 
-def test_compact_pipeline_order_is_preserved() -> None:
-    """PART 27: learn and durably commit BEFORE deleting regenerable audio.
-
-    Asserted against the source because the ordering is the safety property:
-    fingerprints are written by fingerprint_batch and only then does
-    compact_render_library remove WAVs.
-    """
+def test_streaming_pipeline_commits_before_cleanup() -> None:
+    """PART 27: durably commit PREPARED before deleting regenerable audio."""
 
     import ast
     import inspect
 
-    import core.local_library as library_module
+    import core.preparation as preparation_module
 
-    # Scope the check to the per-batch loop inside process_linked_folder: the
-    # module has other compact_render_library() calls (the standalone compaction
-    # entry point and the final sweep) that are not part of this ordering.
-    source = inspect.getsource(library_module._process_linked_folder)
+    source = inspect.getsource(preparation_module.prepare_work_queue)
     tree = ast.parse(inspect.cleandoc(source))
-    loop = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.For)
-        and any(
-            isinstance(inner, ast.Call)
-            and getattr(inner.func, "id", "") == "compact_render_library"
-            for inner in ast.walk(node)
-        )
-    )
-    # ast.walk is breadth-first, so order by source position explicitly.
     calls = sorted(
         (
             (node.lineno, node.col_offset, getattr(node.func, "id", ""))
-            for node in ast.walk(loop)
+            for node in ast.walk(tree)
             if isinstance(node, ast.Call)
         )
     )
-    names = [name for _line, _col, name in calls]
-    assert "fingerprint_batch" in names
-    assert "compact_render_library" in names
-    assert names.index("fingerprint_batch") < names.index("compact_render_library"), (
-        "temporary renders must never be deleted before the learned state is "
-        f"committed; call order was {names}"
-    )
+    commit_lines = [line for line, _column, name in calls if name == "_commit_prepared"]
+    cleanup_lines = [line for line, _column, name in calls if name == "_finish_cleanup"]
+    assert commit_lines and cleanup_lines
+    assert all(any(commit < cleanup for commit in commit_lines) for cleanup in cleanup_lines)

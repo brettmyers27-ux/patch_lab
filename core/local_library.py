@@ -17,8 +17,13 @@ import numpy as np
 from core.contribution_bundle import LEDGER_NAME
 from core.db import Database
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
-from core.features import ClapEmbedder, handcrafted_features, load_audio_48k_mono
-from core.library_state import mark_preset_prepared, reconcile_source_tree
+from core.features import ClapEmbedder
+from core.library_state import reconcile_source_tree
+from core.preparation import (
+    analysis_temp_root,
+    fingerprint_render_rows,
+    prepare_work_queue,
+)
 from core.platform_env import ENV, PlatformEnv
 from core.plugin_host import ParameterValue
 from core.privacy import UserPresetsDisabled, require_user_presets, user_presets_enabled
@@ -28,15 +33,11 @@ from core.preset_scan import (
     discover_presets,
     sha1_file,
 )
-from core.render import MIDI_NOTES, render_library, summary_dict
+from core.render import render_library
+from core.prepared_state import prepared_predicate
 from core.serum2_preset import parse_serum2_preset
 from core.serum2_state_reconstruct import decode_host_template, reconstruct_vstpreset
-from core.storage import (
-    compact_render_library,
-    configured_audio_root,
-    load_storage_preferences,
-    preview_cache_root,
-)
+from core.storage import configured_audio_root, preview_cache_root
 
 
 LogCallback = Callable[[str], None]
@@ -137,6 +138,7 @@ def default_local_paths(env: PlatformEnv = ENV) -> dict[str, Path]:
     return {
         "db": base / "library.db",
         "audio": configured_audio_root(env),
+        "analysis": analysis_temp_root(env),
         "preview_root": preview_cache_root(env),
         "states": base / "serum2-render-states",
         "matches": base / "match_library",
@@ -172,59 +174,6 @@ def _store_serum2(
     )
 
 
-def _fingerprint_preset(
-    database: Database,
-    embedder: ClapEmbedder,
-    audio_root: Path,
-    preset_id: int,
-) -> bool:
-    """Embed and store fingerprints for one already-rendered preset.
-
-    Shared by the inline linked-folder pipeline and fingerprint_pending_presets()
-    so both ever compute a preset's fingerprint the same way. Returns False (no
-    database write) if none of the expected notes are on disk yet.
-    """
-
-    prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
-    for note in MIDI_NOTES:
-        wav = Path(audio_root) / str(preset_id) / f"{note}.wav"
-        if not wav.is_file():
-            continue
-        prepared = load_audio_48k_mono(wav)
-        prepared_rows.append(
-            (note, prepared.waveform, handcrafted_features(prepared.waveform))
-        )
-    embeddings = (
-        embedder.embed([row[1] for row in prepared_rows])
-        if prepared_rows
-        else np.empty((0, 512), dtype=np.float32)
-    )
-    rows: list[tuple[int, np.ndarray, np.ndarray]] = []
-    for (note, _waveform, handcrafted), embedding in zip(
-        prepared_rows, embeddings, strict=True
-    ):
-        database.upsert_fingerprint(
-            preset_id,
-            note,
-            np.ascontiguousarray(embedding, dtype=np.float32).tobytes(),
-            np.ascontiguousarray(handcrafted, dtype=np.float32).tobytes(),
-        )
-        rows.append((note, embedding, handcrafted))
-    if not rows:
-        return False
-    mean_embedding = np.mean([row[1] for row in rows], axis=0)
-    mean_embedding /= max(float(np.linalg.norm(mean_embedding)), 1e-12)
-    mean_handcrafted = np.mean([row[2] for row in rows], axis=0)
-    database.upsert_fingerprint(
-        preset_id,
-        0,
-        np.ascontiguousarray(mean_embedding, dtype=np.float32).tobytes(),
-        np.ascontiguousarray(mean_handcrafted, dtype=np.float32).tobytes(),
-    )
-    mark_preset_prepared(database, preset_id)
-    return True
-
-
 def fingerprint_pending_presets(
     db_path: Path,
     audio_root: Path,
@@ -244,61 +193,42 @@ def fingerprint_pending_presets(
     runs the shipped CLAP encoder over audio that already exists.
     """
 
+    _ = compact_mode  # Successful analysis renders are temporary in Phase 3.
+
     if not user_presets_enabled():
         log("Personal presets are turned off; nothing was learned from your library.")
         return LocalLibrarySummary(user_presets_disabled=True)
     database = Database(Path(db_path).expanduser().resolve())
-    if compact_mode is None:
-        compact_mode = load_storage_preferences(env).compact_mode
     with database.connect() as connection:
-        already_fingerprinted = {
+        targets = [
             int(row[0])
             for row in connection.execute(
-                "SELECT preset_id FROM fingerprints WHERE midi_note=0"
+                "SELECT preset_id FROM renders WHERE midi_note IN (24,36,48,60,72,84,96) "
+                "GROUP BY preset_id HAVING COUNT(DISTINCT midi_note)=7"
             ).fetchall()
-        }
-        rows = connection.execute(
-            "SELECT id,name FROM presets WHERE status IN ('rendered','embedded')"
-        ).fetchall()
-    targets = [
-        (int(row["id"]), str(row["name"]))
-        for row in rows
-        if int(row["id"]) not in already_fingerprinted
-    ]
+        ]
     summary = LocalLibrarySummary()
-    total = len(targets)
-    if total == 0:
+    if not targets:
         log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
         return summary
-
-    embedder = ClapEmbedder(env)
-    completed = 0
-    batch_size = 24 if compact_mode else total
-    for batch_start in range(0, total, batch_size):
-        for preset_id, name in targets[batch_start : batch_start + batch_size]:
-            if _fingerprint_preset(database, embedder, audio_root, preset_id):
-                summary.fingerprints_created += 1
-                log(f"Local fingerprint ready: {name}")
-            completed += 1
-            if progress is not None:
-                progress(
-                    {
-                        "stage": "analyze",
-                        "current": completed,
-                        "total": total,
-                        "text": f"Learning {completed:,} of {total:,} rendered presets",
-                    }
-                )
-        if compact_mode:
-            compacted = compact_render_library(db_path, audio_root, log=log)
-            summary.compacted_render_files += compacted.files
-            summary.compacted_render_bytes += compacted.bytes
-            if compacted.files:
-                log(
-                    "Compact storage retained fingerprints and removed "
-                    f"{compacted.files:,} regenerable WAV files "
-                    f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
-                )
+    preparation = prepare_work_queue(
+        db_path=database.path,
+        analysis_root=analysis_temp_root(env),
+        legacy_audio_root=audio_root,
+        state_dir=Path(env.app_data_dir) / "serum2-render-states",
+        env=env,
+        preset_ids=targets,
+        allow_render=False,
+        log=log,
+        progress=progress,
+        cancel_check=lambda: not user_presets_enabled(),
+        fingerprint_function=fingerprint_render_rows,
+        embedder_factory=ClapEmbedder,
+    )
+    summary.fingerprints_created = preparation.fingerprints_created
+    summary.failed_load = preparation.failed
+    summary.compacted_render_files = preparation.cleaned_files
+    summary.compacted_render_bytes = preparation.cleaned_bytes
     log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
     return summary
 
@@ -400,8 +330,7 @@ def _process_pending_for_generation(
     operation_id = operation_id or new_operation_id("pending")
     generation = str(generation)
     summary = PendingProcessSummary(generation=generation)
-    if compact_mode is None:
-        compact_mode = load_storage_preferences(env).compact_mode
+    _ = compact_mode  # Kept for command compatibility; cleanup is unconditional.
     database = Database(db_path)
 
     capability = capability_for(generation, env=env, operation_id=operation_id)
@@ -506,72 +435,27 @@ def _process_pending_for_generation(
                 }
             )
 
-    # ---- render, learn, durably commit, then clean up -------------------
-    embedder = ClapEmbedder(env) if ready_ids else None
-    total_notes = len(ready_ids) * len(MIDI_NOTES)
-    completed_notes = 0
-    batch_size = 24 if compact_mode else max(len(ready_ids), 1)
-    for start in range(0, len(ready_ids), batch_size):
-        require_user_presets("pending-rendering")
-        batch = ready_ids[start : start + batch_size]
-
-        def render_progress(detail: dict[str, Any]) -> None:
-            if progress is None:
-                return
-            current = completed_notes + int(detail.get("completed_note_pairs", 0))
-            progress(
-                {
-                    **detail,
-                    "stage": "render",
-                    "current": current,
-                    "total": total_notes,
-                    "text": f"Rendering {current:,} of {total_notes:,} notes",
-                }
-            )
-
-        render_summary = render_library(
+    # ---- one authoritative render -> analyze -> commit -> cleanup path ---
+    if ready_ids:
+        preparation = prepare_work_queue(
             db_path=db_path,
-            audio_root=audio_root,
+            analysis_root=analysis_temp_root(env),
+            legacy_audio_root=audio_root,
             state_dir=state_dir,
-            preset_ids=batch,
-            processes=render_processes,
+            env=env,
+            preset_ids=ready_ids,
+            render_processes=render_processes,
             log=log,
-            progress=render_progress,
+            progress=progress,
+            cancel_check=lambda: not user_presets_enabled(),
+            render_function=render_library,
+            fingerprint_function=fingerprint_render_rows,
+            embedder_factory=ClapEmbedder,
         )
-        log(
-            "Pending render batch summary: "
-            + json.dumps(summary_dict(render_summary), sort_keys=True)
-        )
-        completed_notes += len(batch) * len(MIDI_NOTES)
-        with database.connect() as connection:
-            audible = {
-                int(row[0])
-                for row in connection.execute(
-                    "SELECT id FROM presets WHERE status='rendered'"
-                ).fetchall()
-            }
-        for preset_id in batch:
-            if preset_id not in audible or embedder is None:
-                continue
-            if _fingerprint_preset(database, embedder, audio_root, preset_id):
-                summary.fingerprints_created += 1
-            if progress is not None:
-                progress(
-                    {
-                        "stage": "analyze",
-                        "current": summary.fingerprints_created,
-                        "total": len(ready_ids),
-                        "text": (
-                            f"Learning {summary.fingerprints_created:,} of "
-                            f"{len(ready_ids):,} presets"
-                        ),
-                    }
-                )
-        # Only after the learned state is durably committed above.
-        if compact_mode:
-            compacted = compact_render_library(db_path, audio_root, log=log)
-            summary.compacted_render_files += compacted.files
-            summary.compacted_render_bytes += compacted.bytes
+        summary.fingerprints_created += preparation.fingerprints_created
+        summary.failed_load += preparation.failed
+        summary.compacted_render_files += preparation.cleaned_files
+        summary.compacted_render_bytes += preparation.cleaned_bytes
 
     summary.still_pending = len(database.presets_needing_generation(generation))
     record(
@@ -735,8 +619,7 @@ def _process_linked_folder(
     if not root.is_dir():
         raise NotADirectoryError(root)
     database = Database(db_path)
-    if compact_mode is None:
-        compact_mode = load_storage_preferences(env).compact_mode
+    _ = compact_mode  # Kept for command compatibility; cleanup is unconditional.
     known_factory = FactoryBundle(bundle_path).known_hashes()
     paths = discover_presets(root)
     summary = LocalLibrarySummary(found=len(paths))
@@ -1005,130 +888,35 @@ def _process_linked_folder(
                     }
                 )
 
-    renderable = [
-        record.id
-        for record in database.renderable_presets()
-        if record.id in id_to_path and record.status != "failed_silent"
-    ]
-    with database.connect() as connection:
-        already_fingerprinted = {
-            int(row[0])
-            for row in connection.execute(
-                "SELECT preset_id FROM fingerprints WHERE midi_note=0"
-            ).fetchall()
-        }
-    # Compact mode treats fingerprints as the durable result. Re-scanning an
-    # already learned preset must not recreate seven large WAV files merely to
-    # delete them again. Turning compact mode off intentionally restores them.
-    render_targets = (
-        [preset_id for preset_id in renderable if preset_id not in already_fingerprinted]
-        if compact_mode
-        else renderable
+    require_user_presets("preparation")
+    preparation = prepare_work_queue(
+        db_path=db_path,
+        analysis_root=analysis_temp_root(env),
+        legacy_audio_root=audio_root,
+        state_dir=state_dir,
+        env=env,
+        preset_ids=list(id_to_path),
+        render_processes=render_processes,
+        log=log,
+        progress=progress,
+        cancel_check=lambda: not user_presets_enabled(),
+        render_function=render_library,
+        fingerprint_function=fingerprint_render_rows,
+        embedder_factory=ClapEmbedder,
     )
-    feature_targets = {
-        preset_id
-        for preset_id in render_targets
-        if preset_id not in already_fingerprinted
-    }
-    total_notes = len(render_targets) * len(MIDI_NOTES)
-    total_features = len(feature_targets)
-    completed_render_notes = 0
-    completed_features = 0
-    embedder = ClapEmbedder(env) if feature_targets else None
-
-    def fingerprint_batch(preset_ids: list[int]) -> None:
-        nonlocal completed_features
-        for preset_id in preset_ids:
-            require_user_presets("analysis")
-            if preset_id not in feature_targets:
-                continue
-            assert embedder is not None
-            if _fingerprint_preset(database, embedder, audio_root, preset_id):
-                summary.fingerprints_created += 1
-                log(f"Local fingerprint ready: {id_to_path[preset_id].name}")
-            completed_features += 1
-            if progress is not None:
-                progress(
-                    {
-                        "stage": "analyze",
-                        "current": completed_features,
-                        "total": total_features,
-                        "text": (
-                            f"Learning {completed_features:,} of "
-                            f"{total_features:,} linked presets"
-                        ),
-                    }
-                )
-
-    # Compact mode deliberately limits the temporary render working set. Each
-    # batch is rendered, embedded, and removed before the next one begins, so
-    # a full library never needs tens of gigabytes of free local space.
-    batch_size = 24 if compact_mode else max(len(render_targets), 1)
-    for batch_start in range(0, len(render_targets), batch_size):
-        require_user_presets("rendering")
-        batch = render_targets[batch_start : batch_start + batch_size]
-
-        def render_progress(detail: dict[str, Any]) -> None:
-            if progress is None:
-                return
-            current = completed_render_notes + int(
-                detail.get("completed_note_pairs", 0)
-            )
-            progress(
-                {
-                    **detail,
-                    "stage": "render",
-                    "current": current,
-                    "total": total_notes,
-                    "text": f"Rendering {current:,} of {total_notes:,} notes",
-                }
-            )
-
-        render_summary = render_library(
-            db_path=db_path,
-            audio_root=audio_root,
-            state_dir=state_dir,
-            preset_ids=batch,
-            processes=render_processes,
-            log=log,
-            progress=render_progress,
-        )
-        log(
-            "Local render batch summary: "
-            + json.dumps(summary_dict(render_summary), sort_keys=True)
-        )
-        completed_render_notes += len(batch) * len(MIDI_NOTES)
-        with database.connect() as connection:
-            audible_ids = {
-                int(row[0])
-                for row in connection.execute(
-                    "SELECT id FROM presets WHERE status='rendered'"
-                ).fetchall()
-            }
-        fingerprint_batch([preset_id for preset_id in batch if preset_id in audible_ids])
-        if compact_mode:
-            compacted = compact_render_library(db_path, audio_root, log=log)
-            summary.compacted_render_files += compacted.files
-            summary.compacted_render_bytes += compacted.bytes
-            if compacted.files:
-                log(
-                    "Compact storage retained fingerprints and removed "
-                    f"{compacted.files:,} regenerable WAV files "
-                    f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
-                )
+    summary.fingerprints_created += preparation.fingerprints_created
+    summary.failed_load += preparation.failed
+    summary.compacted_render_files += preparation.cleaned_files
+    summary.compacted_render_bytes += preparation.cleaned_bytes
 
     with database.connect() as connection:
-        searchable_ids = {
-            int(row[0])
-            for row in connection.execute(
-                "SELECT preset_id FROM fingerprints WHERE midi_note=0"
-            ).fetchall()
-        }
+        prepared_sql, prepared_parameters = prepared_predicate("p")
         presets = connection.execute(
-            "SELECT id,content_hash,is_factory FROM presets "
-            "WHERE status IN ('rendered','embedded') ORDER BY id"
+            f"SELECT p.id,p.content_hash,p.is_factory FROM presets p "
+            f"WHERE {prepared_sql} ORDER BY p.id",
+            prepared_parameters,
         ).fetchall()
-    eligible = [row for row in presets if int(row["id"]) in id_to_path and int(row["id"]) in searchable_ids]
+    eligible = [row for row in presets if int(row["id"]) in id_to_path]
     summary.searchable_local = len(eligible)
     require_user_presets("contribution")
     _contribute_presets(
@@ -1142,16 +930,6 @@ def _process_linked_folder(
         log=log,
         sleep=upload_sleep,
     )
-    if compact_mode:
-        compacted = compact_render_library(db_path, audio_root, log=log)
-        summary.compacted_render_files += compacted.files
-        summary.compacted_render_bytes += compacted.bytes
-        if compacted.files:
-            log(
-                "Compact storage retained fingerprints and removed "
-                f"{compacted.files:,} regenerable WAV files "
-                f"({compacted.bytes / (1024 ** 3):.2f} GiB)."
-            )
     log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
     return summary
 

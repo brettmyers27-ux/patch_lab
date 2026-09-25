@@ -16,7 +16,7 @@ from core.plugin_host import ParameterValue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "library.db"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +161,20 @@ CREATE TABLE IF NOT EXISTS prepared_presets (
   serum2_schema_revision TEXT NOT NULL,
   prepared_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS preparation_jobs (
+  preset_id INTEGER PRIMARY KEY REFERENCES presets(id) ON DELETE CASCADE,
+  expected_content_hash TEXT NOT NULL,
+  target_revision TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'pending','rendering','rendered','analyzing','committing',
+    'prepared','cleanup_complete','failed','cancelled'
+  )),
+  temp_dir TEXT NOT NULL,
+  cleanup_needed INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_needed IN (0,1)),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS favorites (
   content_hash TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -207,6 +221,8 @@ CREATE INDEX IF NOT EXISTS idx_preset_sources_root_active
   ON preset_sources(source_root,active);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_preset_sources_one_active_path
   ON preset_sources(normalized_path) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_preparation_jobs_cleanup
+  ON preparation_jobs(cleanup_needed,state);
 CREATE INDEX IF NOT EXISTS idx_match_library_created ON match_library(created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_match_library_batch ON match_library(batch_id);
 CREATE INDEX IF NOT EXISTS idx_match_library_hash ON match_library(source_content_hash);

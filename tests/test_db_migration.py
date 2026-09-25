@@ -1,4 +1,4 @@
-"""Upgrading an existing library to schema 7 must never lose user data.
+"""Upgrading an existing library to schema 8 must never lose user data.
 
 A user upgrading has thousands of learned presets and a Match library. This is a
 release blocker: the migration must succeed automatically, keep every row, keep
@@ -53,14 +53,15 @@ TABLES = (
 def build_schema5_library(path: Path, *, presets: int = 40) -> None:
     """A populated library in exactly the layout the last production build wrote.
 
-    The current base schema still describes every legacy table. The two schema-7
-    state tables are removed below so the fixture reproduces the old layout.
+    The current base schema still describes every legacy table. New state tables
+    are removed below so the fixture reproduces the old layout.
     """
 
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA_SQL)
     # SCHEMA_SQL describes the current new-database shape. A real schema-5
-    # database predates the two schema-7 state tables.
+    # database predates the incremental and preparation state tables.
+    connection.execute("DROP TABLE preparation_jobs")
     connection.execute("DROP TABLE prepared_presets")
     connection.execute("DROP TABLE preset_sources")
     connection.execute("INSERT INTO schema_migrations(version) VALUES (5)")
@@ -154,6 +155,19 @@ def versions_of(path: Path) -> list[int]:
         connection.close()
 
 
+def tables_of(path: Path) -> set[str]:
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        connection.close()
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -168,8 +182,11 @@ def test_upgrade_preserves_every_row_and_adds_the_new_columns(tmp_path: Path) ->
 
     assert dump(path) == before, "no existing row may change in any table"
     assert set(NEW_COLUMNS) <= columns_of(path)
+    assert {"preset_sources", "prepared_presets", "preparation_jobs"} <= tables_of(
+        path
+    )
     assert versions_of(path) == [5, SCHEMA_VERSION]
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
 
 
 def test_new_fields_start_empty_and_nothing_is_marked_pending(tmp_path: Path) -> None:

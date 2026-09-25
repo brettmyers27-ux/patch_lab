@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import soundfile as sf
 
 from core.db import Database
+from core.library_state import mark_preset_prepared, reconcile_source_tree
 from core.local_library import (
     auto_scan_due,
     fingerprint_pending_presets,
@@ -45,6 +47,7 @@ class LocalRelayResilienceTest(unittest.TestCase):
             state_dir = root / "states"
             database = Database(db_path)
             paths = []
+            preset_ids = []
             for index in range(4):
                 path = linked / f"Preset {index}.fxp"
                 path.write_bytes(b"CcnK" + bytes([index]) * 32)
@@ -55,22 +58,22 @@ class LocalRelayResilienceTest(unittest.TestCase):
                     synth="serum1",
                     content_hash=sha1_file(path),
                 )
+                preset_ids.append(preset_id)
                 database.replace_params(
                     preset_id,
                     [ParameterValue(0, "Master", 0.5, "50%")],
                     "test",
                 )
-                database.upsert_fingerprint(
-                    preset_id,
-                    0,
-                    np.zeros(512, dtype=np.float32).tobytes(),
-                    np.zeros(10, dtype=np.float32).tobytes(),
-                )
-                with database.connect() as connection:
-                    connection.execute(
-                        "UPDATE presets SET status='rendered' WHERE id=?",
-                        (preset_id,),
+            reconcile_source_tree(linked, database)
+            for preset_id in preset_ids:
+                for note in (0, *MIDI_NOTES):
+                    database.upsert_fingerprint(
+                        preset_id,
+                        note,
+                        np.zeros(512, dtype=np.float32).tobytes(),
+                        np.zeros(9, dtype=np.float32).tobytes(),
                     )
+                self.assertTrue(mark_preset_prepared(database, preset_id))
 
             relay = FailingRelay()
             messages: list[str] = []
@@ -127,6 +130,7 @@ class LocalRelayResilienceTest(unittest.TestCase):
             db_path = root / "library.db"
             database = Database(db_path)
             paths = []
+            preset_ids = []
             for index in range(4):
                 path = linked / f"Preset {index}.fxp"
                 path.write_bytes(b"CcnK" + bytes([index]) * 32)
@@ -134,13 +138,17 @@ class LocalRelayResilienceTest(unittest.TestCase):
                 preset_id, _ = database.insert_preset(
                     path=path, name=path.stem, synth="serum1", content_hash=sha1_file(path)
                 )
+                preset_ids.append(preset_id)
                 database.replace_params(preset_id, [ParameterValue(0, "Master", 0.5, "50%")], "test")
-                database.upsert_fingerprint(
-                    preset_id, 0, np.zeros(512, dtype=np.float32).tobytes(),
-                    np.zeros(10, dtype=np.float32).tobytes(),
-                )
-                with database.connect() as connection:
-                    connection.execute("UPDATE presets SET status='rendered' WHERE id=?", (preset_id,))
+            reconcile_source_tree(linked, database)
+            for preset_id in preset_ids:
+                for note in (0, *MIDI_NOTES):
+                    database.upsert_fingerprint(
+                        preset_id, note,
+                        np.zeros(512, dtype=np.float32).tobytes(),
+                        np.zeros(9, dtype=np.float32).tobytes(),
+                    )
+                self.assertTrue(mark_preset_prepared(database, preset_id))
 
             class GoodRelay:
                 base_url = "https://relay.invalid"
@@ -225,12 +233,22 @@ class LocalRelayResilienceTest(unittest.TestCase):
                         for note in (24, 36, 48, 60, 72, 84, 96):
                             wav = audio_root / str(preset_id) / f"{note}.wav"
                             wav.parent.mkdir(parents=True, exist_ok=True)
-                            wav.write_bytes(b"wav")
+                            sf.write(
+                                wav,
+                                np.ones((128, 2), dtype=np.float32),
+                                44_100,
+                                subtype="FLOAT",
+                                format="WAV",
+                            )
                             connection.execute(
                                 "INSERT INTO renders VALUES (?,?,?,?,?,?)",
                                 (preset_id, note, str(wav), -1.0, -12.0, 5.0),
                             )
-                return RenderSummary(selected_presets=len(preset_ids))
+                return RenderSummary(
+                    selected_presets=len(preset_ids),
+                    queued_presets=len(preset_ids),
+                    rendered_note_pairs=len(preset_ids) * 7,
+                )
 
             class FakeEmbedder:
                 def __init__(self, _env) -> None:  # type: ignore[no-untyped-def]
@@ -243,16 +261,6 @@ class LocalRelayResilienceTest(unittest.TestCase):
                 patch("core.local_library.FactoryBundle") as factory_bundle,
                 patch("core.local_library.render_library", side_effect=fake_render_library),
                 patch("core.local_library.ClapEmbedder", FakeEmbedder),
-                patch(
-                    "core.local_library.load_audio_48k_mono",
-                    return_value=SimpleNamespace(
-                        waveform=np.ones(128, dtype=np.float32)
-                    ),
-                ),
-                patch(
-                    "core.local_library.handcrafted_features",
-                    return_value=np.ones(10, dtype=np.float32),
-                ),
             ):
                 factory_bundle.return_value.known_hashes.return_value = set()
                 summary = process_linked_folder(
@@ -266,7 +274,7 @@ class LocalRelayResilienceTest(unittest.TestCase):
                     log=lambda _message: None,
                 )
 
-            self.assertEqual(batch_sizes, [24, 1])
+            self.assertEqual(batch_sizes, [1] * 25)
             self.assertEqual(summary.fingerprints_created, 25)
             self.assertEqual(summary.compacted_render_files, 25 * 7)
             with database.connect() as connection:
@@ -336,17 +344,33 @@ class FingerprintCatchUpTest(unittest.TestCase):
     def _rendered_preset_with_no_fingerprint(
         self, database: Database, audio_root: Path, name: str
     ) -> int:
+        source_root = audio_root.parent / "linked"
+        source_root.mkdir(exist_ok=True)
+        source = source_root / f"{name}.fxp"
+        source.write_bytes(f"CcnK-{name}".encode())
         preset_id, _ = database.insert_preset(
-            path=Path(f"/does/not/matter/{name}.fxp"),
+            path=source,
             name=name,
             synth="serum1",
-            content_hash=f"hash-{name}",
+            content_hash=sha1_file(source),
+        )
+        reconcile_source_tree(source_root, database)
+        database.replace_params(
+            preset_id,
+            [ParameterValue(0, "Master", 0.5, "50%")],
+            "test",
         )
         with database.connect() as connection:
             for note in MIDI_NOTES:
                 wav = audio_root / str(preset_id) / f"{note}.wav"
                 wav.parent.mkdir(parents=True, exist_ok=True)
-                wav.write_bytes(b"wav")
+                sf.write(
+                    wav,
+                    np.ones((128, 2), dtype=np.float32),
+                    44_100,
+                    subtype="FLOAT",
+                    format="WAV",
+                )
                 connection.execute(
                     "INSERT INTO renders VALUES (?,?,?,?,?,?)",
                     (preset_id, note, str(wav), -1.0, -12.0, 5.0),
@@ -369,14 +393,6 @@ class FingerprintCatchUpTest(unittest.TestCase):
 
             with (
                 patch("core.local_library.ClapEmbedder", FakeEmbedder),
-                patch(
-                    "core.local_library.load_audio_48k_mono",
-                    return_value=SimpleNamespace(waveform=np.ones(128, dtype=np.float32)),
-                ),
-                patch(
-                    "core.local_library.handcrafted_features",
-                    return_value=np.ones(10, dtype=np.float32),
-                ),
             ):
                 summary = fingerprint_pending_presets(
                     database.path, audio_root, log=lambda _m: None, compact_mode=False
@@ -400,12 +416,14 @@ class FingerprintCatchUpTest(unittest.TestCase):
             preset_id = self._rendered_preset_with_no_fingerprint(
                 database, audio_root, "Already Learned"
             )
-            database.upsert_fingerprint(
-                preset_id,
-                0,
-                np.zeros(512, dtype=np.float32).tobytes(),
-                np.zeros(10, dtype=np.float32).tobytes(),
-            )
+            for note in (0, *MIDI_NOTES):
+                database.upsert_fingerprint(
+                    preset_id,
+                    note,
+                    np.zeros(512, dtype=np.float32).tobytes(),
+                    np.zeros(9, dtype=np.float32).tobytes(),
+                )
+            self.assertTrue(mark_preset_prepared(database, preset_id))
 
             embed_calls: list[int] = []
 
