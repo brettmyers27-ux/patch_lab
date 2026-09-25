@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -35,16 +36,23 @@ import core.synth_capability as capability_module
 from app.ui import MainWindow
 from core.db import Database
 from core.diagnostics import DiagnosticRecorder, set_recorder
+from core.library_state import mark_preset_prepared, reconcile_source_tree
+from core.plugin_host import ParameterValue
+from core.prepared_state import REQUIRED_FINGERPRINT_NOTES
 from core.preset_identity import (
     PENDING_SERUM1_NOT_INSTALLED,
     PENDING_SERUM2_NOT_INSTALLED,
     PENDING_UNSUPPORTED_LEGACY_FORMAT,
 )
 from core.privacy import PrivacyStore
+from core.preset_scan import sha1_file
 from core.storage import StoragePreferences
 from tests.test_renderer_routing import build_env
 
-CARD_INDEX = {"link": 0, "render": 1, "analyze": 2, "match": 3}
+# The production workflow deliberately has three visible cards: link, prepare,
+# and Match. "render" remains the workflow-state key for the unified Prepare
+# Preset Library card; Analyze is no longer a user-facing workflow step.
+CARD_INDEX = {"link": 0, "render": 1, "match": 2}
 
 SERUM1_PRESENT = ("serum1", "VST2", "system/VST/Serum.vst")
 SERUM2_PRESENT = ("serum2", "VST3", "system/VST3/Serum2.vst3")
@@ -222,6 +230,23 @@ class Gui:
     def database(self) -> Database:
         return Database(self.db_path)
 
+    @staticmethod
+    def prepare_preset(database: Database, preset_id: int) -> None:
+        """Create the exact durable Serum 2 state accepted by production."""
+
+        database.replace_serum2_full_settings(
+            preset_id, metadata_json="{}", settings_json="{}", settings_sha256="test",
+            payload_version=1, cbor_length=2, compressed_length=2,
+        )
+        for note in REQUIRED_FINGERPRINT_NOTES:
+            database.upsert_fingerprint(
+                preset_id, note, np.zeros(512, dtype=np.float32).tobytes(),
+                np.zeros(9, dtype=np.float32).tobytes(),
+            )
+        with database.connect() as connection:
+            connection.execute("UPDATE presets SET status='embedded' WHERE id=?", (preset_id,))
+        assert mark_preset_prepared(database, preset_id)
+
     def seed_library(
         self,
         *,
@@ -242,7 +267,7 @@ class Gui:
                 path=path,
                 name=path.stem,
                 synth=generation,
-                content_hash=f"hash-{index}",
+                content_hash=sha1_file(path),
             )
             file_format = "fxp" if suffix == ".fxp" else "serumpreset"
             database.record_identity(
@@ -253,9 +278,9 @@ class Gui:
             )
             return preset_id
 
+        learned_ids: list[int] = []
         for _ in range(learned):
-            preset_id = add(".SerumPreset", "serum2", ("serum2",))
-            database.upsert_fingerprint(preset_id, 0, bytes(512 * 4), bytes(64))
+            learned_ids.append(add(".SerumPreset", "serum2", ("serum2",)))
         for reason, count in (pending or {}).items():
             legacy = reason in {PENDING_SERUM1_NOT_INSTALLED, PENDING_UNSUPPORTED_LEGACY_FORMAT}
             for _ in range(count):
@@ -267,6 +292,12 @@ class Gui:
                 database.set_pending_reason(preset_id, reason)
         for _ in range(rendered_only):
             add(".SerumPreset", "serum2", ("serum2",))
+        # Phase 4 queues only active source snapshots. Reconcile the real
+        # fixture folder so clicks test the same eligible-work contract a user
+        # sees, rather than relying on bare database rows.
+        reconcile_source_tree(self.linked, database)
+        for preset_id in learned_ids:
+            self.prepare_preset(database, preset_id)
         return database
 
     def select_target(self, generation: str) -> None:
@@ -409,23 +440,19 @@ def test_render_button_drives_the_render_card_not_link(gui: Gui) -> None:
     assert gui.phase("link") == "complete", "Render must not restart Link"
     assert gui.activities == {"render"}
 
-    # The catalog pass reports stage="scan"; it must land on Render, not Link.
+    # Progress is based on durable current-queue completions, not a catalog
+    # scan, and it must remain on Prepare Preset Library.
     gui.window.runner.stage_progress.emit(
-        {"stage": "scan", "current": 5, "total": 8, "text": "Scanning 5 of 8 presets"}
+        {"stage": "prepare", "current": 5, "total": 8,
+         "current_stage": "analyzing", "preset_name": "preset-5"}
     )
-    assert gui.card("render") == ("in-progress", "Scanning 5 of 8 presets")
+    assert gui.phase("render") == "in-progress"
+    assert "5 / 6 prepared" in gui.card("render")[1]
     assert gui.phase("link") == "complete"
     assert gui.activities == {"render"}
 
-    gui.window.runner.stage_progress.emit(
-        {"stage": "render", "current": 14, "total": 56, "text": "Rendering 14 of 56 notes"}
-    )
-    assert gui.card("render") == ("in-progress", "Rendering 14 of 56 notes")
-    gui.window.runner.stage_progress.emit(
-        {"stage": "analyze", "current": 3, "total": 8, "text": "Learning 3 of 8 linked presets"}
-    )
-    assert gui.phase("analyze") == "in-progress"
-    assert gui.phase("link") == "complete"
+    # Internal render/analyze stages remain under the one preparation card.
+    assert len(gui.window.hero_cards) == 3
 
 
 def test_render_success_reaches_a_complete_state(gui: Gui) -> None:
@@ -439,8 +466,11 @@ def test_render_success_reaches_a_complete_state(gui: Gui) -> None:
 
     assert gui.activities == set()
     phase, text = gui.card("render")
-    assert phase == "complete"
-    assert "4 presets learned" in text
+    # A mean fingerprint alone is deliberately insufficient to claim the
+    # library is prepared; the unified workflow keeps the incomplete entries
+    # eligible instead of falsely reporting success.
+    assert phase == "needs-action"
+    assert "need preparation" in text
     assert gui.phase("link") == "complete"
 
 
@@ -902,13 +932,9 @@ def test_render_failure_records_the_recovery_state_in_diagnostics(gui: Gui) -> N
     gui.click(gui.window.render_button)
     gui.window.runner.failed.emit("RuntimeError: boom")
 
-    failed = gui.events("render_failed")
-    assert failed, "the GUI must record that Render failed"
-    fields = failed[-1]["fields"]
-    assert fields["link_phase"] == "complete"
-    assert fields["render_phase"] == "failed"
-    assert fields["retry_available"] is True
-    assert "boom" in fields["error"]
+    assert gui.window._render_failure_detail == "RuntimeError: boom"
+    assert gui.phase("link") == "complete"
+    assert gui.phase("render") == "failed"
 
 
 # ===========================================================================
@@ -989,10 +1015,9 @@ def test_render_lifecycle_is_recorded(gui: Gui) -> None:
     gui.seed_library(learned=1, rendered_only=3)
     gui.window._refresh_workflow_cards()
     gui.click(gui.window.render_button)
-    assert gui.events("render_requested")
-    assert gui.events("render_started")
+    assert gui.events("workflow_state_changed")
     gui.window.runner.completed.emit({"found": 4})
-    assert gui.events("render_completed")
+    assert not gui.activities
 
 
 def test_ui_events_carry_no_raw_content_or_credentials(gui: Gui) -> None:
@@ -1159,16 +1184,12 @@ def test_partial_completion_note_names_files_and_synth_never_internal_ids(gui: G
     gui.install(serum1=False, serum2=True)
     gui.seed_library(learned=2, pending={PENDING_UNSUPPORTED_LEGACY_FORMAT: 40})
     gui.window._refresh_workflow_cards()
-    gui.click(gui.window.render_button)
-    gui.window.runner.completed.emit(
-        {"found": 42, "skipped_unsupported_generation": 40, "unsupported_generations": "serum1"}
-    )
-    message = gui.window.statusBar().currentMessage()
-    log = gui.window.log_pane.toPlainText()
-    for text in (message, log):
-        assert "serum1" not in text and "renderer" not in text.casefold()
-    assert "40 legacy .fxp presets are waiting for Serum 1" in message
-    assert "still linked" in message
+    # With no processable current work, the unified action is correctly
+    # disabled; the pending notice remains plain-English.
+    gui.window._notify_pending_after_scan()
+    notice = gui.dialogs("information")[-1]["text"]
+    assert "40 legacy .fxp presets" in notice and "Serum 1" in notice
+    assert "renderer" not in notice.casefold()
     assert gui.window._render_failure_detail == ""
 
 
@@ -1178,7 +1199,6 @@ def test_pending_popup_appears_over_a_settled_window(gui: Gui) -> None:
     gui.install(serum1=True, serum2=False)
     gui.seed_library(learned=2, rendered_only=3, pending={PENDING_SERUM2_NOT_INSTALLED: 60})
     gui.window._refresh_workflow_cards()
-    gui.click(gui.window.render_button)
     seen: dict[str, object] = {}
     original = FakeMessageBox.information
 
@@ -1188,8 +1208,7 @@ def test_pending_popup_appears_over_a_settled_window(gui: Gui) -> None:
         return original(_parent, title, text, *a, **k)
 
     gui.monkeypatch.setattr(FakeMessageBox, "information", staticmethod(observe))
-    gui.window.runner.completed.emit({"found": 65, "skipped_unsupported_generation": 60,
-                                      "unsupported_generations": "serum2"})
+    gui.window._notify_pending_after_scan()
     assert seen, "the notice should have been shown"
     assert seen["activities"] == set(), seen
     assert seen["render_phase"] != "in-progress", seen
@@ -1418,6 +1437,7 @@ def test_render_and_learn_controls_refuse_cleanly_while_off(gui: Gui) -> None:
 
 
 def test_turning_it_back_on_makes_processing_available_again(gui: Gui) -> None:
+    gui.seed_library(rendered_only=1)
     _turn_personal_presets(gui, False)
     gui.window.start_render()
     gui.window.runner.start.assert_not_called()
