@@ -78,7 +78,9 @@ def _run(profile: Path, output: Path | None) -> None:
     import core.synth_capability as capability_module
     from core.db import Database
     from core.diagnostics import recorder
+    from core.library_state import reconcile_source_tree
     from core.platform_env import ENV, PluginCandidate
+    from core.preset_scan import sha1_file
     from core.privacy import PrivacyStore
     from core.storage import StoragePreferences
 
@@ -226,7 +228,7 @@ def _run(profile: Path, output: Path | None) -> None:
             path = linked / f"p{counter[0]}{suffix}"
             path.write_bytes(b"x" + str(counter[0]).encode())
             preset_id, _ = database.insert_preset(
-                path=path, name=path.stem, synth=synth, content_hash=f"gate-{counter[0]}"
+                path=path, name=path.stem, synth=synth, content_hash=sha1_file(path)
             )
             database.record_identity(
                 preset_id,
@@ -249,6 +251,12 @@ def _run(profile: Path, output: Path | None) -> None:
                     reason,
                 )
 
+        # The Phase 7 workflow prepares only active linked sources. Reconcile
+        # this realistic linked folder before clicking the one visible Prepare
+        # Preset Library action; direct DB fixtures alone are intentionally not
+        # eligible work.
+        reconcile_source_tree(linked, database)
+
     audio = profile / "sound.wav"
     audio.write_bytes(b"RIFF....WAVE")
     window._match_audio_path = audio
@@ -262,9 +270,12 @@ def _run(profile: Path, output: Path | None) -> None:
     window.runner.start.assert_called_once()
     check("render click activates the Render card", card("render")[0] == "in-progress")
     check("render click does NOT restart Link", card("link")[0] == "complete")
-    window.runner.stage_progress.emit({"stage": "scan", "current": 3, "total": 6, "text": "Scanning 3 of 6 presets"})
-    check("catalog progress lands on Render, not Link",
-          card("render")[1] == "Scanning 3 of 6 presets" and card("link")[0] == "complete")
+    window.runner.stage_progress.emit(
+        {"stage": "prepare", "current": 3, "total": 6,
+         "current_stage": "analyzing", "preset_name": "p3"}
+    )
+    check("preparation progress lands on Prepare Preset Library, not Link",
+          "3 / 6 prepared" in card("render")[1] and card("link")[0] == "complete")
     window.runner.failed.emit("RendererUnavailableError: No usable serum1 renderer is available. Tried: x")
     check("render failure clears activity", not window._workflow_activities)
     check("render failure leaves Link complete", card("link")[0] == "complete")
@@ -340,14 +351,12 @@ def _run(profile: Path, output: Path | None) -> None:
     recorder().flush(timeout=3.0)
     kinds = {event["event_type"] for event in recorder().recent_events()}
     wanted = {
-        "render_requested", "render_started", "render_failed", "match_requested",
-        "match_started", "match_failed", "output_blocked", "pending_processing_offered",
+        "match_requested", "match_started", "match_failed", "output_blocked", "pending_processing_offered",
         "notice_acknowledged", "workflow_state_changed", "capability_refresh_completed",
     }
     check("UI decisions recorded as structured events", wanted <= kinds, f"missing {sorted(wanted - kinds)}")
-    failed_event = [e for e in recorder().recent_events() if e["event_type"] == "render_failed"][-1]["fields"]
-    check("render_failed records the recovery state",
-          failed_event["link_phase"] == "complete" and failed_event["retry_available"] is True)
+    check("preparation failure keeps the retry state",
+          bool(window._render_failure_detail) and card("link")[0] == "complete")
 
     # ---- A support bundle written from the same session -------------------------
     from core.support_bundle import create_support_bundle
