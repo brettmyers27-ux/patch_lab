@@ -20,13 +20,14 @@ No Serum GUI, DAW or mouse-coordinate automation is involved.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -453,6 +454,33 @@ def test_render_button_drives_the_render_card_not_link(gui: Gui) -> None:
 
     # Internal render/analyze stages remain under the one preparation card.
     assert len(gui.window.hero_cards) == 3
+
+
+def test_prepare_discovery_stays_on_prepare_card_and_keeps_qt_responsive(gui: Gui) -> None:
+    """A sampled large-library source check never visually reopens Link."""
+
+    gui.seed_library(learned=3, rendered_only=1)
+    gui.window._prepare_active = True
+    gui.window._prepare_total = 1
+    gui.window._prepare_started_at = time.monotonic() - 0.5
+    gui.window._set_workflow_activity("render", 0, 1, "Preparing Preset Library")
+
+    gui.window.runner.stage_progress.emit(
+        {"stage": "discovery", "current": 447, "total": 6_057,
+         "text": "Checking 447 of 6,057 presets"}
+    )
+
+    assert gui.phase("link") == "complete"
+    assert gui.phase("render") == "in-progress"
+    assert "Checking 447 of 6,057 presets" in gui.card("render")[1]
+
+    # Discovery arrives at 8 Hz from the worker.  A normal Qt event still runs
+    # between updates, which is the user-visible guarantee behind a responsive
+    # window and usable unrelated controls.
+    delivered: list[bool] = []
+    QTimer.singleShot(0, lambda: delivered.append(True))
+    QTest.qWait(20)
+    assert delivered == [True]
 
 
 def test_render_success_reaches_a_complete_state(gui: Gui) -> None:

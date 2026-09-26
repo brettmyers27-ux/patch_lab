@@ -16,6 +16,7 @@ from core.library_state import (
     mark_preset_prepared,
     reconcile_source_tree,
 )
+from core.local_library import _sample_discovery_progress, process_linked_folder
 from core.plugin_host import ParameterValue
 from core.prepared_state import (
     CURRENT_PREPARED_REVISION,
@@ -329,12 +330,15 @@ def test_legacy_modified_path_migration_activates_only_current_content(
     assert active_source_count(migrated, current_id) == 1
 
 
-def test_five_thousand_prepared_plus_one_hundred_new_queues_only_new(
+def test_6057_prepared_sources_plus_one_hundred_new_queue_only_new(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "presets"
     root.mkdir()
-    for index in range(5_000):
+    # The released regression was observed against a 6,057-preset library.
+    # Keep that population in the suite so an accidental return to whole-tree
+    # hashing or preparation is visible before a build is cut.
+    for index in range(5_957):
         (root / f"p{index:04d}.fxp").write_bytes(f"preset-{index}".encode())
     database = Database(tmp_path / "library.db")
     initial = reconcile_source_tree(root, database)
@@ -366,7 +370,7 @@ def test_five_thousand_prepared_plus_one_hundred_new_queues_only_new(
                 for preset_id in ids
             ],
         )
-    for index in range(5_000, 5_100):
+    for index in range(5_957, 6_057):
         (root / f"p{index:04d}.fxp").write_bytes(f"preset-{index}".encode())
 
     update = reconcile_source_tree(root, database)
@@ -374,4 +378,102 @@ def test_five_thousand_prepared_plus_one_hundred_new_queues_only_new(
 
     assert update.hashes_computed == 100
     assert len(queue) == 100
-    assert {row.name for row in queue} == {f"p{index:04d}" for index in range(5_000, 5_100)}
+    assert {row.name for row in queue} == {f"p{index:04d}" for index in range(5_957, 6_057)}
+
+
+def test_snapshot_reports_every_6057_source_but_hashes_only_changed_content(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "presets"
+    root.mkdir()
+    for index in range(6_057):
+        (root / f"p{index:04d}.fxp").write_bytes(f"preset-{index}".encode())
+    database = Database(tmp_path / "library.db")
+    reconcile_source_tree(root, database)
+
+    checked: list[tuple[int, int]] = []
+    hashed: list[Path] = []
+
+    def tracked_hash(path: Path) -> str:
+        hashed.append(path)
+        return sha1_file(path)
+
+    unchanged = reconcile_source_tree(
+        root, database, hash_file=tracked_hash, progress=lambda current, total: checked.append((current, total))
+    )
+
+    assert checked[0] == (1, 6_057)
+    assert checked[-1] == (6_057, 6_057)
+    assert len(checked) == 6_057, "every source receives one atomic snapshot decision"
+    assert unchanged.hashes_computed == 0
+    assert hashed == []
+
+    changed = root / "p0100.fxp"
+    changed.write_bytes(b"changed")
+    added = root / "added.fxp"
+    added.write_bytes(b"added")
+    removed = root / "p0200.fxp"
+    removed.unlink()
+    checked.clear()
+    update = reconcile_source_tree(
+        root,
+        database,
+        hash_file=tracked_hash,
+        progress=lambda current, total: checked.append((current, total)),
+    )
+
+    assert update.hashes_computed == 2
+    assert set(hashed) == {changed.resolve(), added.resolve()}
+    assert update.changed_sources == 1
+    assert update.new_sources == 1
+    assert update.sources_deactivated == 1
+    assert checked[-1] == (6_057, 6_057)
+
+
+def test_discovery_progress_samples_atomic_source_events_at_eight_hz(
+    monkeypatch,
+) -> None:
+    emitted: list[dict[str, object]] = []
+    ticks = iter(index / 100 for index in range(101))
+    monkeypatch.setattr("core.local_library.time.monotonic", lambda: next(ticks))
+    report = _sample_discovery_progress(emitted.append)
+
+    for current in range(1, 101):
+        report(current, 100)
+
+    assert emitted[0]["current"] == 1
+    assert emitted[-1]["current"] == 100
+    assert len(emitted) <= 10, "a 1-second backend burst must not flood Qt"
+
+
+def test_prepare_path_reuses_prepared_snapshot_without_starting_expensive_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "presets"
+    root.mkdir()
+    source = root / "ready.fxp"
+    source.write_bytes(b"ready")
+    database = Database(tmp_path / "library.db")
+    preset_id = reconcile_source_tree(root, database).entries[0].preset_id
+    _prepare(database, preset_id)
+    monkeypatch.setattr("core.local_library.user_presets_enabled", lambda: True)
+    monkeypatch.setattr(
+        "core.local_library._process_pending_for_generation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a prepared source must not reach Serum or preparation")
+        ),
+    )
+
+    summary = process_linked_folder(
+        root,
+        db_path=database.path,
+        audio_root=tmp_path / "audio",
+        state_dir=tmp_path / "states",
+        preparation_ids=[preset_id],
+        relay=None,
+        log=lambda _message: None,
+    )
+
+    assert summary.source_files_stat == 1
+    assert summary.source_hashes == 0
+    assert summary.fingerprints_created == 0

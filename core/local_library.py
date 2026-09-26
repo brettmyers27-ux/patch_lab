@@ -18,7 +18,7 @@ from core.contribution_bundle import LEDGER_NAME
 from core.db import Database
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.features import ClapEmbedder
-from core.library_state import reconcile_source_tree
+from core.library_state import get_presets_needing_preparation, reconcile_source_tree
 from core.preparation import (
     analysis_temp_root,
     fingerprint_render_rows,
@@ -132,6 +132,14 @@ class LocalLibrarySummary:
     #: True when the run did nothing (or stopped early) because the user's own
     #: presets are turned off; the UI reports that instead of "0 presets".
     user_presets_disabled: bool = False
+    # Source-snapshot facts and timing are emitted with the worker summary so
+    # support can distinguish filesystem discovery from plug-in preparation.
+    source_files_stat: int = 0
+    source_hashes: int = 0
+    source_new: int = 0
+    source_changed: int = 0
+    source_removed: int = 0
+    discovery_elapsed_ms: int = 0
 
 
 def default_local_paths(env: PlatformEnv = ENV) -> dict[str, Path]:
@@ -592,6 +600,33 @@ def _coverage_log_lines(coverage: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _sample_discovery_progress(
+    progress: ProgressCallback | None,
+) -> Callable[[int, int], None]:
+    """Forward atomic source checks to Qt no more than eight times per second."""
+
+    last_sent = 0.0
+
+    def report(current: int, total: int) -> None:
+        nonlocal last_sent
+        if progress is None:
+            return
+        now = time.monotonic()
+        if current not in {1, total} and now - last_sent < 0.125:
+            return
+        last_sent = now
+        progress(
+            {
+                "stage": "discovery",
+                "current": current,
+                "total": total,
+                "text": f"Checking {current:,} of {total:,} presets",
+            }
+        )
+
+    return report
+
+
 def _process_linked_folder(
     root: Path,
     *,
@@ -611,6 +646,27 @@ def _process_linked_folder(
     upload_sleep: Callable[[float], None] = time.sleep,
 ) -> LocalLibrarySummary:
     """Always process locally first, then share new presets in a few bundles."""
+
+    # The visible Prepare button supplies a queue snapshot.  Its path is kept
+    # separate from first-link ingestion: a prepared library must never return
+    # to the historical whole-tree parameter/Serum pass just to check for one
+    # new file.
+    if preparation_ids is not None:
+        return _prepare_linked_library_incrementally(
+            root,
+            db_path=db_path,
+            audio_root=audio_root,
+            state_dir=state_dir,
+            bundle_path=bundle_path,
+            env=env,
+            relay=relay,
+            log=log,
+            progress=progress,
+            render_processes=render_processes,
+            preparation_stage_hook=preparation_stage_hook,
+            operation_id=operation_id,
+            upload_sleep=upload_sleep,
+        )
 
     from core.diagnostics import new_operation_id, record, record_decision
     from core.preset_identity import identify_preset, summarise_identities
@@ -943,6 +999,144 @@ def _process_linked_folder(
         sleep=upload_sleep,
     )
     log("LOCAL_LIBRARY_SUMMARY=" + json.dumps(asdict(summary), sort_keys=True))
+    return summary
+
+
+def _prepare_linked_library_incrementally(
+    root: Path,
+    *,
+    db_path: Path,
+    audio_root: Path,
+    state_dir: Path,
+    bundle_path: Path,
+    env: PlatformEnv,
+    relay: RelayProtocol | None,
+    log: LogCallback,
+    progress: ProgressCallback | None,
+    render_processes: int,
+    preparation_stage_hook: PreparationStageHook,
+    operation_id: str,
+    upload_sleep: Callable[[float], None],
+) -> LocalLibrarySummary:
+    """Refresh sources and run the existing durable pipeline only for its queue."""
+
+    from core.diagnostics import new_operation_id, record
+    from core.preset_identity import PENDING_AWAITING_PROCESSING
+    from core.synth_capability import refresh_capabilities
+
+    operation_id = operation_id or new_operation_id("prepare")
+    root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    database = Database(db_path)
+    paths = discover_presets(root)
+    started = time.perf_counter()
+    if progress is not None:
+        progress({
+            "stage": "discovery", "current": 0, "total": len(paths),
+            "text": f"Checking 0 of {len(paths):,} presets",
+        })
+    discovery = reconcile_source_tree(
+        root,
+        database,
+        paths=paths,
+        hash_file=sha1_file,
+        progress=_sample_discovery_progress(progress),
+    )
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    summary = LocalLibrarySummary(
+        found=len(discovery.entries),
+        deduped_local=len(discovery.entries) - discovery.new_content,
+        source_files_stat=len(discovery.entries),
+        source_hashes=discovery.hashes_computed,
+        source_new=discovery.new_sources,
+        source_changed=discovery.changed_sources,
+        source_removed=discovery.sources_deactivated,
+        discovery_elapsed_ms=elapsed_ms,
+    )
+    log(
+        "Incremental source snapshot: "
+        f"{summary.source_files_stat:,} statted, {summary.source_hashes:,} hashed, "
+        f"{summary.source_new:,} new, {summary.source_changed:,} changed, "
+        f"{summary.source_removed:,} removed in {elapsed_ms / 1000:.2f}s."
+    )
+
+    # The post-refresh query is authoritative: it includes a just-added file,
+    # omits a removed source, and does not route a prepared record to a decoder
+    # or a plug-in host.
+    queue = get_presets_needing_preparation(database)
+    if progress is not None:
+        progress({
+            "stage": "prepare-queue", "current": 0, "total": len(queue),
+            "text": f"Queued {len(queue):,} preset(s) for preparation",
+        })
+    if not queue:
+        summary.searchable_local = int(database.library_coverage()["learned"])
+        return summary
+
+    known_factory = FactoryBundle(bundle_path).known_hashes()
+    for preset in queue:
+        database.set_factory_status(preset.id, preset.content_hash in known_factory)
+
+    # Mark only the current durable queue as awaiting processing.  The existing
+    # pending processor then uses stored source paths and never discovers or
+    # hashes the library a second time.
+    database.set_pending_reasons(
+        {preset.id: PENDING_AWAITING_PROCESSING for preset in queue}
+    )
+    refresh_pending_reasons(db_path=database.path, env=env, operation_id=operation_id)
+    capabilities = refresh_capabilities(
+        env=env,
+        operation_id=operation_id,
+        reason="incremental preset-library preparation",
+    )
+    pending_by_generation = {
+        generation: database.presets_needing_generation(generation)
+        for generation in ("serum1", "serum2")
+    }
+    summary.skipped_unsupported_generation = sum(
+        len(records)
+        for generation, records in pending_by_generation.items()
+        if not capabilities.capabilities[generation].available
+    )
+    summary.unsupported_generations = ",".join(
+        generation
+        for generation, records in pending_by_generation.items()
+        if records and not capabilities.capabilities[generation].available
+    )
+
+    for generation, records in pending_by_generation.items():
+        if not records or not capabilities.capabilities[generation].available:
+            continue
+        result = _process_pending_for_generation(
+            generation,
+            db_path=database.path,
+            audio_root=audio_root,
+            state_dir=state_dir,
+            env=env,
+            log=log,
+            progress=progress,
+            render_processes=render_processes,
+            operation_id=operation_id,
+        )
+        summary.params_dumped += result.params_dumped
+        summary.failed_load += result.failed_load
+        summary.failed_silent += result.failed_silent
+        summary.fingerprints_created += result.fingerprints_created
+        summary.compacted_render_files += result.compacted_render_files
+        summary.compacted_render_bytes += result.compacted_render_bytes
+
+    summary.searchable_local = int(database.library_coverage()["learned"])
+    record(
+        "local-library",
+        "incremental_preparation_complete",
+        f"prepared {summary.fingerprints_created} preset(s) after an incremental snapshot",
+        operation_id=operation_id,
+        phase="complete",
+        source_hashes=summary.source_hashes,
+        queued=len(queue),
+        prepared=summary.fingerprints_created,
+    )
     return summary
 
 

@@ -20,6 +20,7 @@ from core.preset_scan import discover_presets, sha1_file, synth_for
 
 
 HashFile = Callable[[Path], str]
+DiscoveryProgress = Callable[[int, int], None]
 
 
 def normalize_source_path(path: Path) -> str:
@@ -66,6 +67,7 @@ def reconcile_source_tree(
     *,
     paths: Sequence[Path] | None = None,
     hash_file: HashFile = sha1_file,
+    progress: DiscoveryProgress | None = None,
 ) -> DiscoveryResult:
     """Reconcile one tree without Serum, rendering, or feature extraction."""
 
@@ -90,7 +92,8 @@ def reconcile_source_tree(
 
     staged: list[tuple[Path, str, int, int, str, bool, bool, int | None]] = []
     seen_paths: set[str] = set()
-    for raw_path in discovered_paths:
+    total = len(discovered_paths)
+    for index, raw_path in enumerate(discovered_paths, start=1):
         path = Path(raw_path).expanduser().resolve()
         normalized = normalize_source_path(path)
         seen_paths.add(normalized)
@@ -117,6 +120,8 @@ def reconcile_source_tree(
                     preset_id,
                 )
             )
+            if progress is not None:
+                progress(index, total)
             continue
         digest = hash_file(path)
         result.hashes_computed += 1
@@ -139,6 +144,8 @@ def reconcile_source_tree(
                 int(known["id"]) if known is not None else None,
             )
         )
+        if progress is not None:
+            progress(index, total)
 
     affected_ids: set[int] = set()
     with database.connect() as connection:

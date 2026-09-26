@@ -854,6 +854,37 @@ class LegacyMainWindow(QMainWindow):
         current = int(detail.get("current", 0))
         total = int(detail.get("total", 0))
         text = str(detail.get("text", stage.replace("-", " ").title()))
+        if getattr(self, "_prepare_active", False) and stage in {
+            "discovery", "prepare-queue", "ingest", "scan"
+        }:
+            # A Prepare click owns its incremental source check.  The worker
+            # records every stat/hash decision but samples this signal at 8 Hz,
+            # so Qt stays responsive while a large library is reconciled.
+            if stage == "prepare-queue":
+                self._prepare_total = total
+                self.render_progress.setRange(0, max(total, 1))
+                self.render_progress.setValue(0)
+                self.render_stats.setText(text)
+                self._set_workflow_activity(
+                    "render", 0, total, "Preparing Preset Library · " + text
+                )
+                return
+            elapsed = max(time.monotonic() - self._prepare_started_at, 0.0)
+            eta_text = "Estimating time…"
+            if current >= 2 and elapsed > 0:
+                remaining = max(total - current, 0)
+                seconds = int((elapsed / current) * remaining)
+                if seconds < 90:
+                    eta_text = "About 1 minute remaining"
+                elif seconds < 3600:
+                    eta_text = f"About {max(1, round(seconds / 60))} minutes remaining"
+                else:
+                    eta_text = f"About {max(1, round(seconds / 3600))} hours remaining"
+            self.render_stats.setText(f"{eta_text} · {text}")
+            self._workflow_activities.pop("link", None)
+            self._workflow_activities.pop("analyze", None)
+            self._set_workflow_activity("render", current, total, text)
+            return
         if getattr(self, "_prepare_active", False) and stage == "prepare":
             # Phase 3 reports a terminal item only after durable PREPARED
             # commit (or a per-preset failure). The UI keeps the initial queue
