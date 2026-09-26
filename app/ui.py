@@ -374,6 +374,10 @@ class LegacyMainWindow(QMainWindow):
         self._prepare_started_at = 0.0
         self._prepare_eta = None
         self._prepare_eta_stage = ""
+        self._prepare_progress_detail: dict | None = None
+        self._prepare_eta_timer = QTimer(self)
+        self._prepare_eta_timer.setInterval(1_000)
+        self._prepare_eta_timer.timeout.connect(self._refresh_prepare_eta)
         self._match_waiting_for_library_pause = False
         self._resume_library_after_match = False
         # Last capability snapshot, so a later check can tell that a synth
@@ -858,6 +862,8 @@ class LegacyMainWindow(QMainWindow):
         current = int(detail.get("current", 0))
         total = int(detail.get("total", 0))
         text = str(detail.get("text", stage.replace("-", " ").title()))
+        if getattr(self, "_prepare_active", False):
+            self._prepare_progress_detail = dict(detail)
         if getattr(self, "_prepare_active", False) and stage in {
             "discovery", "prepare-queue", "ingest", "scan"
         }:
@@ -932,6 +938,18 @@ class LegacyMainWindow(QMainWindow):
             )
             self._prepare_eta_stage = stage
         return format_eta(self._prepare_eta.update(completed, total))
+
+    def _refresh_prepare_eta(self) -> None:
+        """Refresh a long current item once per second without worker churn."""
+
+        detail = self._prepare_progress_detail
+        if not self._prepare_active or not detail:
+            self._prepare_eta_timer.stop()
+            return
+        # Reuse the normal display path with the last true completed count.
+        # This only advances elapsed time and the smoothed ETA while a worker
+        # is on a slow item; it never claims another item completed.
+        self._local_library_progress_changed(dict(detail))
 
     def _render_library_complete(self) -> bool:
         database_path = self.local_paths["db"]
@@ -1378,6 +1396,9 @@ class LegacyMainWindow(QMainWindow):
         self._automatic_link_scan_active = False
         self._compact_render_active = False
         self._prepare_active = False
+        if preparing:
+            self._prepare_eta_timer.stop()
+            self._prepare_progress_detail = None
         if priority_pause:
             self._match_waiting_for_library_pause = False
             self.render_cancel_button.setEnabled(False)
@@ -1528,6 +1549,9 @@ class LegacyMainWindow(QMainWindow):
         self._automatic_link_scan_active = False
         self._compact_render_active = False
         self._prepare_active = False
+        if preparing:
+            self._prepare_eta_timer.stop()
+            self._prepare_progress_detail = None
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
@@ -1677,6 +1701,8 @@ class LegacyMainWindow(QMainWindow):
             self._prepare_started_at = time.monotonic()
             self._prepare_eta = None
             self._prepare_eta_stage = ""
+            self._prepare_progress_detail = None
+            self._prepare_eta_timer.start()
             self._render_failure_detail = ""
             self.render_progress.setRange(0, self._prepare_total)
             self.render_progress.setValue(0)
@@ -3234,6 +3260,10 @@ class MainWindow(LegacyMainWindow):
         self._prepare_started_at = 0.0
         self._prepare_eta = None
         self._prepare_eta_stage = ""
+        self._prepare_progress_detail: dict | None = None
+        self._prepare_eta_timer = QTimer(self)
+        self._prepare_eta_timer.setInterval(1_000)
+        self._prepare_eta_timer.timeout.connect(self._refresh_prepare_eta)
         self._match_waiting_for_library_pause = False
         self._resume_library_after_match = False
         # Last capability snapshot, so a later check can tell that a synth

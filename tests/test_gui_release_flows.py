@@ -520,6 +520,26 @@ def test_match_pauses_and_resumes_preparation_without_two_serum_workers(gui: Gui
     assert "Resuming preset-library preparation" in gui.window.log_pane.toPlainText()
 
 
+def test_preparation_eta_refreshes_each_second_while_current_preset_is_slow(gui: Gui) -> None:
+    gui.seed_library(rendered_only=1)
+    gui.window.start_render()
+    gui.window._prepare_started_at = time.monotonic() - 120
+    gui.window._prepare_eta = None
+    gui.window._prepare_total = 100
+    gui.window.runner.stage_progress.emit(
+        {"stage": "prepare", "current": 2, "total": 100,
+         "current_stage": "render", "preset_name": "Slow Bass"}
+    )
+
+    assert gui.window._prepare_eta_timer.isActive()
+    before = gui.window.render_stats.text()
+    before_refresh = gui.window._prepare_eta._last_at
+    QTest.qWait(1_100)
+    after = gui.window.render_stats.text()
+    assert "About" in before and "Slow Bass" in after
+    assert gui.window._prepare_eta._last_at > before_refresh
+
+
 def test_render_success_reaches_a_complete_state(gui: Gui) -> None:
     database = gui.seed_library(learned=0, rendered_only=4)
     gui.window._refresh_workflow_cards()
