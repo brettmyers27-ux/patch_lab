@@ -712,6 +712,9 @@ def capture_postmortem(
     payload: dict[str, Any] = {
         "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "captured_utc": datetime.now(timezone.utc).isoformat(),
+        # Child workers inherit this ID from the GUI, allowing a later support
+        # report to prove that this failure belongs to its current session.
+        "session_id": recorder().session_id,
         "trigger": trigger,
         "operation_id": tracker.operation_id,
         "operation": tracker.operation,

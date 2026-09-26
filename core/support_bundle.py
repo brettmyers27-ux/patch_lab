@@ -26,6 +26,8 @@ reachable.
 from __future__ import annotations
 
 import json
+import re
+import sqlite3
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +37,8 @@ from typing import Any, Mapping, Sequence
 from core.diagnostics import (
     BUNDLE_HISTORY_SECONDS,
     DIAGNOSTIC_SCHEMA_VERSION,
+    fingerprint_failure,
+    normalize_error_text,
     recorder,
     redact_text,
     sanitize,
@@ -48,10 +52,17 @@ ENVIRONMENT_FILENAME = "environment.json"
 POSTMORTEM_FILENAME = "postmortem.json"
 REPEATS_FILENAME = "repeats.json"
 REPRODUCTION_FILENAME = "reproduction.json"
+PREPARATION_FAILURES_FILENAME = "preparation-failures.json"
 TICKET_FILENAME = "ticket.txt"
 
 #: Hard cap on the events file inside a bundle, so a report is always sendable.
 MAX_BUNDLE_EVENT_BYTES = 6 * 1024 * 1024
+# A preparation incident can involve thousands of presets.  Support needs the
+# failure classes and a few safe examples, never an unbounded copy of a user's
+# library or its paths.
+MAX_PREPARATION_FAILURE_BYTES = 256 * 1024
+MAX_PREPARATION_FAILURE_GROUPS = 24
+MAX_PREPARATION_FAILURE_EXAMPLES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +79,7 @@ def build_reproduction_descriptor(
     renderer_selection: Mapping[str, Any] | None = None,
     settings: Mapping[str, Any] | None = None,
     feature_flags: Mapping[str, Any] | None = None,
+    correlation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return just enough sanitized configuration to reconstruct the code path.
 
@@ -89,7 +101,7 @@ def build_reproduction_descriptor(
         "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "operation": operation,
-        "operation_id": operation_id or post.get("operation_id", ""),
+        "operation_id": operation_id or env.get("operation_id", ""),
         "platform": {
             "branch": system.get("branch"),
             "architecture": system.get("architecture"),
@@ -151,6 +163,9 @@ def build_reproduction_descriptor(
         },
         "settings": sanitize(dict(settings or {})),
         "feature_flags": sanitize(dict(feature_flags or {})),
+        # This says exactly which current report/session facts were used to
+        # decide whether a persisted failure snapshot belongs here.
+        "report_context": sanitize(dict(correlation or {})),
         "excluded_by_policy": [
             "raw user audio",
             "raw preset bytes",
@@ -237,6 +252,8 @@ def build_summary(
     postmortem: Mapping[str, Any] | None,
     events: Sequence[Mapping[str, Any]],
     repeats: Sequence[Mapping[str, Any]],
+    correlation: Mapping[str, Any] | None = None,
+    preparation_failures: Mapping[str, Any] | None = None,
 ) -> str:
     env = dict(environment or {})
     post = dict(postmortem or {})
@@ -245,6 +262,7 @@ def build_summary(
     state = dict(env.get("patchlab_state") or {})
     exception = dict(post.get("exception") or {})
     fingerprint = dict(exception.get("fingerprint") or {})
+    report_context = dict(correlation or {})
 
     lines: list[str] = [
         "PATCHLAB SUPPORT BUNDLE",
@@ -269,6 +287,20 @@ def build_summary(
         f"Python {system.get('python_version') or '?'} · compute {system.get('compute_backend') or '?'}",
         f"CPU count: {system.get('cpu_count')} · RAM: {system.get('total_memory_bytes')} bytes",
     ]
+
+    lines.extend(
+        [
+            "",
+            "=== CURRENT REPORT / SESSION CORRELATION ===",
+            f"Current session ID: {report_context.get('current_session_id') or 'unknown'}",
+            f"Environment source: {report_context.get('environment_source') or 'unknown'}",
+            f"Requested operation: {report_context.get('requested_operation') or 'unknown'}",
+            f"Requested operation ID: {report_context.get('requested_operation_id') or 'unknown'}",
+            "Postmortem: "
+            + ("included" if report_context.get("postmortem_included") else "excluded")
+            + f" ({report_context.get('postmortem_reason') or 'no correlation evidence'})",
+        ]
+    )
 
     inventory = list(env.get("renderer_inventory") or [])
     if inventory:
@@ -398,21 +430,50 @@ def build_summary(
                 f"workers {group.get('worker_examples')}"
             )
 
+    preparation = dict(preparation_failures or {})
+    if preparation:
+        totals = dict(preparation.get("totals") or {})
+        lines.extend(
+            [
+                "",
+                "=== PREPARATION FAILURE DIAGNOSTICS ===",
+                "Scope: current local database snapshot; preset names, paths, bytes, and hashes are excluded.",
+                f"Failed presets: {totals.get('failed', 0)} "
+                f"(load/host {totals.get('failed_load', 0)}, silent render {totals.get('failed_silent', 0)})",
+                f"Failure groups: {totals.get('groups_included', 0)} included of "
+                f"{totals.get('groups_total', 0)}; "
+                f"examples limited to {MAX_PREPARATION_FAILURE_EXAMPLES} per group.",
+            ]
+        )
+        for group in preparation.get("failure_groups", []):
+            lines.append(
+                f"  {group.get('synth')} / {group.get('classification')} / "
+                f"{group.get('stage')}: {group.get('count')} preset(s), "
+                f"fingerprint {group.get('fingerprint')}"
+            )
+
     timeline = _timeline_lines(events)
     if timeline:
         lines.extend(["", "=== TIMELINE (decisions, phases and failures) ==="])
         lines.extend(timeline)
 
+    contents = [
+        f"  {SUMMARY_FILENAME}       this file",
+        f"  {EVENTS_FILENAME}       structured flight-recorder events (JSON Lines)",
+        f"  {ENVIRONMENT_FILENAME}   machine/build/plug-in/model/library snapshot",
+        f"  {POSTMORTEM_FILENAME}    failure/stall/process/worker/state snapshot",
+        f"  {REPEATS_FILENAME}       aggregated repeated failures",
+        f"  {REPRODUCTION_FILENAME}  sanitized reproduction descriptor",
+    ]
+    if preparation:
+        contents.append(
+            f"  {PREPARATION_FAILURES_FILENAME}  grouped, privacy-safe preparation failure evidence"
+        )
     lines.extend(
         [
             "",
             "=== BUNDLE CONTENTS ===",
-            f"  {SUMMARY_FILENAME}       this file",
-            f"  {EVENTS_FILENAME}       structured flight-recorder events (JSON Lines)",
-            f"  {ENVIRONMENT_FILENAME}   machine/build/plug-in/model/library snapshot",
-            f"  {POSTMORTEM_FILENAME}    failure/stall/process/worker/state snapshot",
-            f"  {REPEATS_FILENAME}       aggregated repeated failures",
-            f"  {REPRODUCTION_FILENAME}  sanitized reproduction descriptor",
+            *contents,
             "",
             "=== RETENTION ===",
             json.dumps(recorder().retention_policy(), indent=2, sort_keys=True),
@@ -467,6 +528,235 @@ def _parse_ts(value: object) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _application_session(environment: Mapping[str, Any] | None) -> str:
+    return str(dict((environment or {}).get("application") or {}).get("session_id") or "")
+
+
+def _postmortem_session(postmortem: Mapping[str, Any] | None) -> str:
+    post = dict(postmortem or {})
+    return str(post.get("session_id") or dict(post.get("recorder") or {}).get("session_id") or "")
+
+
+def _recent_timestamp(value: object, *, history_seconds: float) -> bool:
+    captured = _parse_ts(value)
+    if captured is None:
+        return False
+    now = datetime.now(timezone.utc)
+    return timedelta(0) <= now - captured <= timedelta(seconds=max(0.0, history_seconds))
+
+
+def _relevant_postmortem(
+    candidate: Mapping[str, Any] | None,
+    *,
+    operation: str,
+    operation_id: str,
+    environment: Mapping[str, Any],
+    current_session_id: str,
+    history_seconds: float,
+) -> tuple[dict[str, Any], bool, str]:
+    """Return a persisted failure only when it belongs to this report.
+
+    Operation IDs are authoritative across GUI/worker processes.  A matching
+    session is also authoritative because child processes inherit the GUI
+    session ID.  Operation names alone are deliberately insufficient unless
+    the snapshot is very recent: otherwise a later "prepare library" report
+    can inherit a week-old failure from an unrelated run.
+    """
+
+    post = dict(candidate or {})
+    if not post:
+        return {}, False, "no postmortem was available"
+    post_operation_id = str(post.get("operation_id") or "")
+    environment_operation_id = str(environment.get("operation_id") or "")
+    requested_operation_id = str(operation_id or environment_operation_id or "")
+    if requested_operation_id and post_operation_id:
+        if requested_operation_id == post_operation_id:
+            return post, True, "matching operation ID"
+        return {}, False, "postmortem operation ID differs from this report"
+
+    post_session = _postmortem_session(post)
+    environment_session = _application_session(environment)
+    expected_sessions = {value for value in (current_session_id, environment_session) if value}
+    if post_session:
+        if post_session in expected_sessions:
+            return post, True, "matching current session ID"
+        return {}, False, "postmortem session differs from this report"
+
+    expected_operation = str(operation or environment.get("operation") or "")
+    if (
+        expected_operation
+        and expected_operation == str(post.get("operation") or "")
+        and _recent_timestamp(post.get("captured_utc"), history_seconds=history_seconds)
+    ):
+        return post, True, "matching operation name within the recent evidence window"
+    return {}, False, "no matching operation ID, session ID, and recent operation evidence"
+
+
+def _usable_environment(
+    persisted: Mapping[str, Any] | None,
+    *,
+    current_session_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Use a persisted environment only from the current diagnostic session."""
+
+    candidate = dict(persisted or {})
+    if not candidate:
+        return None, "captured for this report"
+    if _application_session(candidate) == current_session_id:
+        return candidate, "persisted current-session environment"
+    return None, "captured because persisted environment belonged to another session"
+
+
+_EXCEPTION_TYPE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception))\b")
+
+
+def _preparation_failure_payload(
+    database_path: object,
+    *,
+    operation: str,
+    operation_id: str,
+    session_id: str,
+    events: Sequence[Mapping[str, Any]],
+    postmortem: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build bounded, read-only evidence for currently retained prep failures."""
+
+    if not database_path:
+        return None
+    try:
+        path = Path(str(database_path)).expanduser().resolve()
+        if not path.is_file():
+            return None
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT p.synth, p.status, p.error, j.state AS job_state,
+                       j.last_error, j.attempt_count
+                FROM presets AS p
+                LEFT JOIN preparation_jobs AS j ON j.preset_id = p.id
+                WHERE p.status IN ('failed_load', 'failed_silent')
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        # A report must remain sendable if an old/migrating database cannot be
+        # queried.  The environment snapshot already records that condition.
+        return None
+    if not rows:
+        return None
+
+    grouped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    by_status = {"failed_load": 0, "failed_silent": 0}
+    for row in rows:
+        status = str(row["status"] or "")
+        by_status[status] = by_status.get(status, 0) + 1
+        synth = str(row["synth"] or "unknown")
+        raw_error = str(row["last_error"] or row["error"] or "")
+        normalized = normalize_error_text(raw_error) or "no error text recorded"
+        found = _EXCEPTION_TYPE.search(normalized)
+        error_type = found.group(1).split(".")[-1] if found else "unknown"
+        classification = (
+            "silent_render" if status == "failed_silent" else f"host_or_load_{error_type.lower()}"
+        )
+        job_state = str(row["job_state"] or "")
+        stage = "render_validation" if status == "failed_silent" else (job_state or "load_or_host")
+        marker = fingerprint_failure(
+            RuntimeError(normalized),
+            subsystem="local-library",
+            phase=stage,
+            renderer=synth,
+            serum_generation=synth,
+            message=normalized,
+        )
+        key = (synth, status, classification, stage, marker.digest)
+        group = grouped.setdefault(
+            key,
+            {
+                "synth": synth,
+                "status": status,
+                "classification": classification,
+                "stage": stage,
+                "fingerprint": marker.digest,
+                "normalized_error": marker.normalized_error,
+                "count": 0,
+                "representative_examples": [],
+            },
+        )
+        group["count"] += 1
+        if len(group["representative_examples"]) < MAX_PREPARATION_FAILURE_EXAMPLES:
+            group["representative_examples"].append(
+                {
+                    "attempt_count": int(row["attempt_count"] or 0),
+                    "host_load_failure": status == "failed_load",
+                    "audio_silent": status == "failed_silent",
+                    "rendering_started": True if status == "failed_silent" else None,
+                }
+            )
+
+    groups = sorted(grouped.values(), key=lambda item: (-int(item["count"]), str(item["fingerprint"])))
+    included = groups[:MAX_PREPARATION_FAILURE_GROUPS]
+    for group in included:
+        group["representative_examples_omitted"] = max(
+            0, int(group["count"]) - len(group["representative_examples"])
+        )
+    # Events are supplementary operation context only.  The database snapshot
+    # remains explicitly labelled as currently retained failures, not proof
+    # that every row came from this exact operation.
+    matching_events = [
+        event for event in events
+        if operation_id and str(event.get("operation_id") or "") == operation_id
+    ]
+    timestamps = [str(event.get("ts")) for event in matching_events if event.get("ts")]
+    complete = next(
+        (event for event in reversed(matching_events) if event.get("event_type") == "incremental_preparation_complete"),
+        {},
+    )
+    complete_fields = dict(complete.get("fields") or {})
+    payload: dict[str, Any] = {
+        "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
+        "scope": "currently retained preparation failures in the local database",
+        "operation_context": {
+            "operation": operation or None,
+            "operation_id": operation_id or None,
+            "session_id": session_id or None,
+            "started_utc": min(timestamps) if timestamps else None,
+            "ended_utc": max(timestamps) if timestamps else None,
+            "queued": complete_fields.get("queued"),
+            "prepared": complete_fields.get("prepared"),
+            "failed": complete_fields.get("failed", len(rows)),
+            "failed_snapshot": len(rows),
+            "skipped": complete_fields.get("skipped"),
+            "cancelled": complete_fields.get(
+                "cancelled", dict(postmortem.get("cancellation_state") or {}).get("cancelled")
+            ),
+        },
+        "totals": {
+            "failed": len(rows),
+            "failed_load": by_status.get("failed_load", 0),
+            "failed_silent": by_status.get("failed_silent", 0),
+            "groups_total": len(groups),
+            "groups_included": len(included),
+            "groups_omitted": max(0, len(groups) - len(included)),
+            "examples_per_group_limit": MAX_PREPARATION_FAILURE_EXAMPLES,
+        },
+        "failure_groups": included,
+        "privacy": {
+            "excluded": ["preset names", "preset paths", "preset bytes", "preset hashes", "credentials"],
+            "error_text": "normalized and redacted before grouping",
+        },
+    }
+    encoded = json.dumps(sanitize(payload), sort_keys=True, default=str).encode("utf-8")
+    if len(encoded) > MAX_PREPARATION_FAILURE_BYTES:
+        # This is intentionally a second defensive bound.  The grouping limits
+        # should normally keep it far below the cap.
+        payload["failure_groups"] = included[: max(1, len(included) // 2)]
+        payload["totals"]["groups_omitted"] = len(groups) - len(payload["failure_groups"])
+    return payload
 
 
 def merged_events(current, history_seconds: float) -> list[dict[str, Any]]:
@@ -611,13 +901,19 @@ def create_support_bundle(
     current = recorder()
     current.flush(timeout=1.5)
 
-    # Fall back to whatever the last operation persisted, so a bug report filed
-    # minutes after a failure still carries that failure's snapshots.
-    environment = environment if environment is not None else _read_persisted(
-        ENVIRONMENT_FILENAME
-    )
-    postmortem = postmortem if postmortem is not None else _read_persisted(
-        POSTMORTEM_FILENAME
+    # Persisted diagnostics live longer than an operation.  They are useful
+    # only when they can be tied to this report, never as an unconditional
+    # fallback for a later unrelated ticket.
+    current_session_id = current.session_id
+    if environment is None:
+        environment, environment_source = _usable_environment(
+            _read_persisted(ENVIRONMENT_FILENAME), current_session_id=current_session_id
+        )
+    else:
+        environment = dict(environment)
+        environment_source = "provided by the current report"
+    postmortem_candidate = (
+        dict(postmortem) if postmortem is not None else _read_persisted(POSTMORTEM_FILENAME)
     )
     if not environment:
         # No operation has run in this session, or its snapshot rotated away.
@@ -643,6 +939,17 @@ def create_support_bundle(
                 exception=exc,
             )
             environment = {}
+        environment_source = "captured for this report"
+
+    relevant_postmortem, postmortem_included, postmortem_reason = _relevant_postmortem(
+        postmortem_candidate,
+        operation=operation,
+        operation_id=operation_id,
+        environment=environment,
+        current_session_id=current_session_id,
+        history_seconds=history_seconds,
+    )
+    postmortem = relevant_postmortem
 
     events = merged_events(current, history_seconds)
     if not events:
@@ -656,15 +963,35 @@ def create_support_bundle(
         if known is None or item["total_occurrences"] > int(known.get("total_occurrences", 0)):
             combined[item["fingerprint"]] = item
     repeats = sorted(combined.values(), key=lambda item: -int(item.get("total_occurrences", 0)))
+    effective_operation = operation or str(environment.get("operation") or "")
+    effective_operation_id = operation_id or str(environment.get("operation_id") or "")
+    correlation = {
+        "current_session_id": current_session_id,
+        "environment_session_id": _application_session(environment),
+        "environment_source": environment_source,
+        "requested_operation": effective_operation,
+        "requested_operation_id": effective_operation_id,
+        "postmortem_included": postmortem_included,
+        "postmortem_reason": postmortem_reason,
+    }
+    preparation_failures = _preparation_failure_payload(
+        dict(environment.get("database") or {}).get("path"),
+        operation=effective_operation,
+        operation_id=effective_operation_id,
+        session_id=current_session_id,
+        events=events,
+        postmortem=postmortem,
+    )
 
     reproduction = build_reproduction_descriptor(
-        operation=operation or str((postmortem or {}).get("operation", "")),
-        operation_id=operation_id,
+        operation=effective_operation,
+        operation_id=effective_operation_id,
         environment=environment,
         postmortem=postmortem,
         renderer_selection=renderer_selection,
         settings=settings,
         feature_flags=feature_flags,
+        correlation=correlation,
     )
     fingerprint = str(reproduction.get("failure", {}).get("fingerprint") or "")
 
@@ -693,6 +1020,8 @@ def create_support_bundle(
             postmortem=postmortem,
             events=events,
             repeats=repeats,
+            correlation=correlation,
+            preparation_failures=preparation_failures,
         ),
     )
     _write(EVENTS_FILENAME, _events_blob(events))
@@ -712,6 +1041,11 @@ def create_support_bundle(
         REPRODUCTION_FILENAME,
         json.dumps(reproduction, indent=2, sort_keys=True, default=str),
     )
+    if preparation_failures:
+        _write(
+            PREPARATION_FAILURES_FILENAME,
+            json.dumps(sanitize(preparation_failures), indent=2, sort_keys=True, default=str),
+        )
 
     if ticket_path is not None:
         # The readable ticket (the user's description and the visible app log)
@@ -738,6 +1072,7 @@ def create_support_bundle(
         archive=str(archive_path) if archive_path else None,
         event_count=len(events),
         repeat_groups=len(repeats),
+        preparation_failure_groups=len((preparation_failures or {}).get("failure_groups") or []),
         failure_fingerprint=fingerprint or None,
     )
     return SupportBundle(
@@ -753,6 +1088,7 @@ __all__ = [
     "ENVIRONMENT_FILENAME",
     "EVENTS_FILENAME",
     "POSTMORTEM_FILENAME",
+    "PREPARATION_FAILURES_FILENAME",
     "REPRODUCTION_FILENAME",
     "REPEATS_FILENAME",
     "SUMMARY_FILENAME",

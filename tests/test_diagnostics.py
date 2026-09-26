@@ -41,6 +41,7 @@ from core.operation_state import capture_postmortem, start_operation
 from core.support_bundle import (
     ENVIRONMENT_FILENAME,
     EVENTS_FILENAME,
+    PREPARATION_FAILURES_FILENAME,
     POSTMORTEM_FILENAME,
     REPRODUCTION_FILENAME,
     SUMMARY_FILENAME,
@@ -1418,6 +1419,157 @@ def test_a_burst_of_match_failures_does_not_hide_an_earlier_render_failure(tmp_p
     recovery = summary.split("UI RECOVERY", 1)[1].split("=== OPERATION", 1)[0]
     assert "render_failed" in recovery and "'link_phase': 'complete'" in recovery
     assert recovery.count("match_failed") == 2, "bounded: latest two of each kind"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 beta diagnostics: correlation and preparation failure evidence
+# ---------------------------------------------------------------------------
+
+
+def _report_environment(fresh, database: Path | None = None, *, operation_id: str = "") -> dict:
+    return {
+        "application": {"session_id": fresh.session_id, "patchlab_version": "1.6.9"},
+        "database": {"path": str(database)} if database else {},
+        "operation": "prepare-preset-library",
+        "operation_id": operation_id,
+    }
+
+
+def _postmortem(*, operation_id: str = "", session_id: str = "", age_seconds: int = 0) -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    return {
+        "operation": "prepare-preset-library",
+        "operation_id": operation_id,
+        "session_id": session_id,
+        "captured_utc": (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat(),
+        "exception": {"type": "BrokenPipeError", "message": "old worker pipe"},
+    }
+
+
+def test_postmortem_correlation_prefers_operation_and_session_ids(tmp_path: Path, fresh) -> None:
+    """A/C/E: strong matching IDs include; differing IDs exclude."""
+
+    environment = _report_environment(fresh, operation_id="prepare-current")
+    matching = create_support_bundle(
+        ticket_id="1" * 32, directory=tmp_path / "matching", archive=False,
+        operation="prepare-preset-library", operation_id="prepare-current",
+        environment=environment,
+        postmortem=_postmortem(operation_id="prepare-current", session_id=fresh.session_id),
+    )
+    assert json.loads((matching.directory / POSTMORTEM_FILENAME).read_text())["operation_id"] == "prepare-current"
+
+    mismatched_operation = create_support_bundle(
+        ticket_id="2" * 32, directory=tmp_path / "mismatched-operation", archive=False,
+        operation="prepare-preset-library", operation_id="prepare-current",
+        environment=environment,
+        postmortem=_postmortem(operation_id="prepare-old", session_id=fresh.session_id),
+    )
+    assert json.loads((mismatched_operation.directory / POSTMORTEM_FILENAME).read_text()) == {}
+
+    mismatched_session = create_support_bundle(
+        ticket_id="3" * 32, directory=tmp_path / "mismatched-session", archive=False,
+        operation="prepare-preset-library", environment=environment,
+        postmortem=_postmortem(session_id="other-session"),
+    )
+    assert json.loads((mismatched_session.directory / POSTMORTEM_FILENAME).read_text()) == {}
+
+    recent_name_fallback = create_support_bundle(
+        ticket_id="4" * 32, directory=tmp_path / "recent", archive=False,
+        operation="prepare-preset-library", environment=environment,
+        postmortem=_postmortem(),
+    )
+    assert json.loads((recent_name_fallback.directory / POSTMORTEM_FILENAME).read_text())["exception"]["type"] == "BrokenPipeError"
+
+
+def test_stale_postmortem_replay_is_excluded_and_never_inherited(tmp_path: Path, fresh) -> None:
+    """B/D/F/G plus a safe replay of the Sep 21 -> Sep 26 beta failure."""
+
+    stale = _postmortem(operation_id="local-library-sept21", session_id="sept21", age_seconds=5 * 24 * 3600)
+    (fresh.root / POSTMORTEM_FILENAME).write_text(json.dumps(stale), encoding="utf-8")
+    environment = _report_environment(fresh, operation_id="prepare-sept26")
+    for name, ticket in (("first", "5" * 32), ("second", "6" * 32)):
+        bundle = create_support_bundle(
+            ticket_id=ticket, directory=tmp_path / name, archive=False,
+            operation="prepare-preset-library", operation_id="prepare-sept26", environment=environment,
+        )
+        assert json.loads((bundle.directory / POSTMORTEM_FILENAME).read_text()) == {}
+        summary = (bundle.directory / SUMMARY_FILENAME).read_text()
+        assert "Postmortem: excluded" in summary
+        assert "BrokenPipeError" not in summary
+    assert json.loads((fresh.root / POSTMORTEM_FILENAME).read_text()) == stale
+
+    no_postmortem = create_support_bundle(
+        ticket_id="7" * 32, directory=tmp_path / "none", archive=False,
+        operation="prepare-preset-library", environment=environment, postmortem={},
+    )
+    assert (no_postmortem.directory / SUMMARY_FILENAME).is_file()
+
+
+def _preparation_failure_database(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE presets (
+                id INTEGER PRIMARY KEY, synth TEXT, status TEXT, error TEXT
+            );
+            CREATE TABLE preparation_jobs (
+                preset_id INTEGER PRIMARY KEY, state TEXT, last_error TEXT, attempt_count INTEGER
+            );
+            """
+        )
+        rows = [("serum2", "failed_load", "RuntimeError: host could not load token=very-secret", "failed", None, 2)] * 240
+        rows += [
+            ("serum2", "failed_load", "ValueError: invalid parameter /Users/brett/private/preset", "failed", None, 1),
+            ("serum2", "failed_silent", "render completed with silence", "rendered", "render completed with silence", 3),
+            ("serum2", "prepared", "success that must not be reported", "prepared", None, 1),
+        ]
+        for index, (synth, status, error, state, last_error, attempts) in enumerate(rows, start=1):
+            connection.execute("INSERT INTO presets VALUES (?,?,?,?)", (index, synth, status, error))
+            connection.execute("INSERT INTO preparation_jobs VALUES (?,?,?,?)", (index, state, last_error, attempts))
+
+
+def test_preparation_failure_bundle_is_grouped_sanitized_and_bounded(tmp_path: Path, fresh) -> None:
+    """A-I: failure families are actionable without dumping personal presets."""
+
+    database = tmp_path / "library.db"
+    _preparation_failure_database(database)
+    fresh.record(
+        "local-library", "incremental_preparation_complete", "complete",
+        operation_id="prepare-beta", queued=243, prepared=1, failed=242, skipped=0, cancelled=False,
+    )
+    bundle = create_support_bundle(
+        ticket_id="8" * 32, directory=tmp_path / "bundle", archive=False,
+        operation="prepare-preset-library", operation_id="prepare-beta",
+        environment=_report_environment(fresh, database, operation_id="prepare-beta"),
+    )
+    payload = json.loads((bundle.directory / PREPARATION_FAILURES_FILENAME).read_text())
+    groups = payload["failure_groups"]
+    assert payload["totals"]["failed"] == 242
+    assert payload["operation_context"]["queued"] == 243
+    assert payload["operation_context"]["prepared"] == 1
+    assert payload["operation_context"]["failed"] == 242
+    assert len(groups) == 3
+    duplicate = next(group for group in groups if group["count"] == 240)
+    assert len(duplicate["representative_examples"]) == 3
+    assert duplicate["representative_examples_omitted"] == 237
+    assert any(group["classification"] == "silent_render" for group in groups)
+    blob = json.dumps(payload)
+    assert "very-secret" not in blob and "/Users/brett" not in blob
+    assert "success that must not be reported" not in blob
+    assert (bundle.directory / PREPARATION_FAILURES_FILENAME).stat().st_size <= 256 * 1024
+
+
+def test_preparation_failure_file_is_omitted_when_database_has_no_failures(tmp_path: Path, fresh) -> None:
+    database = tmp_path / "clean-library.db"
+    _preparation_failure_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE presets SET status='prepared'")
+    bundle = create_support_bundle(
+        ticket_id="9" * 32, directory=tmp_path / "clean", archive=False,
+        environment=_report_environment(fresh, database),
+    )
+    assert not (bundle.directory / PREPARATION_FAILURES_FILENAME).exists()
 
 
 # ---------------------------------------------------------------------------

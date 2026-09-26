@@ -1136,6 +1136,11 @@ def _prepare_linked_library_incrementally(
         source_hashes=summary.source_hashes,
         queued=len(queue),
         prepared=summary.fingerprints_created,
+        failed=summary.failed_load + summary.failed_silent,
+        failed_load=summary.failed_load,
+        failed_silent=summary.failed_silent,
+        skipped=summary.skipped_unsupported_generation,
+        cancelled=False,
     )
     return summary
 
