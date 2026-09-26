@@ -483,6 +483,43 @@ def test_prepare_discovery_stays_on_prepare_card_and_keeps_qt_responsive(gui: Gu
     assert delivered == [True]
 
 
+def test_match_pauses_and_resumes_preparation_without_two_serum_workers(gui: Gui) -> None:
+    """Foreground Match waits for a durable library pause, then resumes it."""
+
+    gui.seed_library(rendered_only=1)
+    gui.window.start_render()
+    assert gui.window._prepare_active
+    gui.window.runner.stage_progress.emit(
+        {"stage": "discovery", "current": 447, "total": 6_057,
+         "text": "Checking 447 of 6,057 presets"}
+    )
+    gui.choose_audio()
+    assert gui.window.match_start_button.isEnabled()
+    running = {"value": True}
+    gui.monkeypatch.setattr(
+        type(gui.window.runner), "running", property(lambda _runner: running["value"])
+    )
+    gui.window.runner.cancel = MagicMock(name="runner.cancel")
+
+    gui.window.start_match()
+
+    gui.window.runner.cancel.assert_called_once()
+    gui.window.match_runner.start.assert_not_called()
+    assert gui.window._match_waiting_for_library_pause
+    assert "Pausing preset-library" in gui.window.render_stats.text()
+
+    running["value"] = False
+    gui.window.runner.failed.emit("Scan worker exited with code 15")
+    QTest.qWait(20)
+    gui.window.match_runner.start.assert_called_once()
+    assert not gui.window._prepare_active
+
+    gui.window.match_runner.failed.emit("test match failure")
+    QTest.qWait(20)
+    assert gui.window.runner.start.call_count == 2
+    assert "Resuming preset-library preparation" in gui.window.log_pane.toPlainText()
+
+
 def test_render_success_reaches_a_complete_state(gui: Gui) -> None:
     database = gui.seed_library(learned=0, rendered_only=4)
     gui.window._refresh_workflow_cards()

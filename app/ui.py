@@ -372,6 +372,10 @@ class LegacyMainWindow(QMainWindow):
         self._prepare_total = 0
         self._prepare_completed = 0
         self._prepare_started_at = 0.0
+        self._prepare_eta = None
+        self._prepare_eta_stage = ""
+        self._match_waiting_for_library_pause = False
+        self._resume_library_after_match = False
         # Last capability snapshot, so a later check can tell that a synth
         # newly became available rather than merely being present.
         self._capability_snapshot = None
@@ -869,17 +873,7 @@ class LegacyMainWindow(QMainWindow):
                     "render", 0, total, "Preparing Preset Library · " + text
                 )
                 return
-            elapsed = max(time.monotonic() - self._prepare_started_at, 0.0)
-            eta_text = "Estimating time…"
-            if current >= 2 and elapsed > 0:
-                remaining = max(total - current, 0)
-                seconds = int((elapsed / current) * remaining)
-                if seconds < 90:
-                    eta_text = "About 1 minute remaining"
-                elif seconds < 3600:
-                    eta_text = f"About {max(1, round(seconds / 60))} minutes remaining"
-                else:
-                    eta_text = f"About {max(1, round(seconds / 3600))} hours remaining"
+            eta_text = self._prepare_eta_text("discovery", current, total)
             self.render_stats.setText(f"{eta_text} · {text}")
             self._workflow_activities.pop("link", None)
             self._workflow_activities.pop("analyze", None)
@@ -893,17 +887,7 @@ class LegacyMainWindow(QMainWindow):
             completed = min(self._prepare_completed, self._prepare_total)
             self.render_progress.setRange(0, max(self._prepare_total, 1))
             self.render_progress.setValue(completed)
-            elapsed = max(time.monotonic() - self._prepare_started_at, 0.0)
-            eta_text = "Estimating time…"
-            if completed >= 2 and elapsed > 0:
-                remaining = max(self._prepare_total - completed, 0)
-                seconds = int((elapsed / completed) * remaining)
-                if seconds < 90:
-                    eta_text = "About 1 minute remaining"
-                elif seconds < 3600:
-                    eta_text = f"About {max(1, round(seconds / 60))} minutes remaining"
-                else:
-                    eta_text = f"About {max(1, round(seconds / 3600))} hours remaining"
+            eta_text = self._prepare_eta_text("prepare", completed, self._prepare_total)
             stage_label = str(detail.get("current_stage", "prepare")).replace("_", " ")
             name = str(detail.get("preset_name", ""))
             current_text = f"{stage_label.title()} “{name}”" if name else text
@@ -936,6 +920,18 @@ class LegacyMainWindow(QMainWindow):
             self._workflow_activities.pop("render", None)
             self._workflow_activities.pop("analyze", None)
             self._set_workflow_activity("link", current, total, text)
+
+    def _prepare_eta_text(self, stage: str, completed: int, total: int) -> str:
+        """Use one stable estimator for discovery and durable preparation."""
+
+        from core.progress_eta import ProgressETA, format_eta
+
+        if self._prepare_eta is None or self._prepare_eta_stage != stage:
+            self._prepare_eta = ProgressETA(
+                started_at=self._prepare_started_at or time.monotonic()
+            )
+            self._prepare_eta_stage = stage
+        return format_eta(self._prepare_eta.update(completed, total))
 
     def _render_library_complete(self) -> bool:
         database_path = self.local_paths["db"]
@@ -1376,9 +1372,25 @@ class LegacyMainWindow(QMainWindow):
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
         compact_render = bool(getattr(self, "_compact_render_active", False))
         preparing = bool(getattr(self, "_prepare_active", False))
+        priority_pause = preparing and bool(
+            getattr(self, "_match_waiting_for_library_pause", False)
+        )
         self._automatic_link_scan_active = False
         self._compact_render_active = False
         self._prepare_active = False
+        if priority_pause:
+            self._match_waiting_for_library_pause = False
+            self.render_cancel_button.setEnabled(False)
+            self.render_stats.setText(
+                "Preset library preparation paused for Match. It will resume afterward."
+            )
+            self.statusBar().showMessage("Starting Match…")
+            self.append_log(
+                "Preset library preparation paused at a durable checkpoint for Match."
+            )
+            self._refresh_workflow_cards()
+            QTimer.singleShot(0, self.start_match)
+            return
         if preparing:
             self._workflow_activities.pop("render", None)
             self.render_cancel_button.setEnabled(False)
@@ -1510,12 +1522,28 @@ class LegacyMainWindow(QMainWindow):
         automatic = bool(getattr(self, "_automatic_link_scan_active", False))
         compact_render = bool(getattr(self, "_compact_render_active", False))
         preparing = bool(getattr(self, "_prepare_active", False))
+        priority_pause = preparing and bool(
+            getattr(self, "_match_waiting_for_library_pause", False)
+        )
         self._automatic_link_scan_active = False
         self._compact_render_active = False
         self._prepare_active = False
         self._workflow_activities.pop("link", None)
         self._workflow_activities.pop("render", None)
         self._workflow_activities.pop("analyze", None)
+        if priority_pause:
+            self._match_waiting_for_library_pause = False
+            self.render_cancel_button.setEnabled(False)
+            self.render_stats.setText(
+                "Preset library preparation paused for Match. It will resume afterward."
+            )
+            self.statusBar().showMessage("Starting Match…")
+            self.append_log(
+                "Preset library preparation paused at a durable checkpoint for Match."
+            )
+            self._refresh_workflow_cards()
+            QTimer.singleShot(0, self.start_match)
+            return
         if preparing:
             self._render_failure_detail = self._user_facing_error(error)
             self.render_cancel_button.setEnabled(False)
@@ -1647,6 +1675,8 @@ class LegacyMainWindow(QMainWindow):
             self._prepare_total = len(preset_ids)
             self._prepare_completed = 0
             self._prepare_started_at = time.monotonic()
+            self._prepare_eta = None
+            self._prepare_eta_stage = ""
             self._render_failure_detail = ""
             self.render_progress.setRange(0, self._prepare_total)
             self.render_progress.setValue(0)
@@ -2033,6 +2063,9 @@ class LegacyMainWindow(QMainWindow):
             return
         if self._match_audio_path is None:
             return
+        if getattr(self, "_match_waiting_for_library_pause", False):
+            self.statusBar().showMessage("Waiting for preset-library preparation to pause…")
+            return
         target_synth = str(self.match_synth.currentData())
         self._ui_event(
             "match_requested",
@@ -2054,9 +2087,22 @@ class LegacyMainWindow(QMainWindow):
         # told to install Serum 2 staring at dead controls.)
         if not self._check_output_capability(target_synth, matching_now=True):
             return
-        # Matching is always the foreground request. An automatic maintenance
-        # scan is resumable, so stop it immediately rather than making a new
-        # patch compete with a Serum host, CPU, or disk work from launch.
+        # Matching is always the foreground request. Both the automatic scan
+        # and the explicit Prepare action are resumable. They may open Serum,
+        # so Match waits for that worker to exit before starting.
+        if getattr(self, "_prepare_active", False) and self.runner.running:
+            self._match_waiting_for_library_pause = True
+            self._resume_library_after_match = True
+            self.render_cancel_button.setEnabled(False)
+            self.render_stats.setText(
+                "Pausing preset-library preparation so Match can start."
+            )
+            self.statusBar().showMessage("Pausing preset-library preparation for Match…")
+            self.append_log(
+                "Pausing resumable preset-library preparation so foreground Match can use Serum."
+            )
+            self.runner.cancel()
+            return
         if (
             getattr(self, "_automatic_link_scan_active", False)
             and self.runner.running
@@ -2302,6 +2348,7 @@ class LegacyMainWindow(QMainWindow):
         self.match_offset.setEnabled(True)
         self._show_match_result(self._match_result)
         self._refresh_workflow_cards()
+        self._resume_library_after_foreground_match()
 
     def _show_match_result(self, result: dict) -> None:
         self.match_results.setVisible(True)
@@ -2502,6 +2549,16 @@ class LegacyMainWindow(QMainWindow):
             stale_activities=sorted(self._workflow_activities),
             source_audio_kept=self._match_audio_path is not None,
         )
+        self._resume_library_after_foreground_match()
+
+    def _resume_library_after_foreground_match(self) -> None:
+        """Restart only the durable outstanding library queue after Match exits."""
+
+        if not getattr(self, "_resume_library_after_match", False):
+            return
+        self._resume_library_after_match = False
+        self.append_log("Resuming preset-library preparation after Match.")
+        QTimer.singleShot(0, self.start_render)
 
     def report_model_asset_error(
         self,
@@ -3175,6 +3232,10 @@ class MainWindow(LegacyMainWindow):
         self._prepare_total = 0
         self._prepare_completed = 0
         self._prepare_started_at = 0.0
+        self._prepare_eta = None
+        self._prepare_eta_stage = ""
+        self._match_waiting_for_library_pause = False
+        self._resume_library_after_match = False
         # Last capability snapshot, so a later check can tell that a synth
         # newly became available rather than merely being present.
         self._capability_snapshot = None
