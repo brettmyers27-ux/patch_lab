@@ -15,6 +15,7 @@ from core.preparation_diagnostic import (
     platform_data_candidates,
     write_output,
 )
+from core.preparation_error_diagnostic import collect as collect_error_details
 
 
 def _database(path: Path, *, older_schema: bool = False, failures: list[tuple[str, str, str | None]] | None = None) -> None:
@@ -34,6 +35,25 @@ def _database(path: Path, *, older_schema: bool = False, failures: list[tuple[st
 
 
 class PreparationDiagnosticTests(unittest.TestCase):
+    def test_follow_up_collector_keeps_semantic_error_and_redacts_private_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "library.db"
+            _database(database)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "INSERT INTO presets VALUES (1,?,?,?)",
+                    ("serum2", "failed_load", "RuntimeError: /Users/tester/Presets/private.fxp"),
+                )
+                connection.execute(
+                    "INSERT INTO preparation_jobs VALUES (?,?,?,?)",
+                    (1, "failed", "RuntimeError: renderer process exited before note 48", 2),
+                )
+            payload = collect_error_details(database)
+        group = payload["failure_groups"][0]
+        self.assertEqual(group["semantic_error"], "RuntimeError: renderer process exited before note 48")
+        self.assertEqual(group["error_source"], "preparation_jobs.last_error")
+        self.assertEqual(payload["relationship"]["rows_with_job_state"], 1)
+        self.assertNotIn("tester", str(payload))
     def test_failure_family_fixtures_are_grouped_and_database_is_unchanged(self) -> None:
         failures = [
             ("serum2", "failed_load", "RuntimeError: rendering did not produce seven valid note files"),

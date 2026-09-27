@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import argparse
 import plistlib
 import shutil
 import subprocess
@@ -43,22 +44,31 @@ def _build_python() -> str:
     ).strip()
 
 
-def build(output_dir: Path) -> Path:
+def build(output_dir: Path, *, error_details: bool = False) -> Path:
     if sys.platform != "darwin":
         raise RuntimeError("build the macOS diagnostic on macOS")
     if __import__("platform").machine() != "arm64":
         raise RuntimeError("build the macOS diagnostic on Apple Silicon")
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / OUTPUT_NAME
+    launcher = ROOT / "packaging" / (
+        "preparation_error_diagnostic.py" if error_details else "preparation_diagnostic.py"
+    )
+    cores = [ROOT / "core" / "preparation_diagnostic.py"]
+    if error_details:
+        cores.append(ROOT / "core" / "preparation_error_diagnostic.py")
+    name = "PatchLab Preparation Error Diagnostic" if error_details else "PatchLab Preparation Diagnostic"
+    identifier = "com.patchlab.preparation-error-diagnostic" if error_details else "com.patchlab.preparation-diagnostic"
+    target = output_dir / f"{name}.app"
     if target.exists():
         shutil.rmtree(target)
     with tempfile.TemporaryDirectory(prefix="patchlab-preparation-diagnostic-") as temporary:
         work = Path(temporary)
         staged = work / "source"
         (staged / "core").mkdir(parents=True)
-        shutil.copy2(LAUNCHER, staged / "preparation_diagnostic.py")
-        shutil.copy2(CORE, staged / "core" / "preparation_diagnostic.py")
+        shutil.copy2(launcher, staged / "preparation_diagnostic.py")
+        for core in cores:
+            shutil.copy2(core, staged / "core" / core.name)
         environment = dict(os.environ)
         environment["MACOSX_DEPLOYMENT_TARGET"] = MINIMUM_MACOS
         environment["PYINSTALLER_CONFIG_DIR"] = str(work / "pyinstaller-cache")
@@ -71,9 +81,9 @@ def build(output_dir: Path) -> Path:
                 "--noconfirm",
                 "--windowed",
                 "--name",
-                "PatchLab Preparation Diagnostic",
+                name,
                 "--osx-bundle-identifier",
-                "com.patchlab.preparation-diagnostic",
+                identifier,
                 "--target-architecture",
                 "arm64",
                 "--paths",
@@ -88,12 +98,12 @@ def build(output_dir: Path) -> Path:
             cwd=staged,
             env=environment,
         )
-        app = work / "dist" / OUTPUT_NAME
+        app = work / "dist" / f"{name}.app"
         info_path = app / "Contents" / "Info.plist"
         with info_path.open("rb") as handle:
             info = plistlib.load(handle)
         info["LSMinimumSystemVersion"] = MINIMUM_MACOS
-        info["CFBundleDisplayName"] = "PatchLab Preparation Diagnostic"
+        info["CFBundleDisplayName"] = name
         info["CFBundleShortVersionString"] = "1.0.0"
         info["CFBundleVersion"] = "1.0.0"
         with info_path.open("wb") as handle:
@@ -113,5 +123,8 @@ def build(output_dir: Path) -> Path:
 
 
 if __name__ == "__main__":
-    destination = Path(sys.argv[1]) if len(sys.argv) == 2 else ROOT / "release"
-    print(build(destination))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--error-details", action="store_true")
+    parser.add_argument("destination", nargs="?", type=Path, default=ROOT / "release")
+    args = parser.parse_args()
+    print(build(args.destination, error_details=args.error_details))
