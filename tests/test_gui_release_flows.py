@@ -1359,6 +1359,19 @@ def test_not_signed_in_signs_in_and_resumes_the_same_report_automatically(gui: G
     assert "resuming the saved bug report" in gui.window.log_pane.toPlainText()
 
 
+def test_expired_worker_token_refreshes_and_resumes_same_report_without_prompt(gui: Gui, monkeypatch) -> None:
+    from core.access_gate import AccessManager
+
+    saved = gui.tmp_path / "PatchLab Bug Report saved.txt"
+    runner = _bug_report_runner(gui, code="auth_failed", saved=saved)
+    monkeypatch.setattr(AccessManager, "access_token", lambda self, *, force_refresh=False: "fresh" if force_refresh else None)
+    gui.window._reconnect_support_service = MagicMock()
+    gui.window._bug_report_signin_attempted = False
+    gui.window._bug_report_failed("Session expired.")
+    gui.window._reconnect_support_service.assert_not_called()
+    runner.start.assert_called_once_with(saved)
+
+
 def test_a_declined_sign_in_keeps_the_local_report_and_explains(gui: Gui) -> None:
     runner = _bug_report_runner(gui, code="not_connected")
     gui.window._reconnect_support_service = MagicMock(return_value=False)
@@ -1393,8 +1406,14 @@ def test_signing_in_again_lifts_the_local_only_setting_for_the_session(monkeypat
     from core.access_gate import AccessManager, AccessStore
 
     monkeypatch.setenv("PATCHLAB_DISABLE_RELAY", "1")
-    store = AccessStore(marker_path=tmp_path / "access.json", keyring_backend=None)
-    manager = AccessManager(store, relay_url="https://relay.invalid", validator=lambda _u, _p: "tok")
+    store = AccessStore(marker_path=tmp_path / "access.json")
+    manager = AccessManager(
+        store, relay_url="https://relay.invalid",
+        validator=lambda _u, _p: {
+            "device_credential": "test-device", "expires_at": int(time.time()) + 86400,
+            "access_token": f"{int(time.time()) + 3600}.test",
+        },
+    )
     manager.authenticate("passcode")
     import os
 

@@ -254,6 +254,14 @@ class RelayClient:
             self._token = str(result["token"])
         return self._token
 
+    def register_device(self, passcode: str) -> dict[str, Any]:
+        return self._json("/device-sessions", {"password": passcode}, authenticated=False)
+
+    def refresh_device(self, credential: str) -> dict[str, Any]:
+        return self._json(
+            "/device-sessions/refresh", {"device_credential": credential}, authenticated=False
+        )
+
     def check_hash(self, content_hash: str) -> bool:
         result = self._json("/check-hash", {"content_hash": content_hash})
         return bool(result["exists"])

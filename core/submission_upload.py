@@ -113,21 +113,12 @@ def resolve_relay() -> tuple[RelayClient | None, str]:
     url = os.environ.get("PATCHLAB_RELAY_URL", "").strip()
     if not url:
         return None, "no_url"
-    password: str | Callable[[], str | None] = os.environ.get("PATCHLAB_RELAY_PASSWORD", "")
-    token = None
-    if not password:
-        from core import access_gate
+    from core.access_gate import stored_token
 
-        token = access_gate.stored_token()
-        if token:
-            # The saved token is tried first; the keychain is consulted (with a
-            # time limit) only if the service says the token has expired.
-            password = access_gate.stored_passcode
-        else:
-            password = access_gate.stored_passcode() or ""
-    if not password and not token:
+    token = stored_token()
+    if not token:
         return None, "no_credentials"
-    return RelayClient(url, password, token=token), "ok"
+    return RelayClient(url, "", token=token), "ok"
 
 
 def relay_host(relay: RelayClient) -> str:

@@ -36,24 +36,10 @@ SCREENSHOT = (
 )
 
 
-class MemoryKeyring:
-    def get_password(self, _service: str, _account: str) -> None:
-        return None
-
-    def set_password(self, _service: str, _account: str, _value: str) -> None:
-        return None
-
-    def delete_password(self, _service: str, _account: str) -> None:
-        return None
-
-
 def main() -> int:
     application = QApplication.instance() or QApplication([])
     with tempfile.TemporaryDirectory(prefix="patchlab-license-dialog-") as directory:
-        store = AccessStore(
-            marker_path=Path(directory) / "access-state.json",
-            keyring_backend=MemoryKeyring(),
-        )
+        store = AccessStore(marker_path=Path(directory) / "access-state.json")
         dialog = LicenseAgreementDialog(store)
         dialog.resize(680, 560)
         dialog.show()

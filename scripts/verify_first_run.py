@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -19,34 +20,19 @@ from core.launch_gates import run_distribution_gates
 from core.privacy import PrivacyStore
 
 
-class MemoryKeyring:
-    def __init__(self) -> None:
-        self.value: str | None = None
-
-    def get_password(self, _service: str, _account: str) -> str | None:
-        return self.value
-
-    def set_password(self, _service: str, _account: str, value: str) -> None:
-        self.value = value
-
-    def delete_password(self, _service: str, _account: str) -> None:
-        self.value = None
-
-
 def profile_case(root: Path, accept: bool) -> dict:
-    keyring = MemoryKeyring()
-    access_store = AccessStore(
-        marker_path=root / "access-state.json", keyring_backend=keyring
-    )
+    access_store = AccessStore(marker_path=root / "access-state.json")
     privacy = PrivacyStore(root / "privacy-settings.json")
     manager = AccessManager(
         access_store,
         relay_url="http://local-test-relay",
         validator=lambda _url, password: (
-            "test-token"
+            {"device_credential": "test-device", "expires_at": int(time.time()) + 86400,
+             "access_token": f"{int(time.time()) + 3600}.test"}
             if password == "group-passcode"
             else (_ for _ in ()).throw(ValueError("wrong passcode"))
         ),
+        refresher=lambda _url, _credential: {"access_token": f"{int(time.time()) + 3600}.test"},
     )
     first_license = access_store.needs_license_agreement()
     first_passcode = manager.needs_prompt()
@@ -113,9 +99,7 @@ def profile_case(root: Path, accept: bool) -> dict:
 
 
 def declined_license_case(root: Path) -> dict:
-    store = AccessStore(
-        marker_path=root / "access-state.json", keyring_backend=MemoryKeyring()
-    )
+    store = AccessStore(marker_path=root / "access-state.json")
     manager = AccessManager(
         store,
         relay_url="http://local-test-relay",

@@ -1083,6 +1083,31 @@ def test_bundle_is_written_without_any_support_service(tmp_path: Path, fresh) ->
     ).read_text(encoding="utf-8")
 
 
+def test_device_credential_and_access_token_are_excluded_from_support_bundle(tmp_path: Path, fresh) -> None:
+    from core.access_gate import AccessStore
+    from core.diagnostics import redact_text
+    import zipfile
+
+    credential = "eyJ" + "A" * 40 + "." + "b" * 64
+    access_token = "9999999999." + "c" * 64
+    store = AccessStore(marker_path=tmp_path / "profile" / "access-state.json")
+    store.save_device(credential, 9999999999, access_token)
+    assert credential not in redact_text(f"device {credential}")
+    assert access_token not in redact_text(f"access {access_token}")
+    bundle = create_support_bundle(
+        ticket_id="b" * 32,
+        directory=tmp_path / "bundle",
+        comments=f"credential={credential} token={access_token}",
+        archive=True,
+    )
+    with zipfile.ZipFile(bundle.archive) as archive:
+        names = archive.namelist()
+        content = b"".join(archive.read(name) for name in names)
+    assert all("device-session.json" not in name for name in names)
+    assert credential.encode() not in content
+    assert access_token.encode() not in content
+
+
 def test_bundle_events_are_size_capped(tmp_path: Path) -> None:
     from core.support_bundle import MAX_BUNDLE_EVENT_BYTES
 

@@ -315,13 +315,12 @@ def _credential_and_first_run() -> list[Result]:
     results: list[Result] = []
     store = AccessStore()
     state = store.load()
-    passcode_saved = bool(store.passcode())
+    device_saved = bool(state.device_credential and store.device_path.is_file())
     results.append(
         Result(
-            "Windows Credential Manager",
-            "PASS" if state.authenticated_once and passcode_saved else "FAIL",
-            f"authenticated marker={state.authenticated_once}; "
-            f"passcode retrievable through keyring={passcode_saved}; secret not printed",
+            "PatchLab device session",
+            "PASS" if state.authenticated_once and device_saved and store.passcode() is None else "FAIL",
+            f"device session stored={device_saved}; passcode not stored",
         )
     )
     process = subprocess.run(

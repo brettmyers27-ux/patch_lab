@@ -27,14 +27,14 @@ class PasscodeDialog(QDialog):
         title.setStyleSheet("font-size: 20px; font-weight: 750;")
         detail = QLabel(
             "Enter the group passcode once. PatchLab validates it with the "
-            "private sharing service and stores it in your system keychain."
+            "private sharing service and remembers this device session."
         )
         detail.setWordWrap(True)
         self.passcode = QLineEdit()
         self.passcode.setEchoMode(QLineEdit.EchoMode.Password)
         self.passcode.setPlaceholderText("Group passcode")
         self.passcode.returnPressed.connect(self._unlock)
-        self.status = QLabel("")
+        self.status = QLabel(manager.prompt_message)
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         buttons = QHBoxLayout()

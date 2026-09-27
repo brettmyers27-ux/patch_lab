@@ -123,6 +123,8 @@ _SECRET_KEY_TOKENS = (
 
 #: Values that look like credentials are redacted even under an innocent key.
 _SECRET_VALUE_PATTERNS = (
+    re.compile(r"\b\d{10}\.[a-fA-F0-9]{64}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[a-fA-F0-9]{64}\b"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"),
     re.compile(r"(?i)\b(?:api[-_]?key|token|passcode|password)\s*[:=]\s*\S+"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),

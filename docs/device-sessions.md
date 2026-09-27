@@ -1,0 +1,9 @@
+# PatchLab device sessions
+
+PatchLab sends the beta passcode to the private relay only during device registration. The relay validates the existing scrypt passcode hash and returns a one-hour access token plus a signed 90-day device credential. The passcode is never written to app data. A device credential contains a random 128-bit identifier, PatchLab scope, and fixed expiry, authenticated with an HMAC using the relay's existing token secret. Refresh returns a new one-hour access token without extending the device credential. `PATCHLAB_DEVICE_SESSION_TTL_S` configures the device lifetime on the relay.
+
+The app writes only the device credential and expiry to `device-session.json` inside its per-user application data directory. Writes are atomic; macOS files use mode 0600. The access token stays in main-process memory and is passed to workers through their process environment. Workers never read the credential file or invoke an operating-system credential store. The existing 1.6.6 `/auth` endpoint remains available.
+
+An invalid or expired credential requires the beta passcode again. A temporary network failure preserves the credential and permits local functions. Sign out deletes the local credential and access token. Because the relay has no device database, individual revocation is unavailable; rotating the relay token secret revokes all sessions. The fixed 90-day expiry bounds theft exposure. An attacker with access to the local user account can read an app-owned bearer credential; this design deliberately makes no claim of encryption at rest.
+
+The legacy Keychain item is neither read nor deleted during migration. A 1.6.6 user enters the beta passcode once after upgrading. Relay deployment must precede release of the new client, because production 1.6.6 does not know the additive device endpoints and the new client requires them to register.

@@ -1240,7 +1240,7 @@ class LegacyMainWindow(QMainWindow):
             return
         self._update_check_auth_retry_attempted = True
         self.append_log("Update check needs sign-in; asking now…")
-        if self._reconnect_support_service() and not self.update_check_runner.running:
+        if self._recover_support_service() and not self.update_check_runner.running:
             self.append_log("Signed in; re-checking for updates…")
             self._start_update_check(manual=True)
         else:
@@ -5756,7 +5756,7 @@ class MainWindow(LegacyMainWindow):
             toggle.setChecked(self.share_toggle.isChecked())
             toggle.toggled.connect(self.share_toggle.setChecked)
             layout.addWidget(toggle)
-            forget = QPushButton("Sign out / forget passcode")
+            forget = QPushButton("Sign out")
             forget.setObjectName("compactActionButton")
             forget.clicked.connect(self._forget_passcode)
             layout.addWidget(forget)
@@ -5859,10 +5859,10 @@ class MainWindow(LegacyMainWindow):
         QMessageBox.information(
             self,
             "Signed out",
-            "The saved PatchLab passcode was removed. Your license acceptance and "
-            "preset-sharing choice were not changed. The passcode will be requested "
-            "the next time PatchLab starts.",
+            "This device was signed out of PatchLab. Enter the beta passcode "
+            "to sign in again. Your presets and settings were not changed.",
         )
+        QTimer.singleShot(0, self._reconnect_support_service)
 
     def open_help(self) -> None:
         build = current_build_info()
@@ -6385,7 +6385,7 @@ class MainWindow(LegacyMainWindow):
                 "The support service needs a sign-in before this report can upload; "
                 "asking now and then resuming the same report."
             )
-            if self._reconnect_support_service() and not self.bug_report_runner.running:
+            if self._recover_support_service() and not self.bug_report_runner.running:
                 try:
                     self.bug_report_runner.start(request_path)
                     self.append_log("Signed in; resuming the saved bug report upload…")
@@ -6412,7 +6412,7 @@ class MainWindow(LegacyMainWindow):
         box.exec()
         clicked = box.clickedButton()
         if connect is not None and clicked is connect:
-            if not self._reconnect_support_service():
+            if not self._recover_support_service():
                 return
         elif clicked is not retry:
             return
@@ -6437,6 +6437,14 @@ class MainWindow(LegacyMainWindow):
         except Exception as exc:
             self.append_log(f"Sign-in could not be opened: {exc}")
             return False
+
+    def _recover_support_service(self) -> bool:
+        """Refresh an expired worker token before asking for the beta passcode."""
+        from core.access_gate import AccessManager
+
+        if AccessManager().access_token(force_refresh=True):
+            return True
+        return self._reconnect_support_service()
 
     def append_log(self, message: str) -> None:
         append_runtime_log(message)

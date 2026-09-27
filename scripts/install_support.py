@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.access_gate import AccessManager, AccessStore  # noqa: E402
+from core.access_gate import AccessManager  # noqa: E402
 from core.runtime_compatibility import (  # noqa: E402
     CLAP_CHECKPOINT_BYTES,
     CLAP_CHECKPOINT_NAME,
@@ -307,23 +307,23 @@ def _auth(args: argparse.Namespace) -> None:
     if not ok:
         raise InstallError(message)
     state = manager.store.load()
-    if not state.authenticated_once or not state.token:
+    if not state.authenticated_once or not manager.access_token():
         raise InstallError("relay authentication did not produce a reusable token")
     print("AUTH_OK credential stored through PatchLab's access store")
 
 
 def _auth_status(_args: argparse.Namespace) -> None:
-    state = AccessStore().load()
-    if not state.authenticated_once:
+    manager = AccessManager()
+    if manager.needs_prompt() or not manager.access_token():
         raise InstallError("no prior successful group authentication")
     print("AUTH_STATUS authenticated_once=true")
 
 
 def _artifact_token() -> str:
-    state = AccessStore().load()
-    if not state.authenticated_once or not state.token:
+    token = AccessManager().access_token()
+    if not token:
         raise InstallError("authenticate before downloading private artifacts")
-    return state.token
+    return token
 
 
 def _artifact_manifest(relay_url: str) -> tuple[str, list[dict]]:
@@ -338,17 +338,11 @@ def _artifact_manifest(relay_url: str) -> tuple[str, list[dict]]:
             manifest = json.loads(body)
             break
         if status == 401:
-            passcode = AccessStore().passcode()
-            if attempt or not passcode:
-                raise InstallError(
-                    "group authentication expired; rerun and enter the passcode"
-                )
-            manager = AccessManager(relay_url=relay_url)
-            ok, message, _offline = manager.authenticate(passcode)
-            passcode = ""
-            if not ok:
-                raise InstallError(message)
-            token = _artifact_token()
+            if attempt:
+                raise InstallError("PatchLab session expired; enter the beta passcode again")
+            token = AccessManager(relay_url=relay_url).access_token(force_refresh=True) or ""
+            if not token:
+                raise InstallError("PatchLab session expired; enter the beta passcode again")
             continue
         raise InstallError(
             f"private artifact manifest failed with HTTP {status}: "

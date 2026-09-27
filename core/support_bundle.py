@@ -271,7 +271,7 @@ def build_summary(
         f"Created (UTC): {datetime.now(timezone.utc).isoformat()}",
         "",
         "=== USER COMMENTS ===",
-        comments.strip() or "(none)",
+        redact_text(comments.strip()) or "(none)",
         "",
         "=== BUILD ===",
         f"PatchLab {app.get('patchlab_version') or 'unknown'} "

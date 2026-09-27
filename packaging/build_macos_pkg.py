@@ -76,6 +76,7 @@ def _validate_app(app: Path, version: str) -> None:
         "library.db",
         "privacy-settings.json",
         "access-state.json",
+        "device-session.json",
         "match_library",
     )
     found = [name for name in forbidden if any(app.rglob(name))]

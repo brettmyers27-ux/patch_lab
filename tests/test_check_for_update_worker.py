@@ -47,7 +47,7 @@ def _stub_relay(monkeypatch):
     monkeypatch.delenv("PATCHLAB_DISABLE_RELAY", raising=False)
     monkeypatch.setattr("core.relay_client.RelayClient", FakeClient)
     monkeypatch.setattr(
-        "core.access_gate.stored_relay_credential", lambda: ("secret", "tok"),
+        "core.access_gate.stored_relay_credential", lambda: (None, "tok"),
         raising=False,
     )
     monkeypatch.setattr(check_for_update, "CURRENT_VERSION", "1.5.6")

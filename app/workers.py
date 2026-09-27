@@ -17,6 +17,8 @@ from core.worker_runtime import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+AUTHENTICATED_WORKERS = frozenset({"local-library", "bug-report", "check-update", "download-update"})
+
 class _ProcessRunnerBase(QObject):
     """Shared QProcess launch and bounded worker-startup handshake."""
 
@@ -72,6 +74,15 @@ class _ProcessRunnerBase(QObject):
             environment = QProcessEnvironment.systemEnvironment()
             for key, value in child_environment(self.operation_id).items():
                 environment.insert(key, value)
+            # The GUI alone owns the durable device session. Workers receive
+            # only a one-hour access token and cannot read the session file.
+            from core.access_gate import AccessManager, WORKER_ACCESS_TOKEN_ENV
+
+            token = AccessManager().access_token() if worker_name in AUTHENTICATED_WORKERS else None
+            if token:
+                environment.insert(WORKER_ACCESS_TOKEN_ENV, token)
+            else:
+                environment.remove(WORKER_ACCESS_TOKEN_ENV)
             self.process.setProcessEnvironment(environment)
         except Exception:
             self.operation_id = ""

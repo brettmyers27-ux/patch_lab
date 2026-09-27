@@ -38,6 +38,7 @@ from relay.service import LocalTestStore, RelayService, hash_password  # noqa: E
 from core import submission_upload as up  # noqa: E402
 from core.contribution_bundle import Candidate, build_bundles  # noqa: E402
 from core.relay_client import RelayClient  # noqa: E402
+from core.access_gate import AccessManager, AccessStore, WORKER_ACCESS_TOKEN_ENV  # noqa: E402
 from core.submission_upload import UploadError, upload_file  # noqa: E402
 
 PASSCODE = "trusted-e2e-passcode"
@@ -122,6 +123,24 @@ def _no_real_sleeping(monkeypatch: pytest.MonkeyPatch):
 
 def client(server: Server, **kwargs) -> RelayClient:
     return RelayClient(server.url, PASSCODE, **kwargs)
+
+
+def test_device_registration_relaunch_refresh_and_revocation_over_http(server: Server, tmp_path: Path) -> None:
+    store = AccessStore(marker_path=tmp_path / "profile" / "access-state.json")
+    manager = AccessManager(store, relay_url=server.url)
+    assert manager.needs_prompt()
+    assert manager.authenticate(PASSCODE)[0]
+    credential = store.load().device_credential
+    assert credential and PASSCODE not in store.device_path.read_text()
+    assert not AccessManager(AccessStore(marker_path=store.marker_path), relay_url=server.url).needs_prompt()
+    store.refresh_token("1.expired")
+    refreshed = AccessManager(store, relay_url=server.url).access_token()
+    assert refreshed and refreshed != "1.expired"
+    server.service.authorize(refreshed)
+    server.service.token_secret = b"revoked-secret"
+    store.refresh_token("1.expired")
+    assert AccessManager(store, relay_url=server.url).needs_prompt()
+    assert not store.device_path.exists()
 
 
 def make_bundle(tmp_path: Path, name: str = "bundle.zip", payload: bytes = b"diagnostic bytes") -> Path:
@@ -292,13 +311,13 @@ def test_a_relay_that_is_down_fails_quickly_and_boundedly(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _run_worker(monkeypatch, tmp_path, server_url: str, capsys) -> tuple[int, str, Path, str]:
+def _run_worker(monkeypatch, tmp_path, server_url: str, capsys, token: str) -> tuple[int, str, Path, str]:
     import core.bug_report as bug_report_module
     import scripts.submit_bug_report as worker
 
     monkeypatch.setattr(bug_report_module, "reports_root", lambda: tmp_path)
     monkeypatch.setenv("PATCHLAB_RELAY_URL", server_url)
-    monkeypatch.setenv("PATCHLAB_RELAY_PASSWORD", PASSCODE)
+    monkeypatch.setenv(WORKER_ACCESS_TOKEN_ENV, token)
     monkeypatch.delenv("PATCHLAB_DISABLE_RELAY", raising=False)
     existing = sorted(tmp_path.glob("PatchLab Bug Report *.txt"))
     request = existing[0] if existing else bug_report_module.create_request(comments="e2e", logs="some log")
@@ -309,7 +328,7 @@ def _run_worker(monkeypatch, tmp_path, server_url: str, capsys) -> tuple[int, st
 
 
 def test_worker_uploads_the_saved_bundle_to_the_relay(server: Server, tmp_path: Path, monkeypatch, capsys) -> None:
-    code, out, _request, ticket = _run_worker(monkeypatch, tmp_path, server.url, capsys)
+    code, out, _request, ticket = _run_worker(monkeypatch, tmp_path, server.url, capsys, server.service.issue_token(PASSCODE))
     assert code == 0 and "BUG_REPORT_RESULT=" in out
     result = json.loads(out.split("BUG_REPORT_RESULT=")[1].splitlines()[0])
     archive = tmp_path / f"PatchLab Bug Report {ticket} diagnostics.zip"
@@ -326,14 +345,15 @@ def test_worker_with_a_dead_relay_keeps_the_local_report_and_a_later_retry_succe
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
-    code, out, request, ticket = _run_worker(monkeypatch, tmp_path, dead, capsys)
+    token = server.service.issue_token(PASSCODE)
+    code, out, request, ticket = _run_worker(monkeypatch, tmp_path, dead, capsys, token)
     assert code == 1 and "BUG_REPORT_ERROR_CODE=offline" in out
     directory = tmp_path / f"PatchLab Bug Report {ticket} diagnostics"
     archive = directory.with_suffix(".zip")
     assert request.is_file() and (directory / "summary.txt").is_file() and archive.is_file()
     snapshot = (archive.read_bytes(), (directory / "summary.txt").read_bytes())
 
-    code, out, _r, _t = _run_worker(monkeypatch, tmp_path, server.url, capsys)  # the manual retry
+    code, out, _r, _t = _run_worker(monkeypatch, tmp_path, server.url, capsys, token)  # the manual retry
     assert code == 0
     assert (archive.read_bytes(), (directory / "summary.txt").read_bytes()) == snapshot, "not regenerated"
     (stored,) = server.stored("bug-reports")
@@ -341,7 +361,7 @@ def test_worker_with_a_dead_relay_keeps_the_local_report_and_a_later_retry_succe
 
 
 def test_worker_output_never_contains_credentials(server: Server, tmp_path: Path, monkeypatch, capsys) -> None:
-    code, out, _request, _ticket = _run_worker(monkeypatch, tmp_path, server.url, capsys)
+    code, out, _request, _ticket = _run_worker(monkeypatch, tmp_path, server.url, capsys, server.service.issue_token(PASSCODE))
     assert PASSCODE not in out and "Bearer" not in out
 
 

@@ -235,24 +235,15 @@ def test_M_saved_result_shows_open_location_not_export(save_gui, tmp_path: Path)
     assert window.retry_save_button.isHidden()
 
 
-# --- Q. the disable-keychain env var actually stops keyring from being touched
+# --- Q. authentication never imports an OS credential store
 
 
-def test_Q_disable_keychain_env_var_is_set_for_every_test_in_this_suite(monkeypatch) -> None:
-    import os
-
-    assert os.environ.get("PATCHLAB_DISABLE_KEYCHAIN", "").strip() == "1", (
-        "tests/conftest.py must export PATCHLAB_DISABLE_KEYCHAIN=1 so no test "
-        "run ever touches the real macOS keychain and triggers an auth prompt"
-    )
-
-
-def test_Q_access_store_never_imports_keyring_under_the_test_env(tmp_path: Path, monkeypatch) -> None:
+def test_Q_access_store_never_imports_keyring(tmp_path: Path, monkeypatch) -> None:
     import sys
 
     from core.access_gate import AccessStore
 
-    monkeypatch.setenv("PATCHLAB_DISABLE_KEYCHAIN", "1")
     monkeypatch.setitem(sys.modules, "keyring", None)  # importing it would now raise
     store = AccessStore(marker_path=tmp_path / "access-state.json")
-    assert store.keyring is None
+    assert store.passcode() is None
+    assert not hasattr(store, "keyring")

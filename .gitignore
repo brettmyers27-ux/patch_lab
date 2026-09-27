@@ -24,6 +24,8 @@ htmlcov/
 !.env.example
 privacy-settings.json
 **/privacy-settings.json
+**/device-session.json
+**/access-state.json
 
 # OS/editor/build artifacts.
 .DS_Store

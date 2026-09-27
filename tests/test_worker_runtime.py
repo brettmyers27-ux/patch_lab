@@ -56,6 +56,31 @@ def test_frozen_and_development_invocations(monkeypatch) -> None:  # type: ignor
     assert arguments == [WORKER_FLAG, "match", "fixture.wav"]
 
 
+def test_authenticated_worker_receives_only_short_lived_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from core.access_gate import AccessManager, WORKER_ACCESS_TOKEN_ENV
+
+    token = "9999999999." + "a" * 64
+    monkeypatch.setattr(AccessManager, "access_token", lambda self: token)
+    runner = BugReportProcessRunner()
+    monkeypatch.setattr(runner.process, "start", Mock())
+    runner.start(Path("/tmp/report.json"))
+    environment = runner.process.processEnvironment()
+    assert environment.value(WORKER_ACCESS_TOKEN_ENV) == token
+    assert "device_credential" not in str(runner.process.start.call_args)
+    assert token not in str(runner.process.start.call_args)
+
+
+def test_local_worker_never_waits_for_relay_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from core.access_gate import AccessManager, WORKER_ACCESS_TOKEN_ENV
+
+    monkeypatch.setattr(AccessManager, "access_token", lambda self: (_ for _ in ()).throw(
+        AssertionError("a local worker must not refresh authentication")))
+    runner = MatchProcessRunner()
+    monkeypatch.setattr(runner.process, "start", Mock())
+    runner._start_worker("match", ["fixture.wav"])
+    assert not runner.process.processEnvironment().contains(WORKER_ACCESS_TOKEN_ENV)
+
+
 def test_every_qprocess_runner_uses_shared_dispatch() -> None:
     cases: list[tuple[object, str, tuple, dict]] = [
         (ScanProcessRunner(), "scan", (Path("/tmp/presets"),), {}),

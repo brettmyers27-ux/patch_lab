@@ -200,15 +200,14 @@ def test_connection_reasons_are_specific(monkeypatch: pytest.MonkeyPatch) -> Non
     assert up.resolve_relay() == (None, "no_url")
     monkeypatch.setenv("PATCHLAB_RELAY_URL", "https://relay.invalid")
     monkeypatch.setattr(access_gate, "stored_token", lambda: None)
-    monkeypatch.setattr(access_gate, "stored_passcode", lambda *_a, **_k: None)
     assert up.resolve_relay() == (None, "no_credentials")
-    monkeypatch.setattr(access_gate, "stored_passcode", lambda *_a, **_k: "pw")
+    monkeypatch.setattr(access_gate, "stored_token", lambda: "9999999999.worker-token")
     client, reason = up.resolve_relay()
     assert reason == "ok" and client is not None and client.base_url == "https://relay.invalid"
 
 
-def test_a_saved_token_never_touches_the_keychain_unless_it_has_expired(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reported hang: a background worker waiting forever on a keychain prompt."""
+def test_expired_worker_token_never_reads_a_passcode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker reports 401; only the GUI may refresh and safely retry."""
 
     from core import access_gate
 
@@ -217,7 +216,7 @@ def test_a_saved_token_never_touches_the_keychain_unless_it_has_expired(monkeypa
     monkeypatch.setenv("PATCHLAB_RELAY_URL", "https://relay.invalid")
     reads: list[str] = []
     monkeypatch.setattr(access_gate, "stored_token", lambda: "1.savedtoken")
-    monkeypatch.setattr(access_gate, "stored_passcode", lambda *_a, **_k: reads.append("keychain") or "pw")
+    monkeypatch.setattr(access_gate, "stored_passcode", lambda *_a, **_k: reads.append("forbidden") or "pw")
     client, reason = up.resolve_relay()
     assert reason == "ok" and reads == [], "resolving a connection must not read the keychain"
 
@@ -241,8 +240,10 @@ def test_a_saved_token_never_touches_the_keychain_unless_it_has_expired(monkeypa
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     bundle = Path(__file__)
-    client.post_submission(kind="bug_report", submission_id=SID, path=bundle, sha256="0" * 64, version="1", timeout=5)
-    assert seen == ["submissions", "auth", "submissions"] and reads == ["keychain"], "read once, only after the 401"
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        client.post_submission(kind="bug_report", submission_id=SID, path=bundle, sha256="0" * 64, version="1", timeout=5)
+    assert caught.value.code == 401
+    assert seen == ["submissions"] and reads == []
 
 
 def test_a_keychain_that_never_answers_is_abandoned_after_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,11 +260,11 @@ def test_a_keychain_that_never_answers_is_abandoned_after_the_time_limit(monkeyp
     release.set()
 
 
-def test_a_keychain_that_answers_returns_the_passcode(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_passcode_accessor_never_returns_a_passcode(monkeypatch: pytest.MonkeyPatch) -> None:
     from core import access_gate
 
     monkeypatch.setattr(access_gate.AccessStore, "passcode", lambda self: "group-passcode")
-    assert access_gate.stored_passcode(timeout=2) == "group-passcode"
+    assert access_gate.stored_passcode(timeout=2) is None
 
 
 def test_worker_reports_not_connected_but_keeps_the_saved_bundle(
