@@ -15,12 +15,32 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "packaging" / "preparation_diagnostic.py"
 CORE = ROOT / "core" / "preparation_diagnostic.py"
 OUTPUT_NAME = "PatchLab Preparation Diagnostic.app"
-# PyInstaller's arm64 bootloader itself supports older macOS releases, but the
-# Python 3.11 framework currently used by PatchLab is built with minos 26.0.
-# Declaring anything lower would let Finder offer an app the embedded runtime
-# cannot launch.  A later platform-compatibility project can lower this only by
-# rebuilding the runtime stack against an older deployment target.
-MINIMUM_MACOS = "26.0"
+from platform_compatibility import MACOS_MINIMUM
+
+MINIMUM_MACOS = MACOS_MINIMUM
+RUNTIME_TOOL = ROOT / "packaging" / "macos_build_runtime.py"
+COMPATIBILITY_AUDIT = ROOT / "packaging" / "macos_compatibility.py"
+RUNTIME_REQUIREMENTS = ROOT / "packaging" / "requirements-macos-diagnostic.txt"
+
+
+def _build_python() -> str:
+    cache = Path(
+        os.environ.get(
+            "PATCHLAB_MACOS_RUNTIME_CACHE",
+            str(Path.home() / ".cache" / "PatchLab" / "macos-build-runtime"),
+        )
+    )
+    return subprocess.check_output(
+        [
+            sys.executable,
+            str(RUNTIME_TOOL),
+            "--cache",
+            str(cache / "diagnostic"),
+            "--requirements",
+            str(RUNTIME_REQUIREMENTS),
+        ],
+        text=True,
+    ).strip()
 
 
 def build(output_dir: Path) -> Path:
@@ -44,7 +64,7 @@ def build(output_dir: Path) -> Path:
         environment["PYINSTALLER_CONFIG_DIR"] = str(work / "pyinstaller-cache")
         subprocess.run(
             [
-                sys.executable,
+                _build_python(),
                 "-m",
                 "PyInstaller",
                 "--clean",
@@ -78,6 +98,16 @@ def build(output_dir: Path) -> Path:
         info["CFBundleVersion"] = "1.0.0"
         with info_path.open("wb") as handle:
             plistlib.dump(info, handle)
+        subprocess.run(
+            [
+                sys.executable,
+                str(COMPATIBILITY_AUDIT),
+                str(app),
+                "--report",
+                str(work / "macos-compatibility-report.json"),
+            ],
+            check=True,
+        )
         shutil.copytree(app, target)
     return target
 

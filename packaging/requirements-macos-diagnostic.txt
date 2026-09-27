@@ -1,0 +1,2 @@
+# The read-only diagnostic has no third-party runtime dependency beyond its freezer.
+pyinstaller==6.16.0

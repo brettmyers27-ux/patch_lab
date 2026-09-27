@@ -1,0 +1,6 @@
+# Build-only environment for the self-contained arm64 macOS application.
+-r ../requirements.txt
+torch==2.13.0
+torchaudio==2.11.0
+torchvision==0.28.0
+pyinstaller==6.16.0

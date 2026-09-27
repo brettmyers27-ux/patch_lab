@@ -20,7 +20,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "packaging"))
+from platform_compatibility import MACOS_MINIMUM  # noqa: E402
+
 SPEC = ROOT / "packaging" / "patchlab.spec"
+RUNTIME_TOOL = ROOT / "packaging" / "macos_build_runtime.py"
+RUNTIME_REQUIREMENTS = ROOT / "packaging" / "requirements-macos-build.txt"
+COMPATIBILITY_AUDIT = ROOT / "packaging" / "macos_compatibility.py"
 IDENTIFIER = "com.patchlab.desktop"
 INSTALL_LOCATION = "/Applications"
 INSTALLER_SCRIPTS = ROOT / "packaging" / "macos-installer-scripts"
@@ -84,6 +90,20 @@ def _validate_app(app: Path, version: str) -> None:
         raise PackageBuildError(
             "The app bundle unexpectedly contains user data: " + ", ".join(found)
         )
+
+
+def _compatibility_gate(app: Path, work_root: Path) -> None:
+    """Refuse an artifact whose complete native payload violates the contract."""
+
+    _run(
+        [
+            sys.executable,
+            str(COMPATIBILITY_AUDIT),
+            str(app),
+            "--report",
+            str(work_root / "macos-compatibility-report.json"),
+        ]
+    )
 
 
 def _component_plist(payload_root: Path, work_root: Path) -> Path:
@@ -205,6 +225,26 @@ def build_pkg(
     return destination
 
 
+def _build_python(work_root: Path) -> str:
+    cache = Path(
+        os.environ.get(
+            "PATCHLAB_MACOS_RUNTIME_CACHE",
+            str(Path.home() / ".cache" / "PatchLab" / "macos-build-runtime"),
+        )
+    )
+    return subprocess.check_output(
+        [
+            sys.executable,
+            str(RUNTIME_TOOL),
+            "--cache",
+            str(cache),
+            "--requirements",
+            str(RUNTIME_REQUIREMENTS),
+        ],
+        text=True,
+    ).strip()
+
+
 def freeze_app(*, work_root: Path, allow_dirty: bool) -> Path:
     """Build an arm64 PyInstaller app in isolated temporary directories."""
 
@@ -221,11 +261,12 @@ def freeze_app(*, work_root: Path, allow_dirty: bool) -> Path:
     # undeletable, aborting a perfectly valid release build before it reaches
     # PatchLab. Keep every cache file in this disposable build directory.
     environment["PYINSTALLER_CONFIG_DIR"] = str(work_root / "pyinstaller-cache")
+    environment["MACOSX_DEPLOYMENT_TARGET"] = MACOS_MINIMUM
     if allow_dirty:
         environment["PATCHLAB_ALLOW_DIRTY_BUILD"] = "1"
     _run(
         [
-            sys.executable,
+            _build_python(work_root),
             "-m",
             "PyInstaller",
             "--clean",
@@ -247,6 +288,7 @@ def freeze_app(*, work_root: Path, allow_dirty: bool) -> Path:
         raise PackageBuildError(
             f"PatchLab.app is not an Apple Silicon build (architectures: {architecture})"
         )
+    _compatibility_gate(app, work_root)
     return app
 
 
@@ -287,6 +329,7 @@ def main() -> int:
             if args.app is not None
             else freeze_app(work_root=work_root, allow_dirty=args.allow_dirty)
         )
+        _compatibility_gate(app, work_root)
         artifact = build_pkg(
             app,
             destination=output / f"PatchLab-{version}-macOS.pkg",
