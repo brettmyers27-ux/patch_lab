@@ -23,13 +23,13 @@ import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import numpy as np
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 import core.capability_ux as ux
 import core.renderer_selection as selection_module
@@ -1573,3 +1573,81 @@ def test_worker_that_refused_because_it_is_off_is_reported_as_the_users_choice(g
     assert "Personal presets are off" in gui.window.statusBar().currentMessage()
     assert gui.window._render_failure_detail == ""
     assert not gui.window._workflow_activities
+
+
+# ===========================================================================
+# Phase 2: active Closest Matches row exposes the existing Finder reveal
+# ===========================================================================
+
+
+@pytest.mark.parametrize(("synth", "suffix"), [("serum1", ".fxp"), ("serum2", ".SerumPreset")])
+def test_active_closest_match_row_reveals_the_exact_local_source(
+    gui: Gui, tmp_path: Path, synth: str, suffix: str
+) -> None:
+    source = tmp_path / "Presets" / f"Warm Pad{suffix}"
+    source.parent.mkdir()
+    source.write_bytes(b"preset")
+    row = gui.window._build_closest_match_row(
+        {
+            "name": "Warm Pad", "synth": synth, "similarity_percent": 91.2,
+            "local_source_available": True, "source_path": str(source),
+        },
+        1,
+    )
+    open_location = next(button for button in row.findChildren(QPushButton) if button.text() == "Open File Location")
+    assert open_location.isEnabled()
+    with patch("app.ui.subprocess.run") as run:
+        open_location.click()
+    run.assert_called_once_with(["open", "-R", str(source)], check=False)
+
+
+def test_active_closest_match_row_hides_location_without_a_local_source(gui: Gui) -> None:
+    row = gui.window._build_closest_match_row(
+        {
+            "name": "Factory Init", "synth": "serum2", "similarity_percent": 80.0,
+            "local_source_available": False, "source_path": None,
+        },
+        1,
+    )
+    assert all(button.text() != "Open File Location" for button in row.findChildren(QPushButton))
+
+
+def test_active_closest_match_row_handles_a_file_deleted_after_render(gui: Gui, tmp_path: Path) -> None:
+    source = tmp_path / "Presets" / "Gone.fxp"
+    source.parent.mkdir()
+    source.write_bytes(b"preset")
+    row = gui.window._build_closest_match_row(
+        {
+            "name": "Gone", "synth": "serum1", "similarity_percent": 80.0,
+            "local_source_available": True, "source_path": str(source),
+        },
+        1,
+    )
+    source.unlink()
+    open_location = next(button for button in row.findChildren(QPushButton) if button.text() == "Open File Location")
+    FakeMessageBox.shown.clear()
+    with patch("app.ui.subprocess.run") as run:
+        open_location.click()
+    run.assert_not_called()
+    assert FakeMessageBox.shown[-1]["title"] == "This preset cannot be located"
+    assert "can't find this preset file" in FakeMessageBox.shown[-1]["text"]
+
+
+def test_active_closest_match_row_keeps_octave_audition_controls(gui: Gui, tmp_path: Path) -> None:
+    source = tmp_path / "Presets" / "Audition.SerumPreset"
+    source.parent.mkdir()
+    source.write_bytes(b"preset")
+    play = MagicMock()
+    gui.window._play_existing_match = play
+    row = gui.window._build_closest_match_row(
+        {
+            "name": "Audition", "synth": "serum2", "similarity_percent": 88.0,
+            "local_source_available": True, "source_path": str(source),
+            "audition_path": str(tmp_path / "preview.wav"),
+        },
+        1,
+    )
+    octave_buttons = [button for button in row.findChildren(QPushButton) if button.text().startswith("C")]
+    assert len(octave_buttons) == len(gui.window.OCTAVE_NOTES)
+    octave_buttons[0].click()
+    play.assert_called_once()

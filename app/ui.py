@@ -2939,6 +2939,26 @@ class LegacyMainWindow(QMainWindow):
             return capability.user_message()
         return ""
 
+    def _existing_match_location_blocker(self, item: dict) -> str:
+        """Why an original closest-match file cannot be revealed right now.
+
+        Finder reveal needs only the exact source file.  It deliberately does
+        not require a renderer to be installed, unlike Save Copy, because a
+        user can still locate an already-installed Serum 1 or Serum 2 preset.
+        """
+
+        if not item.get("local_source_available") or not item.get("source_path"):
+            name = str(item.get("name") or "This preset")
+            return f"{name} is not installed on this Mac."
+        if str(item.get("synth") or "") not in ("serum1", "serum2"):
+            return "PatchLab does not recognise this preset's Serum generation."
+        try:
+            if Path(str(item["source_path"])).is_file():
+                return ""
+        except OSError:
+            pass
+        return "PatchLab can't find this preset file anymore."
+
     def _existing_match_output(self, item: dict, *, folder: Path) -> Path:
         synth = str(item["synth"])
         extension = ".fxp" if synth == "serum1" else ".SerumPreset"
@@ -2992,7 +3012,7 @@ class LegacyMainWindow(QMainWindow):
         anything new just so Finder has something to show.
         """
 
-        reason = self._existing_match_export_blocker(item)
+        reason = self._existing_match_location_blocker(item)
         if reason:
             QMessageBox.information(self, "This preset cannot be located", reason)
             return
@@ -6792,6 +6812,22 @@ class MainWindow(LegacyMainWindow):
         if not playable:
             octave_row.addWidget(self._muted_label("No local audio or factory preset is available."))
         row_layout.addLayout(octave_row)
+
+        # The active Closest Matches row used by the redesigned results panel.
+        # Keep the action absent when there is no real local source, rather
+        # than presenting a button that appears usable but cannot reveal a file.
+        if not self._existing_match_location_blocker(item):
+            action_row = QHBoxLayout()
+            action_row.setContentsMargins(20, 0, 0, 0)
+            open_location = QPushButton("Open File Location")
+            open_location.setObjectName("compactActionButton")
+            open_location.setToolTip("Reveal this preset's exact file in Finder.")
+            open_location.clicked.connect(
+                lambda _checked=False, detail=dict(item): self.open_existing_match_location(detail)
+            )
+            action_row.addWidget(open_location)
+            action_row.addStretch(1)
+            row_layout.addLayout(action_row)
         return row
 
     @staticmethod
