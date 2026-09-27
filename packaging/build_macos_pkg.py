@@ -226,6 +226,8 @@ def build_pkg(
 
 
 def _build_python(work_root: Path) -> str:
+    if explicit := os.environ.get("PATCHLAB_BUILD_PYTHON"):
+        return explicit
     cache = Path(
         os.environ.get(
             "PATCHLAB_MACOS_RUNTIME_CACHE",

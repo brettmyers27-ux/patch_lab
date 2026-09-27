@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 # The portable Python runtime itself supports macOS 11.  The complete pinned
-# product stack does not: the arm64 slices in the current PySide6 6.11.1
-# bundle require macOS 15.0. Torch and SciPy require macOS 14.0. Do not lower
-# this declaration without rebuilding and testing every native dependency on
-# the proposed older OS.
+# product stack does not: SciPy's arm64 libgfortran and libquadmath runtimes
+# require macOS 12.3. DawDreamer and the trusted imageio-ffmpeg bundle require
+# macOS 12.0. The selected PySide6 6.6.2 and Torch 2.2.2 wheels genuinely
+# support macOS 11. Do not lower this declaration without replacing the
+# required SciPy native runtime and retesting every dependency.
 MACOS_DESIRED_FLOOR = "11.0"
-MACOS_MINIMUM = "15.0"
+MACOS_MINIMUM = "12.3"
 MACOS_REQUIRED_ARCHITECTURE = "arm64"
 MACOS_ALLOWED_ARCHITECTURES = frozenset({"arm64", "x86_64"})
 

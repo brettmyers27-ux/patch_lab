@@ -10,7 +10,7 @@ import macos_compatibility as compatibility  # noqa: E402
 from platform_compatibility import MACOS_MINIMUM, MACOS_REQUIRED_ARCHITECTURE  # noqa: E402
 
 
-def _row(path: Path, *, minimum: str = "14.0", architectures: list[str] | None = None) -> dict[str, object]:
+def _row(path: Path, *, minimum: str = "12.3", architectures: list[str] | None = None) -> dict[str, object]:
     return {
         "path": str(path),
         "owner": "test dependency",
@@ -23,7 +23,7 @@ def _row(path: Path, *, minimum: str = "14.0", architectures: list[str] | None =
 
 
 def test_compatibility_contract_is_central_and_uses_the_evidence_based_floor() -> None:
-    assert MACOS_MINIMUM == "15.0"
+    assert MACOS_MINIMUM == "12.3"
     assert MACOS_REQUIRED_ARCHITECTURE == "arm64"
 
 
@@ -51,7 +51,7 @@ def test_release_gate_rejects_high_floor_missing_arm_and_machine_specific_artifa
     monkeypatch.setattr(compatibility, "_inspect", lambda _path: row)
     report = compatibility.audit(tmp_path / "PatchLab.app")
     assert report["passed"] is False
-    assert any("exceeds 15.0" in item for item in report["failures"])
+    assert any("exceeds 12.3" in item for item in report["failures"])
     assert any("missing arm64" in item for item in report["failures"])
     assert any("developer absolute path" in item for item in report["failures"])
     assert any("machine-native CPU flag" in item for item in report["failures"])
