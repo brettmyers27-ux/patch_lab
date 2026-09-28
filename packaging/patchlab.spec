@@ -160,6 +160,13 @@ analysis = Analysis(
     noarchive=False,
     module_collection_mode={"librosa": "py"},
 )
+# Qt's wheel intentionally uses the OS ICU runtime on Windows. PyInstaller can
+# accidentally collect an unrelated ICU pair from another dependency, which
+# then shadows the compatible system DLL and makes QtCore fail to load.
+analysis.binaries = [
+    entry for entry in analysis.binaries
+    if Path(entry[0]).name.casefold() not in {"icuuc.dll", "icudt78.dll"}
+]
 pyz = PYZ(analysis.pure)
 executable = EXE(
     pyz,
