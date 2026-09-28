@@ -16,7 +16,7 @@ from core.plugin_host import ParameterValue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "library.db"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +137,11 @@ CREATE TABLE IF NOT EXISTS fingerprints (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (preset_id,midi_note)
 );
+CREATE TABLE IF NOT EXISTS fingerprint_note_coverage (
+  preset_id INTEGER PRIMARY KEY REFERENCES presets(id) ON DELETE CASCADE,
+  note_mask INTEGER NOT NULL CHECK (note_mask BETWEEN 1 AND 127),
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS preset_sources (
   id INTEGER PRIMARY KEY,
   preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
@@ -172,6 +177,8 @@ CREATE TABLE IF NOT EXISTS preparation_jobs (
   temp_dir TEXT NOT NULL,
   cleanup_needed INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_needed IN (0,1)),
   attempt_count INTEGER NOT NULL DEFAULT 0,
+  attempt_id TEXT,
+  failure_stage TEXT,
   last_error TEXT,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -280,6 +287,10 @@ class Database:
         ("pending_reason", "TEXT"),
         ("last_attempt_at", "TEXT"),
     )
+    _JOB_COLUMNS_ADDED_LATER: tuple[tuple[str, str], ...] = (
+        ("attempt_id", "TEXT"),
+        ("failure_stage", "TEXT"),
+    )
 
     def migrate(self) -> None:
         """Bring any older library up to the current schema, atomically.
@@ -307,8 +318,17 @@ class Database:
                 for name, definition in self._PRESET_COLUMNS_ADDED_LATER
                 if name not in existing
             ]
+            job_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(preparation_jobs)")
+            }
+            missing_jobs = [
+                (name, definition)
+                for name, definition in self._JOB_COLUMNS_ADDED_LATER
+                if name not in job_columns
+            ]
             needs_schema_7 = current_version < 7
-            if missing or needs_schema_7:
+            if missing or missing_jobs or needs_schema_7:
                 connection.execute("BEGIN IMMEDIATE")
                 # Re-read under the lock: another PatchLab process may have
                 # finished the same migration while this one waited.
@@ -317,6 +337,15 @@ class Database:
                     if name not in existing:
                         connection.execute(
                             f"ALTER TABLE presets ADD COLUMN {name} {definition}"
+                        )
+                job_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(preparation_jobs)")
+                }
+                for name, definition in self._JOB_COLUMNS_ADDED_LATER:
+                    if name not in job_columns:
+                        connection.execute(
+                            f"ALTER TABLE preparation_jobs ADD COLUMN {name} {definition}"
                         )
                 if needs_schema_7:
                     self._migrate_schema_7_state(connection)
@@ -513,9 +542,14 @@ class Database:
             )
 
     def finalize_render_status(self, preset_id: int, expected_notes: Sequence[int]) -> str:
-        """Set rendered/failed_silent after inspecting all persisted rows for one preset."""
+        """Accept partial Serum 2 note ranges, while rejecting complete silence."""
 
         with self.connect() as connection:
+            preset = connection.execute(
+                "SELECT synth FROM presets WHERE id=?", (preset_id,)
+            ).fetchone()
+            if preset is None:
+                raise KeyError(preset_id)
             placeholders = ",".join("?" for _ in expected_notes)
             rows = connection.execute(
                 f"SELECT midi_note,rms_dbfs FROM renders WHERE preset_id=? "
@@ -525,7 +559,7 @@ class Database:
             if len(rows) < len(expected_notes):
                 return "partial"
             silent = [int(row["midi_note"]) for row in rows if float(row["rms_dbfs"]) <= -60.0]
-            if silent:
+            if silent and (str(preset["synth"]) == "serum1" or len(silent) == len(expected_notes)):
                 detail = "Silent rendered MIDI notes: " + ", ".join(map(str, silent))
                 connection.execute(
                     "UPDATE presets SET status='failed_silent',error=? WHERE id=?",

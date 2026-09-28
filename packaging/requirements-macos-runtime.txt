@@ -1,6 +1,8 @@
 # Native macOS arm64 compatibility lock. Keep these pins below or equal to the
 # central deployment contract in platform_compatibility.py.
 setuptools==81.0.0
+# setuptools' Python 3.11 pkg_resources path imports this at frozen startup.
+backports.tarfile==1.2.0
 dawdreamer==0.8.3
 pedalboard==0.9.24
 PySide6==6.6.2

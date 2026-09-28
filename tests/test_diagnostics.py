@@ -1539,8 +1539,10 @@ def _preparation_failure_database(path: Path) -> None:
                 id INTEGER PRIMARY KEY, synth TEXT, status TEXT, error TEXT
             );
             CREATE TABLE preparation_jobs (
-                preset_id INTEGER PRIMARY KEY, state TEXT, last_error TEXT, attempt_count INTEGER
+                preset_id INTEGER PRIMARY KEY, state TEXT, last_error TEXT,
+                attempt_count INTEGER, attempt_id TEXT, failure_stage TEXT
             );
+            CREATE TABLE renders (preset_id INTEGER, midi_note INTEGER);
             """
         )
         rows = [("serum2", "failed_load", "RuntimeError: host could not load token=very-secret", "failed", None, 2)] * 240
@@ -1551,7 +1553,11 @@ def _preparation_failure_database(path: Path) -> None:
         ]
         for index, (synth, status, error, state, last_error, attempts) in enumerate(rows, start=1):
             connection.execute("INSERT INTO presets VALUES (?,?,?,?)", (index, synth, status, error))
-            connection.execute("INSERT INTO preparation_jobs VALUES (?,?,?,?)", (index, state, last_error, attempts))
+            connection.execute(
+                "INSERT INTO preparation_jobs VALUES (?,?,?,?,?,?)",
+                (index, state, last_error, attempts, f"{index:032x}", "state_load"),
+            )
+        connection.execute("INSERT INTO renders VALUES (?,?)", (242, 24))
 
 
 def test_preparation_failure_bundle_is_grouped_sanitized_and_bounded(tmp_path: Path, fresh) -> None:
@@ -1578,6 +1584,10 @@ def test_preparation_failure_bundle_is_grouped_sanitized_and_bounded(tmp_path: P
     duplicate = next(group for group in groups if group["count"] == 240)
     assert len(duplicate["representative_examples"]) == 3
     assert duplicate["representative_examples_omitted"] == 237
+    assert duplicate["stage"] == "state_load"
+    assert duplicate["representative_examples"][0]["attempt_id"]
+    assert duplicate["representative_examples"][0]["recorded_midi_notes"] == []
+    assert duplicate["representative_examples"][0]["missing_midi_notes"] == [24, 36, 48, 60, 72, 84, 96]
     assert any(group["classification"] == "silent_render" for group in groups)
     blob = json.dumps(payload)
     assert "very-secret" not in blob and "/Users/brett" not in blob

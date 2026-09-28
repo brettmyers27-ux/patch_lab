@@ -632,15 +632,34 @@ def _preparation_failure_payload(
         connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         try:
+            job_columns = {
+                str(item["name"])
+                for item in connection.execute("PRAGMA table_info(preparation_jobs)")
+            }
+            attempt_field = "j.attempt_id" if "attempt_id" in job_columns else "NULL"
+            stage_field = "j.failure_stage" if "failure_stage" in job_columns else "NULL"
             rows = connection.execute(
-                """
-                SELECT p.synth, p.status, p.error, j.state AS job_state,
-                       j.last_error, j.attempt_count
+                f"""
+                SELECT p.id, p.synth, p.status, p.error, j.state AS job_state,
+                       j.last_error, j.attempt_count,
+                       {attempt_field} AS attempt_id,
+                       {stage_field} AS failure_stage
                 FROM presets AS p
                 LEFT JOIN preparation_jobs AS j ON j.preset_id = p.id
                 WHERE p.status IN ('failed_load', 'failed_silent')
                 """
             ).fetchall()
+            has_renders = bool(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='renders'"
+            ).fetchone())
+            recorded_notes: dict[int, set[int]] = {}
+            if has_renders:
+                for render_row in connection.execute(
+                    "SELECT r.preset_id,r.midi_note FROM renders r "
+                    "JOIN presets p ON p.id=r.preset_id "
+                    "WHERE p.status IN ('failed_load','failed_silent')"
+                ):
+                    recorded_notes.setdefault(int(render_row[0]), set()).add(int(render_row[1]))
         finally:
             connection.close()
     except (OSError, sqlite3.Error, ValueError):
@@ -664,7 +683,15 @@ def _preparation_failure_payload(
             "silent_render" if status == "failed_silent" else f"host_or_load_{error_type.lower()}"
         )
         job_state = str(row["job_state"] or "")
-        stage = "render_validation" if status == "failed_silent" else (job_state or "load_or_host")
+        recorded_stage = str(row["failure_stage"] or "")
+        safe_stages = {
+            "state_load", "renderer_initialization", "note_output", "note_render",
+            "worker_exit", "render_validation", "fingerprint", "pending",
+            "rendering", "rendered", "analyzing", "committing", "preparation",
+        }
+        stage = (recorded_stage if recorded_stage in safe_stages else "") or (
+            "render_validation" if status == "failed_silent" else (job_state or "load_or_host")
+        )
         marker = fingerprint_failure(
             RuntimeError(normalized),
             subsystem="local-library",
@@ -689,9 +716,26 @@ def _preparation_failure_payload(
         )
         group["count"] += 1
         if len(group["representative_examples"]) < MAX_PREPARATION_FAILURE_EXAMPLES:
+            available = sorted(recorded_notes.get(int(row["id"]), set()) & {24, 36, 48, 60, 72, 84, 96})
+            expected = (24, 36, 48, 60, 72, 84, 96)
+            silent_notes = (
+                sorted({int(note) for note in re.findall(r"\b(?:24|36|48|60|72|84|96)\b", raw_error)})
+                if status == "failed_silent" else []
+            )
             group["representative_examples"].append(
                 {
+                    "attempt_id": (
+                        str(row["attempt_id"])
+                        if re.fullmatch(r"[0-9a-f]{32}", str(row["attempt_id"] or ""))
+                        else None
+                    ),
                     "attempt_count": int(row["attempt_count"] or 0),
+                    "recorded_midi_notes": available if has_renders else None,
+                    "missing_midi_notes": (
+                        [note for note in expected if note not in available]
+                        if has_renders else None
+                    ),
+                    "silent_midi_notes": silent_notes,
                     "host_load_failure": status == "failed_load",
                     "audio_silent": status == "failed_silent",
                     "rendering_started": True if status == "failed_silent" else None,

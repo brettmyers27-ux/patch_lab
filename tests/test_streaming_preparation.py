@@ -13,14 +13,17 @@ import time
 from core.db import Database, RenderRecord
 from core.factory_match import _local_search_rows
 from core.library_state import (
+    get_presets_needing_preparation,
     is_preset_prepared,
     mark_preset_prepared,
     reconcile_source_tree,
 )
+from core.match_workflow import _nearest_render
 from core.plugin_host import ParameterValue
 from core.preparation import fingerprint_render_rows, prepare_work_queue
 from core.prepared_state import PreparedRevision, REQUIRED_FINGERPRINT_NOTES
 from core.render import MIDI_NOTES, RenderSummary
+from core import render as render_module
 
 
 class SimulatedCrash(BaseException):
@@ -152,6 +155,218 @@ def test_new_preset_streams_to_prepared_then_removes_wavs(tmp_path: Path) -> Non
     with database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
     assert not list((tmp_path / "analysis").rglob("*.wav"))
+
+
+def test_render_failure_reaches_job_without_generic_seven_note_error(tmp_path: Path) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+
+    def failed_render(**_kwargs):
+        error = "serum2 state load failed: PluginProcessor::loadVST3Preset: unknown error"
+        database.mark_failed(preset_id, "failed_load", error)
+        return RenderSummary(
+            queued_presets=1,
+            failed_load_serum2=1,
+            failure_errors={preset_id: error},
+        )
+
+    result = _run(tmp_path, database, render=failed_render)
+    with database.connect() as connection:
+        job = connection.execute(
+            "SELECT state,last_error,attempt_id,failure_stage "
+            "FROM preparation_jobs WHERE preset_id=?",
+            (preset_id,),
+        ).fetchone()
+
+    assert result.failed == 1
+    assert job["state"] == "failed"
+    assert "serum2 state load failed" in job["last_error"]
+    assert "loadVST3Preset" in job["last_error"]
+    assert "seven valid note files" not in job["last_error"]
+    assert len(job["attempt_id"]) == 32
+    assert job["failure_stage"] == "state_load"
+
+
+def test_missing_render_notes_record_exact_notes_and_worker_counts(tmp_path: Path) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+
+    def empty_render(**_kwargs):
+        return RenderSummary(queued_presets=1, rendered_note_pairs=0)
+
+    result = _run(tmp_path, database, render=empty_render)
+    with database.connect() as connection:
+        error = connection.execute(
+            "SELECT last_error FROM preparation_jobs WHERE preset_id=?",
+            (preset_id,),
+        ).fetchone()[0]
+
+    assert result.failed == 1
+    assert "[24, 36, 48, 60, 72, 84, 96]" in error
+    assert "1 queued, 0 note files written" in error
+
+
+def test_worker_exit_without_result_records_the_actual_exit_and_missing_notes(tmp_path: Path) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+    task = render_module.RenderTask(
+        preset_id, tmp_path / "presets" / "Preset 000.serumpreset", "serum2",
+        MIDI_NOTES, tmp_path / "audio", tmp_path / "states",
+    )
+    worker = type("ExitedWorker", (), {"exitcode": -11})()
+    summary = RenderSummary(queued_presets=1)
+
+    render_module._record_unreturned_tasks(
+        database, [task], set(), [worker], summary, lambda _message: None
+    )
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT status,error FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()
+
+    assert row["status"] == "failed_load"
+    assert "exit codes: -11" in row["error"]
+    assert "24, 36, 48, 60, 72, 84, 96" in row["error"]
+    assert summary.failure_errors[preset_id] == row["error"]
+    assert summary.failed_load_serum2 == 1
+
+
+class RangeEmbedder:
+    def __init__(self, _env=None) -> None:
+        pass
+
+    def embed(self, waveforms):
+        base = np.linspace(0.1, 1.0, 512, dtype=np.float32)
+        rows = np.stack(
+            [base + float(np.mean(waveform)) for waveform in waveforms]
+        )
+        return rows / np.linalg.norm(rows, axis=1, keepdims=True)
+
+
+def _range_renderer(audible: set[int]):
+    def render(**kwargs):
+        db = Database(kwargs["db_path"])
+        preset_id = int(kwargs["preset_ids"][0])
+        rows = []
+        for note in MIDI_NOTES:
+            amplitude = 0.03 + note / 1000.0 if note in audible else 0.0
+            wav = Path(kwargs["audio_root"]) / str(preset_id) / f"{note}.wav"
+            wav.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(
+                wav,
+                np.full((4096, 2), amplitude, dtype=np.float32),
+                44_100,
+                subtype="FLOAT",
+            )
+            rows.append(
+                RenderRecord(
+                    preset_id, note, wav,
+                    -20.0 if amplitude else -240.0,
+                    -20.0 if amplitude else -240.0,
+                    4096 / 44_100,
+                )
+            )
+        db.upsert_renders(rows)
+        db.finalize_render_status(preset_id, MIDI_NOTES)
+        return RenderSummary(queued_presets=1, rendered_note_pairs=7)
+
+    return render
+
+
+@pytest.mark.parametrize(
+    "audible",
+    [
+        {24, 36, 48},  # bass: high notes intentionally silent
+        {72, 84, 96},  # lead: low notes intentionally silent
+        {36, 72},      # split or non-contiguous key range
+        set(MIDI_NOTES),
+    ],
+)
+def test_serum2_restricted_ranges_prepare_only_audible_fingerprints(
+    tmp_path: Path, audible: set[int]
+) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+    summary = _run(
+        tmp_path, database,
+        render=_range_renderer(audible),
+        fingerprint=fingerprint_render_rows,
+        embedder_factory=RangeEmbedder,
+    )
+
+    assert summary.prepared == 1 and summary.failed == 0
+    assert is_preset_prepared(database, preset_id)
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT midi_note,embedding_f32 FROM fingerprints "
+            "WHERE preset_id=? ORDER BY midi_note", (preset_id,)
+        ).fetchall()
+        mask = connection.execute(
+            "SELECT note_mask FROM fingerprint_note_coverage WHERE preset_id=?",
+            (preset_id,),
+        ).fetchone()[0]
+    assert {int(row["midi_note"]) for row in rows} == {0, *audible}
+    assert mask == sum(1 << MIDI_NOTES.index(note) for note in audible)
+    by_note = {
+        int(row["midi_note"]): np.frombuffer(row["embedding_f32"], dtype=np.float32)
+        for row in rows
+    }
+    expected = np.mean([by_note[note] for note in sorted(audible)], axis=0)
+    expected /= np.linalg.norm(expected)
+    np.testing.assert_allclose(by_note[0], expected, atol=1e-6)
+    local_matrix, local_rows = _local_search_rows(database.path)
+    assert local_matrix is not None and len(local_rows) == 1
+    assert local_rows[0]["audible_midi_notes"] == tuple(sorted(audible))
+    assert _run(tmp_path, database).queued == 0
+
+
+def test_fully_silent_serum2_remains_failed_and_does_not_retry_same_revision(
+    tmp_path: Path,
+) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+    summary = _run(
+        tmp_path, database,
+        render=_range_renderer(set()),
+        fingerprint=fingerprint_render_rows,
+        embedder_factory=RangeEmbedder,
+    )
+    assert summary.failed == 1 and summary.prepared == 0
+    assert not is_preset_prepared(database, preset_id)
+    with database.connect() as connection:
+        preset = connection.execute(
+            "SELECT status,error FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()
+        job = connection.execute(
+            "SELECT last_error FROM preparation_jobs WHERE preset_id=?", (preset_id,)
+        ).fetchone()
+    assert preset["status"] == "failed_silent"
+    assert "24, 36, 48, 60, 72, 84, 96" in preset["error"]
+    assert "render validation failed" in job["last_error"]
+    assert _run(tmp_path, database).queued == 0
+
+
+def test_old_failed_silent_serum2_retries_once_under_new_contract(tmp_path: Path) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
+    database.mark_failed(preset_id, "failed_silent", "Silent rendered MIDI notes: 96")
+    assert [row.id for row in get_presets_needing_preparation(database)] == [preset_id]
+
+    summary = _run(
+        tmp_path, database,
+        render=_range_renderer({24, 36, 48}),
+        fingerprint=fingerprint_render_rows,
+        embedder_factory=RangeEmbedder,
+    )
+    assert summary.prepared == 1
+    assert is_preset_prepared(database, preset_id)
+    assert get_presets_needing_preparation(database) == []
+
+
+def test_match_preview_picks_nearest_recorded_audible_note(tmp_path: Path) -> None:
+    note, path = _nearest_render(7, 60, tmp_path, (24, 36, 48))
+    assert note == 48 and path is None
+    silent_old_wav = tmp_path / "7" / "60.wav"
+    silent_old_wav.parent.mkdir()
+    silent_old_wav.write_bytes(b"old-silent-render")
+    audible_wav = tmp_path / "7" / "48.wav"
+    audible_wav.write_bytes(b"audible-render")
+    note, path = _nearest_render(7, 60, tmp_path, (24, 36, 48))
+    assert note == 48 and path == audible_wav
 
 
 def test_second_run_does_zero_expensive_work(tmp_path: Path) -> None:
@@ -630,7 +845,11 @@ def test_serum2_contract_and_match_survive_analysis_wav_deletion(
     database, _root, (preset_id,) = _catalog(tmp_path, synth="serum2")
     monkeypatch.setattr("core.factory_match.user_presets_enabled", lambda: True)
 
-    _run(tmp_path, database)
+    _run(
+        tmp_path, database,
+        fingerprint=fingerprint_render_rows,
+        embedder_factory=RangeEmbedder,
+    )
     matrix, rows = _local_search_rows(database.path, tmp_path / "analysis")
 
     assert is_preset_prepared(database, preset_id)

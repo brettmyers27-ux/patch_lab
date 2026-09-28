@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,14 +147,16 @@ def _set_job(
     error: str | None = None,
     cleanup_needed: bool = False,
     increment_attempt: bool = False,
+    attempt_id: str | None = None,
+    failure_stage: str | None = None,
 ) -> None:
     with database.connect() as connection:
         connection.execute(
             """
             INSERT INTO preparation_jobs(
               preset_id,expected_content_hash,target_revision,state,temp_dir,
-              cleanup_needed,attempt_count,last_error
-            ) VALUES (?,?,?,?,?,?,?,?)
+              cleanup_needed,attempt_count,attempt_id,failure_stage,last_error
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(preset_id) DO UPDATE SET
               expected_content_hash=excluded.expected_content_hash,
               target_revision=excluded.target_revision,
@@ -161,6 +164,8 @@ def _set_job(
               temp_dir=excluded.temp_dir,
               cleanup_needed=excluded.cleanup_needed,
               attempt_count=preparation_jobs.attempt_count + ?,
+              attempt_id=COALESCE(excluded.attempt_id,preparation_jobs.attempt_id),
+              failure_stage=excluded.failure_stage,
               last_error=excluded.last_error,
               updated_at=CURRENT_TIMESTAMP
             """,
@@ -172,10 +177,31 @@ def _set_job(
                 str(temp_dir),
                 1 if cleanup_needed else 0,
                 1 if increment_attempt else 0,
+                attempt_id,
+                failure_stage,
                 error[:4000] if error else None,
                 1 if increment_attempt else 0,
             ),
         )
+
+
+def _failure_stage(message: str, prior_state: str) -> str:
+    """Use a stable semantic stage without exposing plug-in supplied details."""
+
+    lower = message.casefold()
+    for marker, stage in (
+        ("state load failed", "state_load"),
+        ("host initialization failed", "renderer_initialization"),
+        ("output write failed", "note_output"),
+        ("render worker exited without a result", "worker_exit"),
+        ("render validation failed", "render_validation"),
+        ("fingerprint", "fingerprint"),
+    ):
+        if marker in lower:
+            return stage
+    if "note " in lower and " render failed" in lower:
+        return "note_render"
+    return prior_state or "preparation"
 
 
 def _verified_source(database: Database, preset: PresetRecord) -> Path | None:
@@ -271,22 +297,41 @@ def fingerprint_render_rows(
     embedder: Any,
     preset_id: int,
 ) -> bool:
-    """Write the established seven per-note features and aggregate fingerprint."""
+    """Fingerprint audible Serum 2 notes; keep Serum 1's seven-note contract."""
 
     with database.connect() as connection:
-        paths = {
-            int(row["midi_note"]): Path(str(row["wav_path"]))
+        preset = connection.execute(
+            "SELECT synth FROM presets WHERE id=?", (preset_id,)
+        ).fetchone()
+        if preset is None:
+            return False
+        renders = {
+            int(row["midi_note"]): (Path(str(row["wav_path"])), float(row["rms_dbfs"]))
             for row in connection.execute(
-                "SELECT midi_note,wav_path FROM renders WHERE preset_id=?",
+                "SELECT midi_note,wav_path,rms_dbfs FROM renders WHERE preset_id=?",
                 (preset_id,),
             ).fetchall()
             if int(row["midi_note"]) in MIDI_NOTES
         }
-    if set(paths) != set(MIDI_NOTES):
+    if set(renders) != set(MIDI_NOTES):
         return False
+    serum2 = str(preset["synth"]) == "serum2"
+    audible = [
+        note for note in MIDI_NOTES
+        if renders[note][1] > -60.0
+    ]
+    if not audible or (not serum2 and len(audible) != len(MIDI_NOTES)):
+        return False
+    if serum2:
+        # A retry must never combine new coverage with stale fingerprints.
+        with database.connect() as connection:
+            connection.execute("DELETE FROM fingerprints WHERE preset_id=?", (preset_id,))
+            connection.execute(
+                "DELETE FROM fingerprint_note_coverage WHERE preset_id=?", (preset_id,)
+            )
     prepared_rows: list[tuple[int, np.ndarray, np.ndarray]] = []
-    for note in MIDI_NOTES:
-        prepared = load_audio_48k_mono(paths[note])
+    for note in audible:
+        prepared = load_audio_48k_mono(renders[note][0])
         prepared_rows.append(
             (note, prepared.waveform, handcrafted_features(prepared.waveform))
         )
@@ -311,6 +356,15 @@ def fingerprint_render_rows(
         np.ascontiguousarray(mean_embedding, dtype=np.float32).tobytes(),
         np.ascontiguousarray(mean_handcrafted, dtype=np.float32).tobytes(),
     )
+    if serum2:
+        mask = sum(1 << MIDI_NOTES.index(note) for note in audible)
+        with database.connect() as connection:
+            connection.execute(
+                "INSERT INTO fingerprint_note_coverage(preset_id,note_mask) VALUES (?,?) "
+                "ON CONFLICT(preset_id) DO UPDATE SET note_mask=excluded.note_mask, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (preset_id, mask),
+            )
     return len(mean_handcrafted) == HANDCRAFTED_FLOAT_COUNT
 
 
@@ -704,6 +758,7 @@ def _prepare_work_queue_serial(
             temp_dir=temp_dir,
             revision_token=revision_token,
             increment_attempt=True,
+            attempt_id=uuid.uuid4().hex,
         )
         try:
             if _verified_source(database, preset) is None:
@@ -799,7 +854,7 @@ def _prepare_work_queue_serial(
                     (
                         str(old_revision["render_revision"]) != revision.render,
                         str(old_revision["fingerprint_revision"])
-                        != revision.fingerprint,
+                        != revision.fingerprint_for(preset.synth),
                         str(old_revision["clap_revision"]) != revision.clap,
                         str(old_revision["handcrafted_revision"])
                         != revision.handcrafted,
@@ -814,6 +869,11 @@ def _prepare_work_queue_serial(
                         connection.execute(
                             "DELETE FROM fingerprints WHERE preset_id=?", (preset.id,)
                         )
+                        if preset.synth == "serum2":
+                            connection.execute(
+                                "DELETE FROM fingerprint_note_coverage WHERE preset_id=?",
+                                (preset.id,),
+                            )
 
             if _verified_source(database, preset) is None:
                 raise RuntimeError("source changed while preparation was running")
@@ -857,11 +917,41 @@ def _prepare_work_queue_serial(
                     )
                     summary.cancelled = True
                     break
+                if preset.id in rendered.failure_errors:
+                    raise RuntimeError(
+                        f"render worker failed: {rendered.failure_errors[preset.id]}"
+                    )
                 valid = _reconcile_render_rows(
                     database, preset.id, allowed_roots=allowed_roots
                 )
                 if set(valid) != set(MIDI_NOTES):
-                    raise RuntimeError("rendering did not produce seven valid note files")
+                    missing = sorted(set(MIDI_NOTES) - set(valid))
+                    upstream = rendered.failure_errors.get(preset.id)
+                    if upstream:
+                        raise RuntimeError(
+                            f"rendering stopped with missing MIDI notes {missing}; "
+                            f"upstream failure: {upstream}"
+                        )
+                    if rendered.unrenderable_generations:
+                        raise RuntimeError(
+                            f"rendering could not start for {rendered.unrenderable_generations}; "
+                            f"missing MIDI notes {missing}"
+                        )
+                    raise RuntimeError(
+                        f"rendering did not produce valid MIDI notes {missing}; "
+                        f"worker results: {rendered.queued_presets} queued, "
+                        f"{rendered.rendered_note_pairs} note files written"
+                    )
+
+            render_status = database.finalize_render_status(preset.id, MIDI_NOTES)
+            if render_status == "failed_silent":
+                with database.connect() as connection:
+                    row = connection.execute(
+                        "SELECT error FROM presets WHERE id=?", (preset.id,)
+                    ).fetchone()
+                raise RuntimeError(
+                    f"render validation failed: {row['error'] if row else 'silent notes'}"
+                )
 
             _set_job(
                 database,
@@ -926,13 +1016,17 @@ def _prepare_work_queue_serial(
             report("complete", preset, index)
         except Exception as exc:
             summary.failed += 1
+            prior_job = _job_row(database, preset.id)
+            prior_state = str(prior_job["state"] or "") if prior_job else ""
+            detail = f"{type(exc).__name__}: {exc}"
             _set_job(
                 database,
                 preset,
                 state="failed",
                 temp_dir=temp_dir,
                 revision_token=revision_token,
-                error=f"{type(exc).__name__}: {exc}",
+                error=detail,
+                failure_stage=_failure_stage(detail, prior_state),
             )
             log(f"Preparation failed for {preset.name}: {exc}")
             report("failed", preset, index)

@@ -54,6 +54,12 @@ def _prepare(database: Database, preset_id: int, *, synth: str = "serum1") -> No
         )
     for note in REQUIRED_FINGERPRINT_NOTES:
         database.upsert_fingerprint(preset_id, note, EMBEDDING, HANDCRAFTED)
+    if synth == "serum2":
+        with database.connect() as connection:
+            connection.execute(
+                "INSERT INTO fingerprint_note_coverage(preset_id,note_mask) VALUES (?,127)",
+                (preset_id,),
+            )
     with database.connect() as connection:
         connection.execute(
             "UPDATE presets SET status='embedded' WHERE id=?", (preset_id,)
@@ -215,6 +221,14 @@ def test_serum1_and_serum2_permanent_state_requirements(tmp_path: Path) -> None:
         cbor_length=2,
         compressed_length=2,
     )
+    assert not mark_preset_prepared(database, by_suffix[".serumpreset"]), (
+        "a complete Serum 2 feature row set still needs explicit note coverage"
+    )
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO fingerprint_note_coverage(preset_id,note_mask) VALUES (?,127)",
+            (by_suffix[".serumpreset"],),
+        )
     assert mark_preset_prepared(database, by_suffix[".fxp"])
     assert mark_preset_prepared(database, by_suffix[".serumpreset"])
 
@@ -248,6 +262,13 @@ def test_prepared_revision_selectively_invalidates(tmp_path: Path) -> None:
     )
     assert is_preset_prepared(database, preset_id), (
         "unrelated application version changes cannot affect this data revision"
+    )
+    changed_serum2_fingerprint = replace(
+        CURRENT_PREPARED_REVISION,
+        serum2_fingerprint="future-serum2-note-coverage",
+    )
+    assert is_preset_prepared(database, preset_id, revision=changed_serum2_fingerprint), (
+        "Serum 2 note coverage changes must not stale prepared Serum 1 presets"
     )
 
 

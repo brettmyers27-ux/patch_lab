@@ -1,4 +1,4 @@
-"""Upgrading an existing library to schema 8 must never lose user data.
+"""Upgrading an existing library to schema 9 must never lose user data.
 
 A user upgrading has thousands of learned presets and a Match library. This is a
 release blocker: the migration must succeed automatically, keep every row, keep
@@ -64,6 +64,7 @@ def build_schema5_library(path: Path, *, presets: int = 40) -> None:
     connection.execute("DROP TABLE preparation_jobs")
     connection.execute("DROP TABLE prepared_presets")
     connection.execute("DROP TABLE preset_sources")
+    connection.execute("DROP TABLE fingerprint_note_coverage")
     connection.execute("INSERT INTO schema_migrations(version) VALUES (5)")
     statuses = ("scanned", "params_dumped", "rendered", "embedded", "failed_load", "failed_silent")
     for index in range(1, presets + 1):
@@ -186,7 +187,8 @@ def test_upgrade_preserves_every_row_and_adds_the_new_columns(tmp_path: Path) ->
         path
     )
     assert versions_of(path) == [5, SCHEMA_VERSION]
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
+    assert "fingerprint_note_coverage" in tables_of(path)
 
 
 def test_new_fields_start_empty_and_nothing_is_marked_pending(tmp_path: Path) -> None:
@@ -335,6 +337,44 @@ def test_a_new_library_gets_the_same_final_shape(tmp_path: Path) -> None:
     Database(upgraded)
     assert columns_of(fresh) == columns_of(upgraded)
     assert versions_of(fresh) == [SCHEMA_VERSION]
+
+
+def test_schema8_jobs_gain_failure_correlation_columns_without_losing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "schema8.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(SCHEMA_SQL)
+        connection.execute("DROP TABLE fingerprint_note_coverage")
+        connection.execute("DROP TABLE preparation_jobs")
+        connection.execute(
+            "CREATE TABLE preparation_jobs (preset_id INTEGER PRIMARY KEY, "
+            "expected_content_hash TEXT, target_revision TEXT, state TEXT, "
+            "temp_dir TEXT, cleanup_needed INTEGER, attempt_count INTEGER, "
+            "last_error TEXT, updated_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO presets(id,path,name,synth,content_hash,status) "
+            "VALUES (1,'/old/source','Old','serum2','old-hash','failed_load')"
+        )
+        connection.execute(
+            "INSERT INTO preparation_jobs VALUES "
+            "(1,'old-hash','old-revision','failed','/old/work',0,2,"
+            "'PluginProcessor::loadVST3Preset: unknown error','old-time')"
+        )
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (8)")
+
+    Database(path)
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(preparation_jobs)")}
+        row = connection.execute(
+            "SELECT preset_id,attempt_count,last_error,attempt_id,failure_stage "
+            "FROM preparation_jobs"
+        ).fetchone()
+        coverage = connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='fingerprint_note_coverage'"
+        ).fetchone()
+    assert {"attempt_id", "failure_stage"} <= columns
+    assert row == (1, 2, "PluginProcessor::loadVST3Preset: unknown error", None, None)
+    assert coverage is not None
 
 
 def test_migration_can_be_retried_by_a_second_process_safely(tmp_path: Path) -> None:

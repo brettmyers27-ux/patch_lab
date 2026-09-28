@@ -16,6 +16,7 @@ import soundfile as sf
 from core.audio_input import DecodedAudio, decode_audio_file
 from core.branding import display_match_name, generated_preset_name
 from core.matcher import AnalysisBySynthesisMatcher, Candidate, SearchConfig
+from core.prepared_state import audible_notes_from_mask
 from core.serum2_preset_writer import vector_was_modified
 
 
@@ -88,8 +89,9 @@ def _preset_details(
     placeholders = ",".join("?" for _ in preset_ids)
     with sqlite3.connect(database_path) as connection:
         rows = connection.execute(
-            f"SELECT id,name,synth,path,content_hash FROM presets "
-            f"WHERE id IN ({placeholders})",
+            f"SELECT p.id,p.name,p.synth,p.path,p.content_hash,nc.note_mask "
+            f"FROM presets p LEFT JOIN fingerprint_note_coverage nc "
+            f"ON nc.preset_id=p.id WHERE p.id IN ({placeholders})",
             tuple(preset_ids),
         ).fetchall()
     return {
@@ -98,6 +100,7 @@ def _preset_details(
             "synth": str(row[2]),
             "source_path": str(row[3]),
             "content_hash": str(row[4]),
+            "audible_midi_notes": list(audible_notes_from_mask(row[5])),
         }
         for row in rows
     }
@@ -107,8 +110,9 @@ def _nearest_render(
     preset_id: int,
     midi_note: int,
     audio_root: Path,
+    audible_notes: tuple[int, ...] | None = None,
 ) -> tuple[int, Path | None]:
-    notes = (24, 36, 48, 60, 72, 84, 96)
+    notes = audible_notes or (24, 36, 48, 60, 72, 84, 96)
     ordered = sorted(notes, key=lambda value: abs(value - midi_note))
     for note in ordered:
         path = audio_root / str(preset_id) / f"{note}.wav"
@@ -472,10 +476,12 @@ def run_match_file(
         )
         existing = []
         for preset_id, score in retrieval:
+            row = detail[preset_id]
             note, wav_path = _nearest_render(
                 preset_id,
                 result.midi_note,
                 matcher.audio_root,
+                tuple(row["audible_midi_notes"]),
             )
             # Pre-rendered auditions only exist where the full render library
             # was built locally; an install that never rendered has none. Carry
@@ -483,7 +489,6 @@ def run_match_file(
             # demand, exactly as the factory-fingerprint path does. Without
             # this every closest match reports "No local audio or factory
             # preset is available" and its octave buttons stay dead.
-            row = detail[preset_id]
             source_path = str(row.get("source_path") or "")
             preview_source = (
                 source_path

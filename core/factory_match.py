@@ -19,7 +19,11 @@ from core.features import CLAP_SAMPLE_RATE, ClapEmbedder
 from core.match import cosine_topk
 from core.matcher import detect_midi_note, loudness_normalize
 from core.platform_env import ENV
-from core.prepared_state import prepared_predicate
+from core.prepared_state import (
+    audible_notes_from_mask,
+    nearest_audible_note,
+    prepared_predicate,
+)
 from core.serum2_targets import encode_graph_with_schema
 
 
@@ -101,8 +105,10 @@ def _local_search_rows(
     prepared, prepared_parameters = prepared_predicate("p")
     rows = connection.execute(
         f"""
-        SELECT p.id,p.content_hash,p.name,p.synth,p.path,f.embedding_f32
+        SELECT p.id,p.content_hash,p.name,p.synth,p.path,f.embedding_f32,
+               nc.note_mask
         FROM presets p JOIN fingerprints f ON f.preset_id=p.id
+        LEFT JOIN fingerprint_note_coverage nc ON nc.preset_id=p.id
         WHERE f.midi_note=0 AND p.is_factory=0
           AND {prepared}
         ORDER BY p.id
@@ -123,7 +129,8 @@ def _local_search_rows(
     )
     runtime_rows: list[dict[str, Any]] = []
     for row in rows:
-        audition = audio_root / str(int(row["id"])) / "60.wav"
+        audition_note = nearest_audible_note(60, row["note_mask"])
+        audition = audio_root / str(int(row["id"])) / f"{audition_note}.wav"
         runtime_rows.append(
             {
                 "kind": "local",
@@ -134,6 +141,8 @@ def _local_search_rows(
                 "path": str(row["path"]),
                 "audition_path": str(audition) if audition.is_file() else None,
                 "database_path": str(database_path),
+                "note_mask": row["note_mask"],
+                "audible_midi_notes": audible_notes_from_mask(row["note_mask"]),
             }
         )
     return matrix, runtime_rows
@@ -271,6 +280,11 @@ def run_factory_match_file(
             source_path = path
             audition_path = item["audition_path"]
             bundle_id = None
+        audition_note = (
+            nearest_audible_note(60, item["note_mask"])
+            if item["kind"] == "local"
+            else 60
+        )
         existing.append(
             {
                 "preset_id": preset_id,
@@ -281,7 +295,11 @@ def run_factory_match_file(
                 "local_source_available": bool(path),
                 "similarity": float(score),
                 "similarity_percent": 100.0 * float(score),
-                "audition_midi_note": 60 if audition_path else None,
+                "audition_midi_note": audition_note if (audition_path or path) else None,
+                "audible_midi_notes": (
+                    list(item["audible_midi_notes"])
+                    if item["kind"] == "local" else None
+                ),
                 "audition_path": audition_path,
                 "preview_source_path": path if path and not audition_path else None,
                 "factory_bundle_id": bundle_id,
@@ -368,7 +386,10 @@ def run_factory_match_file(
             "elapsed_s": 0.0,
             "winner_audio_path": None,
             "preview_source_path": local_source,
-            "preview_midi_note": acoustic_note,
+            "preview_midi_note": (
+                nearest_audible_note(acoustic_note, recommendation_item["note_mask"])
+                if recommendation_item["kind"] == "local" else acoustic_note
+            ),
             "candidate_path": str(candidate_path),
             "settings": settings,
             "objective_trace": [],

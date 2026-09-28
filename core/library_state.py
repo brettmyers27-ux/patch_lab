@@ -14,6 +14,7 @@ from core.prepared_state import (
     PreparedRevision,
     is_preset_prepared as _is_preset_prepared,
     prepared_predicate,
+    prepared_revision_token,
     record_prepared_revision,
 )
 from core.preset_scan import discover_presets, sha1_file, synth_for
@@ -284,13 +285,17 @@ def get_presets_needing_preparation(
     """Return active, supported content whose permanent Match state needs work."""
 
     prepared, parameters = prepared_predicate(revision=revision)
+    parameters["current_revision_token"] = prepared_revision_token(revision)
     with database.connect() as connection:
         rows = connection.execute(
             "SELECT p.* FROM presets p "
             "WHERE EXISTS (SELECT 1 FROM preset_sources ps "
             "              WHERE ps.preset_id=p.id AND ps.active=1) "
             "AND p.is_factory=0 "
-            "AND p.status!='failed_silent' "
+            "AND (p.status!='failed_silent' OR (p.synth='serum2' "
+            "AND NOT EXISTS (SELECT 1 FROM preparation_jobs j "
+            "WHERE j.preset_id=p.id AND j.target_revision=:current_revision_token "
+            "AND j.state='failed'))) "
             "AND (p.pending_reason IS NULL OR p.pending_reason IN "
             "     ('awaiting_processing','render_failed')) "
             f"AND NOT ({prepared}) "

@@ -246,6 +246,10 @@ class Gui:
             )
         with database.connect() as connection:
             connection.execute("UPDATE presets SET status='embedded' WHERE id=?", (preset_id,))
+            connection.execute(
+                "INSERT INTO fingerprint_note_coverage(preset_id,note_mask) VALUES (?,127)",
+                (preset_id,),
+            )
         assert mark_preset_prepared(database, preset_id)
 
     def seed_library(
@@ -1670,3 +1674,25 @@ def test_active_closest_match_row_keeps_octave_audition_controls(gui: Gui, tmp_p
     assert len(octave_buttons) == len(gui.window.OCTAVE_NOTES)
     octave_buttons[0].click()
     play.assert_called_once()
+
+
+def test_restricted_serum2_result_disables_only_unavailable_octaves(gui: Gui, tmp_path: Path) -> None:
+    source = tmp_path / "Bass.SerumPreset"
+    source.write_bytes(b"preset")
+    row = gui.window._build_closest_match_row(
+        {
+            "name": "Bass", "synth": "serum2", "similarity_percent": 88.0,
+            "local_source_available": True, "source_path": str(source),
+            "preview_source_path": str(source),
+            "audible_midi_notes": [24, 36, 48],
+        },
+        1,
+    )
+    buttons = {
+        int(button.text()[1:]): button
+        for button in row.findChildren(QPushButton)
+        if button.objectName() == "rowOctaveButton"
+    }
+    assert all(buttons[octave].isEnabled() for octave in (1, 2, 3))
+    assert all(not buttons[octave].isEnabled() for octave in (4, 5, 6, 7))
+    assert "no sound" in buttons[7].toolTip().lower()

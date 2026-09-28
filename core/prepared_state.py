@@ -14,6 +14,7 @@ from core.runtime_compatibility import CLAP_CHECKPOINT_SHA256
 # version. Changing one invalidates only the permanent data it describes.
 RENDER_REVISION = "seven-notes-44k1-float-v1"
 FINGERPRINT_REVISION = "clap512-handcrafted9-per-note-mean-v1"
+SERUM2_FINGERPRINT_REVISION = "clap512-handcrafted9-audible-notes-mean-v2"
 CLAP_REVISION = f"sha256:{CLAP_CHECKPOINT_SHA256}"
 HANDCRAFTED_REVISION = "spectral-audio-features-9-v1"
 SERUM1_SCHEMA_REVISION = "serum1-normalized-parameters-v1"
@@ -26,19 +27,45 @@ HANDCRAFTED_FLOAT_COUNT = 9
 FLOAT32_BYTES = 4
 
 
+def audible_notes_from_mask(mask: int | None) -> tuple[int, ...]:
+    """Return actual covered notes, or the legacy full range when absent."""
+
+    if mask is None:
+        return RENDER_MIDI_NOTES
+    value = int(mask)
+    return tuple(
+        note for index, note in enumerate(RENDER_MIDI_NOTES)
+        if value & (1 << index)
+    )
+
+
+def nearest_audible_note(requested: int, mask: int | None) -> int:
+    """Choose a playable note while retaining the original requested octave."""
+
+    notes = audible_notes_from_mask(mask)
+    if not notes:
+        raise ValueError("no audible MIDI notes were recorded")
+    return min(notes, key=lambda note: (abs(note - requested), note))
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedRevision:
     render: str = RENDER_REVISION
     fingerprint: str = FINGERPRINT_REVISION
+    serum2_fingerprint: str = SERUM2_FINGERPRINT_REVISION
     clap: str = CLAP_REVISION
     handcrafted: str = HANDCRAFTED_REVISION
     serum1: str = SERUM1_SCHEMA_REVISION
     serum2: str = SERUM2_SCHEMA_REVISION
 
+    def fingerprint_for(self, synth: str) -> str:
+        return self.serum2_fingerprint if synth == "serum2" else self.fingerprint
+
     def sql_parameters(self) -> dict[str, object]:
         return {
             "prepared_render_revision": self.render,
             "prepared_fingerprint_revision": self.fingerprint,
+            "prepared_serum2_fingerprint_revision": self.serum2_fingerprint,
             "prepared_clap_revision": self.clap,
             "prepared_handcrafted_revision": self.handcrafted,
             "prepared_serum1_revision": self.serum1,
@@ -60,6 +87,7 @@ def prepared_revision_token(
     payload = {
         "clap": revision.clap,
         "fingerprint": revision.fingerprint,
+        "serum2_fingerprint": revision.serum2_fingerprint,
         "handcrafted": revision.handcrafted,
         "render": revision.render,
         "serum1": revision.serum1,
@@ -95,25 +123,53 @@ def prepared_predicate(
             "EXISTS (SELECT 1 FROM prepared_presets pr "
             f"WHERE pr.preset_id={alias}.id "
             "AND pr.render_revision=:prepared_render_revision "
-            "AND pr.fingerprint_revision=:prepared_fingerprint_revision "
             "AND pr.clap_revision=:prepared_clap_revision "
             "AND pr.handcrafted_revision=:prepared_handcrafted_revision "
             "AND (("
             f"{alias}.synth='serum1' "
+            "AND pr.fingerprint_revision=:prepared_fingerprint_revision "
             "AND pr.serum1_schema_revision=:prepared_serum1_revision"
             ") OR ("
             f"{alias}.synth='serum2' "
+            "AND pr.fingerprint_revision=:prepared_serum2_fingerprint_revision "
             "AND pr.serum2_schema_revision=:prepared_serum2_revision"
             ")))"
         )
-    note_placeholders = ",".join(str(note) for note in REQUIRED_FINGERPRINT_NOTES)
-    clauses.append(
+    all_notes = ",".join(str(note) for note in REQUIRED_FINGERPRINT_NOTES)
+    render_notes = ",".join(str(note) for note in RENDER_MIDI_NOTES)
+    valid_blob = (
+        "length(pf.embedding_f32)=:prepared_embedding_bytes "
+        "AND length(pf.handcrafted_f32)=:prepared_handcrafted_bytes"
+    )
+    full = (
         "(SELECT COUNT(*) FROM fingerprints pf "
-        f"WHERE pf.preset_id={alias}.id "
-        f"AND pf.midi_note IN ({note_placeholders}) "
-        "AND length(pf.embedding_f32)=:prepared_embedding_bytes "
-        "AND length(pf.handcrafted_f32)=:prepared_handcrafted_bytes) "
-        "= :prepared_note_count"
+        f"WHERE pf.preset_id={alias}.id AND pf.midi_note IN ({all_notes}) "
+        f"AND {valid_blob})=:prepared_note_count"
+    )
+    aggregate = (
+        "(SELECT COUNT(*) FROM fingerprints pf "
+        f"WHERE pf.preset_id={alias}.id AND pf.midi_note=0 "
+        f"AND {valid_blob})=1"
+    )
+    note_bits = " ".join(
+        f"WHEN {note} THEN {1 << index}"
+        for index, note in enumerate(RENDER_MIDI_NOTES)
+    )
+    coverage = (
+        "EXISTS (SELECT 1 FROM fingerprint_note_coverage nc "
+        f"WHERE nc.preset_id={alias}.id AND nc.note_mask BETWEEN 1 AND 127 "
+        "AND nc.note_mask=COALESCE((SELECT SUM(CASE pf.midi_note "
+        f"{note_bits} ELSE 0 END) FROM fingerprints pf "
+        f"WHERE pf.preset_id={alias}.id AND pf.midi_note IN ({render_notes}) "
+        f"AND {valid_blob}),0) "
+        "AND NOT EXISTS (SELECT 1 FROM fingerprints pf "
+        f"WHERE pf.preset_id={alias}.id AND pf.midi_note IN ({render_notes}) "
+        f"AND NOT ({valid_blob})))"
+    )
+    clauses.append(
+        f"(({alias}.synth='serum1' AND {full}) OR "
+        f"({alias}.synth='serum2' AND {aggregate} "
+        f"AND {coverage}))"
     )
     clauses.append(
         "(("
@@ -174,6 +230,11 @@ def record_prepared_revision(
 
     if not has_required_permanent_data(connection, preset_id):
         return False
+    synth_row = connection.execute(
+        "SELECT synth FROM presets WHERE id=?", (preset_id,)
+    ).fetchone()
+    if synth_row is None:
+        return False
     connection.execute(
         """
         INSERT INTO prepared_presets(
@@ -192,7 +253,7 @@ def record_prepared_revision(
         (
             int(preset_id),
             revision.render,
-            revision.fingerprint,
+            revision.fingerprint_for(str(synth_row[0])),
             revision.clap,
             revision.handcrafted,
             revision.serum1,

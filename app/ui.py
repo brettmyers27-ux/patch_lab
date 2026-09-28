@@ -6805,17 +6805,21 @@ class MainWindow(LegacyMainWindow):
         octave_row = QHBoxLayout()
         octave_row.setSpacing(3)
         playable = bool(item.get("audition_path") or item.get("preview_source_path"))
+        covered_notes = item.get("audible_midi_notes")
         for octave, note in enumerate(self.OCTAVE_NOTES, start=1):
             note_button = QPushButton(f"C{octave}")
             note_button.setObjectName("rowOctaveButton")
-            note_button.setEnabled(playable)
-            if playable:
+            note_available = covered_notes is None or note in covered_notes
+            note_button.setEnabled(playable and note_available)
+            if playable and note_available:
                 note_button.setToolTip(f"Play at C{octave} (MIDI {note})")
                 note_button.clicked.connect(
                     lambda _checked=False, detail=dict(item), n=note, b=note_button: self._play_existing_match(
                         detail, note=n, button=b
                     )
                 )
+            elif playable:
+                note_button.setToolTip("This preset has no sound at this octave.")
             octave_row.addWidget(note_button)
         if not playable:
             octave_row.addWidget(self._muted_label("No local audio or factory preset is available."))

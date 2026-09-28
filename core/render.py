@@ -82,6 +82,10 @@ class RenderSummary:
     #: Presets left untouched because this machine cannot host their generation.
     skipped_unrenderable_presets: int = 0
     unrenderable_generations: str = ""
+    # The parent owns durable errors, including failures where a worker never
+    # returned a PresetRenderResult. Preparation must not replace these with a
+    # generic missing-seven-notes message.
+    failure_errors: dict[int, str] = field(default_factory=dict)
 
 
 
@@ -190,17 +194,22 @@ def _write_note(task: RenderTask, midi_note: int, audio: np.ndarray) -> Rendered
 
 def _process_task(task: RenderTask, pause_event: Any, cancel_event: Any) -> PresetRenderResult:
     result = PresetRenderResult(task.preset_id, task.synth, task.midi_notes)
+    stage = "host initialization"
     try:
         if _wait_if_paused(pause_event, cancel_event):
             result.cancelled = True
             return result
         engine, processor = _worker_host(task.synth)
+        stage = f"{task.synth} state load"
         _load_task_state(task, processor)
         for midi_note in task.midi_notes:
             if _wait_if_paused(pause_event, cancel_event):
                 result.cancelled = True
                 break
-            row = _write_note(task, midi_note, _render_audio(engine, processor, midi_note))
+            stage = f"note {midi_note} render"
+            audio = _render_audio(engine, processor, midi_note)
+            stage = f"note {midi_note} output write"
+            row = _write_note(task, midi_note, audio)
             result.rows.append(row)
             if row.rms_dbfs <= SILENCE_DBFS:
                 result.warnings.append(
@@ -213,7 +222,10 @@ def _process_task(task: RenderTask, pause_event: Any, cancel_event: Any) -> Pres
                     f"peak={row.peak_dbfs:.2f} dBFS"
                 )
     except Exception as exc:
-        result.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=8)}"
+        result.error = (
+            f"{stage} failed: {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc(limit=8)}"
+        )
     return result
 
 
@@ -242,6 +254,35 @@ def _select_records(database: Database, preset_ids: Sequence[int] | None) -> lis
     if missing and consent:
         raise KeyError(f"Preset ids are not renderable: {sorted(missing)}")
     return selected
+
+
+def _record_unreturned_tasks(
+    database: Database,
+    tasks: Sequence[RenderTask],
+    processed_ids: set[int],
+    workers: Sequence[Any],
+    summary: RenderSummary,
+    log: LogCallback,
+) -> None:
+    """Turn a dead or terminated render worker into a durable stage error."""
+
+    if summary.cancelled:
+        return
+    missing_results = [task for task in tasks if task.preset_id not in processed_ids]
+    if not missing_results:
+        return
+    exit_codes = ", ".join(str(worker.exitcode) for worker in workers)
+    for task in missing_results:
+        error = (
+            "render worker exited without a result; "
+            f"worker exit codes: {exit_codes}; "
+            f"unresolved MIDI notes: {', '.join(map(str, task.midi_notes))}"
+        )
+        database.mark_failed(task.preset_id, "failed_load", error)
+        summary.failure_errors[task.preset_id] = error
+        field_name = f"failed_load_{task.synth}"
+        setattr(summary, field_name, getattr(summary, field_name) + 1)
+        log(f"FAILED_LOAD preset={task.preset_id} synth={task.synth}: {error}")
 
 
 _RENDER_OPERATION_ID = ""
@@ -348,6 +389,7 @@ def render_library(
     started = time.monotonic()
     done_workers = 0
     processed_tasks = 0
+    processed_ids: set[int] = set()
     resolved_pairs = skipped
     # A job that includes the user's own presets must stop promptly if they are
     # withdrawn mid-run.  Rendering is resumable, so cancelling is safe.
@@ -374,6 +416,7 @@ def render_library(
                 continue
             result: PresetRenderResult = message
             processed_tasks += 1
+            processed_ids.add(result.preset_id)
             rows = [
                 RenderRecord(
                     preset_id=result.preset_id,
@@ -393,6 +436,7 @@ def render_library(
                 log(warning)
             if result.error:
                 database.mark_failed(result.preset_id, "failed_load", result.error)
+                summary.failure_errors[result.preset_id] = result.error
                 field_name = f"failed_load_{result.synth}"
                 setattr(summary, field_name, getattr(summary, field_name) + 1)
                 log(f"FAILED_LOAD preset={result.preset_id} synth={result.synth}: {result.error}")
@@ -431,6 +475,7 @@ def render_library(
             if worker.is_alive():
                 worker.terminate()
                 worker.join(timeout=5.0)
+        _record_unreturned_tasks(database, tasks, processed_ids, workers, summary, log)
         task_queue.close()
         result_queue.close()
         summary.elapsed_s = time.monotonic() - started
@@ -438,4 +483,9 @@ def render_library(
 
 
 def summary_dict(summary: RenderSummary) -> dict[str, Any]:
-    return asdict(summary)
+    result = asdict(summary)
+    # The per-preset messages can contain plug-in supplied paths. They are
+    # carried only between render_library and preparation, never in a public
+    # command summary or support report.
+    result.pop("failure_errors")
+    return result
