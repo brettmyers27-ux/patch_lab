@@ -16,6 +16,7 @@ def test_windows_installer_embeds_a_frozen_payload_without_dev_prerequisites() -
     assert "PatchLab-source.bundle" not in setup
     assert "-m PyInstaller" in build
     assert "packaged-runtime-gate" in build
+    assert "portable CPU PyTorch build" in build
     assert 'minimum_windows = "Windows 10 x64 build 19041"' in build
     assert "bundle create" not in build
 

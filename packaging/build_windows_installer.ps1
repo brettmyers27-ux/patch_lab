@@ -15,6 +15,8 @@ if (-not (Test-Path -LiteralPath $Python)) { throw "Build Python was not found: 
 
 $pythonVersion = (& $Python -c "import platform,sys; print(f'{sys.version_info.major}.{sys.version_info.minor}|{platform.architecture()[0]}')").Trim()
 if ($pythonVersion -ne "3.11|64bit") { throw "Build Python must be 64-bit CPython 3.11; found $pythonVersion." }
+$torchPayload = (& $Python -c "import torch; print('cuda' if torch.version.cuda else 'cpu')").Trim()
+if ($torchPayload -ne "cpu") { throw "Release packaging requires the portable CPU PyTorch build; found $torchPayload." }
 if ((git -C $projectRoot status --porcelain)) { throw "The V1 source tree must be clean before packaging." }
 
 $versionLine = Get-Content -LiteralPath (Join-Path $projectRoot "app\__version__.py") |
@@ -76,7 +78,7 @@ try {
         patchlab_version = $version; source_commit = $sourceCommit
         build_date_utc = [DateTime]::UtcNow.ToString("o"); architecture = "windows-x64"
         installer_technology = "Inno Setup 6 frozen-payload installer"
-        runtime_family_id = "v1-legacy-stock-clap"; minimum_windows = "Windows 10 x64 build 19041"
+        runtime_family_id = "v1-legacy-stock-clap"; compute_payload = "cpu"; minimum_windows = "Windows 10 x64 build 19041"
         external_prerequisites = @("licensed Serum installation", "internet access", "PatchLab trusted-group passcode")
         installer_sha256 = $sha256; signed = $false
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputRoot "release-manifest.json") -Encoding utf8
