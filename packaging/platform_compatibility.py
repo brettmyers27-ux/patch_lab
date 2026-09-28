@@ -13,8 +13,8 @@ MACOS_MINIMUM = "12.3"
 MACOS_REQUIRED_ARCHITECTURE = "arm64"
 MACOS_ALLOWED_ARCHITECTURES = frozenset({"arm64", "x86_64"})
 
-# This remains an intended target until a native Windows frozen build is run.
-WINDOWS_INTENDED_MINIMUM = "Windows 10 x64 (pending native verification)"
+# This is a static compatibility floor, not a claim of a Windows 10 runtime run.
+WINDOWS_INTENDED_MINIMUM = "Windows 10 x64 (build 19041 or newer)"
 WINDOWS_REQUIRED_ARCHITECTURE = "x86_64"
 
 PYTHON_RUNTIME_VERSION = "3.11.16"

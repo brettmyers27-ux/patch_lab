@@ -34,7 +34,11 @@ def test_fresh_auth_relaunch_upgrade_signout_and_no_passcode_on_disk(tmp_path: P
     assert manager.authenticate("beta-secret")[0]
     assert not manager.needs_prompt()
     assert store.device_path.name == DEVICE_SESSION_FILENAME
-    assert stat.S_IMODE(store.device_path.stat().st_mode) == 0o600
+    # POSIX mode bits are meaningful on macOS; Windows protects the per-user
+    # AppData directory with its profile ACL instead.  Requiring 0600 on NTFS
+    # makes a valid Windows device-session run look like a security failure.
+    if os.name == "posix":
+        assert stat.S_IMODE(store.device_path.stat().st_mode) == 0o600
     assert store.load().device_credential == "opaque-device-credential"
     assert "beta-secret" not in store.device_path.read_text()
     assert "beta-secret" not in store.marker_path.read_text()

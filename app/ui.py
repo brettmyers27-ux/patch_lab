@@ -2891,9 +2891,10 @@ class LegacyMainWindow(QMainWindow):
         return default_preset_output_root(synth, env=ENV)
 
     def _reveal_in_finder(self, path: Path) -> bool:
-        """Select an exact, already-existing file in Finder. Never a copy,
-        never an export, never Serum or DAW automation -- the standard macOS
-        "Reveal in Finder" mechanism (equivalent to ``open -R``).
+        """Select an exact preset in the native file browser without copying it.
+
+        macOS uses Finder's ``open -R`` contract; Windows uses Explorer's
+        ``/select,`` contract.  Match metadata remains platform-neutral.
 
         Returns whether the file was found and revealed.
         """
@@ -2904,12 +2905,16 @@ class LegacyMainWindow(QMainWindow):
             self.statusBar().showMessage("PatchLab can't find this preset file anymore.")
             return False
         try:
-            subprocess.run(["open", "-R", str(path)], check=False)
+            if ENV.branch == "windows":
+                subprocess.run(["explorer.exe", "/select,", str(path)], check=False)
+            else:
+                subprocess.run(["open", "-R", str(path)], check=False)
         except Exception as exc:
-            self.append_log(f"Could not open Finder for {path}: {exc}")
-            self.statusBar().showMessage("PatchLab couldn't open Finder for this preset.")
+            self.append_log(f"Could not open the file location for {path}: {exc}")
+            self.statusBar().showMessage("PatchLab couldn't open this preset's file location.")
             return False
-        self.statusBar().showMessage(f"Revealed in Finder: {path.name}")
+        browser = "Explorer" if ENV.branch == "windows" else "Finder"
+        self.statusBar().showMessage(f"Revealed in {browser}: {path.name}")
         return True
 
     def _existing_match_export_blocker(self, item: dict) -> str:
@@ -6833,7 +6838,8 @@ class MainWindow(LegacyMainWindow):
             action_row.setContentsMargins(20, 0, 0, 0)
             open_location = QPushButton("Open File Location")
             open_location.setObjectName("compactActionButton")
-            open_location.setToolTip("Reveal this preset's exact file in Finder.")
+            browser = "Explorer" if ENV.branch == "windows" else "Finder"
+            open_location.setToolTip(f"Reveal this preset's exact file in {browser}.")
             open_location.clicked.connect(
                 lambda _checked=False, detail=dict(item): self.open_existing_match_location(detail)
             )

@@ -167,7 +167,12 @@ executable = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=str(ROOT / "app" / "icons" / "PatchLab.icns"),
+    icon=str(
+        ROOT
+        / "app"
+        / "icons"
+        / ("PatchLab.ico" if sys.platform == "win32" else "PatchLab.icns")
+    ),
 )
 collection = COLLECT(
     executable,
@@ -177,18 +182,23 @@ collection = COLLECT(
     upx=False,
     name="PatchLab",
 )
-app = BUNDLE(
-    collection,
-    name="PatchLab.app",
-    icon=str(ROOT / "app" / "icons" / "PatchLab.icns"),
-    bundle_identifier="com.patchlab.desktop",
-    version=VERSION["__version__"],
-    info_plist={
-        "CFBundleDisplayName": "PatchLab",
-        "CFBundleName": "PatchLab",
-        "CFBundleShortVersionString": VERSION["__version__"],
-        "CFBundleVersion": VERSION["__version__"],
-        "NSHighResolutionCapable": True,
-        "PatchLabSourceCommit": SOURCE_COMMIT,
-    },
-)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        collection,
+        name="PatchLab.app",
+        icon=str(ROOT / "app" / "icons" / "PatchLab.icns"),
+        bundle_identifier="com.patchlab.desktop",
+        version=VERSION["__version__"],
+        info_plist={
+            "CFBundleDisplayName": "PatchLab",
+            "CFBundleName": "PatchLab",
+            "CFBundleShortVersionString": VERSION["__version__"],
+            "CFBundleVersion": VERSION["__version__"],
+            "NSHighResolutionCapable": True,
+            "PatchLabSourceCommit": SOURCE_COMMIT,
+        },
+    )
+else:
+    # Inno Setup owns the Windows installation mechanics; no checkout or
+    # Python runtime is exposed to an end user.
+    app = collection

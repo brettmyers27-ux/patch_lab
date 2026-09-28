@@ -55,10 +55,10 @@ class WindowsParityHelpersTest(unittest.TestCase):
 
     def test_installer_and_launcher_keep_the_console_hidden(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        installer = (root / "install.ps1").read_text(encoding="utf-8")
+        installer = (root / "packaging" / "windows" / "PatchLab.iss").read_text(encoding="utf-8")
         launcher = (root / "app" / "windows_launcher.pyw").read_text(encoding="utf-8")
-        self.assertIn(r".venv\Scripts\pythonw.exe", installer)
-        self.assertIn("CreateShortcut", installer)
+        self.assertIn("PatchLab.exe", installer)
+        self.assertNotIn("PatchLab-source.bundle", installer)
         self.assertIn("PATCHLAB_DISTRIBUTION_MODE", launcher)
         self.assertIn("utf-8-sig", launcher)
         self.assertNotIn("shell=True", launcher)
