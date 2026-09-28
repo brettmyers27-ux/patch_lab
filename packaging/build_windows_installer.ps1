@@ -72,7 +72,17 @@ try {
 
     $exe = Join-Path $OutputRoot "PatchLab-v$version-windows-x64.exe"
     if (-not (Test-Path -LiteralPath $exe)) { throw "Expected installer was not produced: $exe" }
-    $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+    # Windows PowerShell editions in stripped build environments may omit the
+    # FileHash cmdlet. The .NET implementation is available on every supported
+    # Windows target and keeps manifest generation independent of shell extras.
+    $hashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    $hashStream = [IO.File]::OpenRead($exe)
+    try {
+        $sha256 = ([BitConverter]::ToString($hashAlgorithm.ComputeHash($hashStream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $hashStream.Dispose()
+        $hashAlgorithm.Dispose()
+    }
     Set-Content -LiteralPath "$exe.sha256" -Encoding ascii -NoNewline -Value "$sha256  $([IO.Path]::GetFileName($exe))`n"
     [ordered]@{
         patchlab_version = $version; source_commit = $sourceCommit
