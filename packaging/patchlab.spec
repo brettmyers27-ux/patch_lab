@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dynamic_libs
 
 
 ROOT = Path(SPECPATH).parent
@@ -124,6 +124,11 @@ if hf_cache.is_dir():
 
 binaries = []
 hiddenimports = []
+# PySide6's QtCore extension relies on companion MSVC runtime DLLs that are
+# not all discoverable through PE imports. Include the wheel's dynamic runtime
+# set so a clean Windows installation never falls back to a developer's Qt.
+binaries += collect_dynamic_libs("PySide6")
+binaries += collect_dynamic_libs("shiboken6")
 for package in ("dawdreamer", "laion_clap"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
