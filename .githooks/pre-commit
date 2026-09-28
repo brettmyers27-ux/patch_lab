@@ -3,8 +3,12 @@ set -eu
 
 if [ -x .venv/bin/python ]; then
     python_command=.venv/bin/python
+elif [ -x .venv/Scripts/python.exe ]; then
+    python_command=.venv/Scripts/python.exe
 elif command -v python3.11 >/dev/null 2>&1; then
     python_command=python3.11
+elif command -v python >/dev/null 2>&1; then
+    python_command=python
 else
     python_command=python3
 fi

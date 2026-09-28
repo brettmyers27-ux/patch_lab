@@ -9,6 +9,7 @@ hook and CI invoke -- against it.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,14 +51,14 @@ def _commit(repo: Path, version: str, message: str) -> str:
 
 def _verify_staged(repo: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(SCRIPT), "--staged"],
+        [sys.executable, str(SCRIPT), "--staged"],
         cwd=repo, text=True, capture_output=True,
     )
 
 
 def _verify_range(repo: Path, base: str, head: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(SCRIPT), "--range", base, head],
+        [sys.executable, str(SCRIPT), "--range", base, head],
         cwd=repo, text=True, capture_output=True,
     )
 
