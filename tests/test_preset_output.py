@@ -42,8 +42,8 @@ def test_P_unset_preference_matches_the_macos_default(tmp_path: Path) -> None:
     env = _env(tmp_path)
     assert default_preset_output_root("serum1", env=env) == MACOS_SERUM1_USER_PRESETS
     assert default_preset_output_root("serum2", env=env) == MACOS_SERUM2_USER_PRESETS
-    assert configured_preset_output_folder("serum1", env=env) == MACOS_SERUM1_USER_PRESETS / "PatchLab"
-    assert configured_preset_output_folder("serum2", env=env) == MACOS_SERUM2_USER_PRESETS / "PatchLab"
+    assert configured_preset_output_folder("serum1", env=env) == (default_preset_output_root("serum1", env=env) / "PatchLab").resolve()
+    assert configured_preset_output_folder("serum2", env=env) == (default_preset_output_root("serum2", env=env) / "PatchLab").resolve()
 
 
 def test_P_missing_or_corrupt_settings_file_is_the_same_as_unset(tmp_path: Path) -> None:
@@ -52,7 +52,7 @@ def test_P_missing_or_corrupt_settings_file_is_the_same_as_unset(tmp_path: Path)
     settings_path(env).parent.mkdir(parents=True, exist_ok=True)
     settings_path(env).write_text("not json")
     assert load_preset_output_preferences(env) == PresetOutputPreferences()
-    assert configured_preset_output_folder("serum2", env=env) == MACOS_SERUM2_USER_PRESETS / "PatchLab"
+    assert configured_preset_output_folder("serum2", env=env) == (default_preset_output_root("serum2", env=env) / "PatchLab").resolve()
 
 
 def test_non_macos_default_prefers_an_existing_writable_root_under_home(tmp_path: Path) -> None:
@@ -122,6 +122,8 @@ def test_D_ensure_writable_accepts_a_real_folder_and_leaves_no_trace(tmp_path: P
 
 
 def test_D_ensure_writable_rejects_a_read_only_folder(tmp_path: Path) -> None:
+    if __import__("os").name == "nt":
+        pytest.skip("Windows ACLs, not POSIX mode bits, control write access")
     folder = tmp_path / "locked"
     folder.mkdir()
     folder.chmod(0o500)

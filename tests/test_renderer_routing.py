@@ -159,12 +159,12 @@ def test_user_plugin_wins_over_system_when_both_exist(tmp_path: Path) -> None:
             ("serum2", "VST3", "system/VST3/Serum2.vst3"),
         },
     )
-    assert "/user/" in select_renderer("serum1", env=env).selected.path
-    assert "/user/" in select_renderer("serum2", env=env).selected.path
+    assert "user" in Path(select_renderer("serum1", env=env).selected.path).parts
+    assert "user" in Path(select_renderer("serum2", env=env).selected.path).parts
     # And the system copy is reported as usable-but-outranked, not missing.
     serum1 = select_renderer("serum1", env=env)
     system = next(
-        item for item in serum1.candidates if "/system/" in item.path and item.format == "VST2"
+        item for item in serum1.candidates if "system" in Path(item.path).parts and item.format == "VST2"
     )
     assert system.exists and not system.accepted
     assert "higher preference" in system.rejection_reason

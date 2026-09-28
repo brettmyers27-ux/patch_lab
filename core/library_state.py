@@ -149,6 +149,7 @@ def reconcile_source_tree(
             progress(index, total)
 
     affected_ids: set[int] = set()
+    active_display_paths: dict[int, Path] = {}
     with database.connect() as connection:
         for (
             path,
@@ -182,6 +183,11 @@ def reconcile_source_tree(
                     result.new_content += 1
                     new_content = True
             affected_ids.add(preset_id)
+            # ``normalized_path`` is intentionally a case-insensitive identity
+            # key on Windows.  Keep the resolved spelling separately in the
+            # legacy display/render path so users do not see their folders and
+            # preset names unexpectedly lower-cased.
+            active_display_paths[preset_id] = path
             connection.execute(
                 "UPDATE preset_sources SET active=0,updated_at=CURRENT_TIMESTAMP "
                 "WHERE normalized_path=? AND content_hash<>? AND active=1",
@@ -241,15 +247,11 @@ def reconcile_source_tree(
 
         # Keep the legacy presets.path field useful to rendering and diagnostics.
         for preset_id in affected_ids:
-            active = connection.execute(
-                "SELECT normalized_path FROM preset_sources "
-                "WHERE preset_id=? AND active=1 ORDER BY normalized_path LIMIT 1",
-                (preset_id,),
-            ).fetchone()
+            active = active_display_paths.get(preset_id)
             if active is not None:
                 connection.execute(
                     "UPDATE presets SET path=?,name=? WHERE id=?",
-                    (str(active[0]), Path(str(active[0])).stem, preset_id),
+                    (str(active), active.stem, preset_id),
                 )
     return result
 

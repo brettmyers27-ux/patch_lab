@@ -338,4 +338,4 @@ def test_the_recorded_detail_excludes_preset_and_audio_content(serum2_only, monk
         )
     blob = json.dumps(detail)
     assert "SECRET-PRESET-BYTES" not in blob and "CcnK" not in blob
-    assert str(preset) in blob, "the path is useful; the bytes are not"
+    assert detail["message"] == f"Serum rejected {preset}", "the path is useful locally; the bytes are not"

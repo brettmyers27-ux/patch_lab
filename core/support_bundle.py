@@ -64,6 +64,55 @@ MAX_PREPARATION_FAILURE_BYTES = 256 * 1024
 MAX_PREPARATION_FAILURE_GROUPS = 24
 MAX_PREPARATION_FAILURE_EXAMPLES = 3
 
+# A flight recorder is allowed to keep local paths: they are useful while the
+# app is still on the user's own machine. A support bundle crosses that
+# boundary, so its contract is stricter. Scrub both absolute Windows and POSIX
+# paths from free text and remove values under location/name keys before any
+# bundle file or summary is written.
+_BUNDLE_ABSOLUTE_PATH = re.compile(
+    r"(?:(?:[A-Za-z]:[\\/])|/)(?:[^\\/\r\n]+[\\/])+[^\\/\r\n:,'\"()]*"
+)
+_BUNDLE_PRIVATE_KEY_TOKENS = (
+    "path", "directory", "folder", "root", "filename", "app_data",
+    "user_name", "username", "preset_name", "source_name",
+)
+
+
+def _bundle_text(value: object) -> str:
+    """Return support-safe free text without local paths or credentials."""
+
+    return _BUNDLE_ABSOLUTE_PATH.sub("<path>", redact_text(str(value)))
+
+
+def _bundle_sanitize(value: Any, *, key: str = "") -> Any:
+    """Apply the stricter, outbound privacy contract recursively."""
+
+    # Do not feed the top-level event/repeat sequence through the flight
+    # recorder's bounded collection sanitizer: its 64-item truncation is right
+    # for an individual field but would silently turn the rest of a timeline
+    # into one string before the bundle byte cap can apply.
+    if isinstance(value, list):
+        return [_bundle_sanitize(item) for item in value]
+    if isinstance(value, tuple):
+        return [_bundle_sanitize(item) for item in value]
+    cleaned = sanitize(value)
+
+    def visit(item: Any, name: str = "") -> Any:
+        lowered = name.casefold()
+        if any(token in lowered for token in _BUNDLE_PRIVATE_KEY_TOKENS):
+            return "[redacted]"
+        if isinstance(item, str):
+            return _bundle_text(item)
+        if isinstance(item, Mapping):
+            return {str(child_key): visit(child, str(child_key)) for child_key, child in item.items()}
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        if isinstance(item, tuple):
+            return [visit(child) for child in item]
+        return item
+
+    return visit(cleaned, key)
+
 
 # ---------------------------------------------------------------------------
 # Reproduction descriptor
@@ -161,11 +210,11 @@ def build_reproduction_descriptor(
             "seconds_since_last_progress": post.get("seconds_since_last_progress"),
             "stall_budget_seconds": post.get("stall_budget_seconds"),
         },
-        "settings": sanitize(dict(settings or {})),
-        "feature_flags": sanitize(dict(feature_flags or {})),
+        "settings": _bundle_sanitize(dict(settings or {})),
+        "feature_flags": _bundle_sanitize(dict(feature_flags or {})),
         # This says exactly which current report/session facts were used to
         # decide whether a persisted failure snapshot belongs here.
-        "report_context": sanitize(dict(correlation or {})),
+        "report_context": _bundle_sanitize(dict(correlation or {})),
         "excluded_by_policy": [
             "raw user audio",
             "raw preset bytes",
@@ -822,7 +871,13 @@ def merged_events(current, history_seconds: float) -> list[dict[str, Any]]:
         stamp = _parse_ts(row.get("ts"))
         if stamp is None or stamp < cutoff:
             return
-        key = (row.get("ts"), row.get("pid"), row.get("event_type"), row.get("message"))
+        # Windows clocks can return the same wall-clock tick for several
+        # consecutive UI events. The recorder's monotonic value distinguishes
+        # them, so a burst is not accidentally collapsed in the support bundle.
+        key = (
+            row.get("ts"), row.get("mono"), row.get("sequence"), row.get("pid"),
+            row.get("event_type"), row.get("message"),
+        )
         seen.setdefault(key, row)
 
     for path in reversed(current.rotated_event_files()):  # oldest file first
@@ -886,7 +941,7 @@ def _events_blob(events: Sequence[Mapping[str, Any]]) -> str:
     """Serialize events newest-last, trimming the oldest if over the cap."""
 
     lines = [
-        json.dumps(sanitize(event), separators=(",", ":"), default=str)
+        json.dumps(_bundle_sanitize(event), separators=(",", ":"), default=str)
         for event in events
     ]
     blob = "\n".join(lines)
@@ -1027,7 +1082,7 @@ def create_support_bundle(
         postmortem=postmortem,
     )
 
-    reproduction = build_reproduction_descriptor(
+    reproduction = _bundle_sanitize(build_reproduction_descriptor(
         operation=effective_operation,
         operation_id=effective_operation_id,
         environment=environment,
@@ -1036,7 +1091,7 @@ def create_support_bundle(
         settings=settings,
         feature_flags=feature_flags,
         correlation=correlation,
-    )
+    ))
     fingerprint = str(reproduction.get("failure", {}).get("fingerprint") or "")
 
     if directory is None:
@@ -1055,31 +1110,37 @@ def create_support_bundle(
         temporary.replace(path)
         written.append(path)
 
+    bundle_environment = _bundle_sanitize(environment or {})
+    bundle_postmortem = _bundle_sanitize(postmortem or {})
+    bundle_events = _bundle_sanitize(events)
+    bundle_repeats = _bundle_sanitize(repeats)
+    bundle_preparation_failures = _bundle_sanitize(preparation_failures) if preparation_failures else None
+
     _write(
         SUMMARY_FILENAME,
         build_summary(
             ticket_id=ticket_id,
-            comments=comments,
-            environment=environment,
-            postmortem=postmortem,
-            events=events,
-            repeats=repeats,
+            comments=_bundle_text(comments),
+            environment=bundle_environment,
+            postmortem=bundle_postmortem,
+            events=bundle_events,
+            repeats=bundle_repeats,
             correlation=correlation,
-            preparation_failures=preparation_failures,
+            preparation_failures=bundle_preparation_failures,
         ),
     )
-    _write(EVENTS_FILENAME, _events_blob(events))
+    _write(EVENTS_FILENAME, _events_blob(bundle_events))
     _write(
         ENVIRONMENT_FILENAME,
-        json.dumps(sanitize(environment or {}), indent=2, sort_keys=True, default=str),
+        json.dumps(bundle_environment, indent=2, sort_keys=True, default=str),
     )
     _write(
         POSTMORTEM_FILENAME,
-        json.dumps(sanitize(postmortem or {}), indent=2, sort_keys=True, default=str),
+        json.dumps(bundle_postmortem, indent=2, sort_keys=True, default=str),
     )
     _write(
         REPEATS_FILENAME,
-        json.dumps(sanitize(repeats), indent=2, sort_keys=True, default=str),
+        json.dumps(bundle_repeats, indent=2, sort_keys=True, default=str),
     )
     _write(
         REPRODUCTION_FILENAME,
@@ -1088,14 +1149,14 @@ def create_support_bundle(
     if preparation_failures:
         _write(
             PREPARATION_FAILURES_FILENAME,
-            json.dumps(sanitize(preparation_failures), indent=2, sort_keys=True, default=str),
+            json.dumps(bundle_preparation_failures, indent=2, sort_keys=True, default=str),
         )
 
     if ticket_path is not None:
         # The readable ticket (the user's description and the visible app log)
         # travels with the bundle so support gets one complete file.
         try:
-            _write(TICKET_FILENAME, redact_text(Path(ticket_path).read_text(encoding="utf-8")))
+            _write(TICKET_FILENAME, _bundle_text(Path(ticket_path).read_text(encoding="utf-8")))
         except OSError:
             pass
 

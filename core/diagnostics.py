@@ -405,6 +405,7 @@ class DiagnosticEvent:
     decision_reason: str = ""
     fingerprint: str = ""
     repeat_count: int = 1
+    sequence: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -428,6 +429,8 @@ class DiagnosticEvent:
             payload["fingerprint"] = self.fingerprint
         if self.repeat_count != 1:
             payload["repeat_count"] = self.repeat_count
+        if self.sequence:
+            payload["sequence"] = self.sequence
         return payload
 
 
@@ -554,6 +557,7 @@ class DiagnosticRecorder:
         self._started_utc = datetime.now(timezone.utc).isoformat()
         self._hash_cache: dict[str, Any] | None = None
         self._hash_cache_dirty = False
+        self._event_sequence = 0
 
         if enabled is None:
             enabled = os.environ.get("PATCHLAB_DIAGNOSTICS", "1").strip() != "0"
@@ -732,6 +736,8 @@ class DiagnosticRecorder:
                 event.fields["suppressed_since_last"] = suppressed
 
         with self._lock:
+            self._event_sequence += 1
+            event.sequence = self._event_sequence
             if fingerprint:
                 # Group by event type as well as fingerprint: a heartbeat that
                 # merely references a failure's fingerprint must never be

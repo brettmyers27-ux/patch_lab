@@ -14,6 +14,7 @@ from core.library_state import (
     get_presets_needing_preparation,
     is_preset_prepared,
     mark_preset_prepared,
+    normalize_source_path,
     reconcile_source_tree,
 )
 from core.local_library import _sample_discovery_progress, process_linked_folder
@@ -164,7 +165,7 @@ def test_modified_path_retires_old_mapping_and_queues_only_new_content(
         source_history = connection.execute(
             "SELECT preset_id,active FROM preset_sources "
             "WHERE normalized_path=? ORDER BY id",
-            (str(source.resolve()),),
+            (normalize_source_path(source),),
         ).fetchall()
     assert [(int(row[0]), int(row[1])) for row in source_history] == [
         (old_id, 0),

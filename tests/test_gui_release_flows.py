@@ -39,6 +39,7 @@ from core.db import Database
 from core.diagnostics import DiagnosticRecorder, set_recorder
 from core.library_state import mark_preset_prepared, reconcile_source_tree
 from core.plugin_host import ParameterValue
+from core.platform_env import ENV
 from core.prepared_state import REQUIRED_FINGERPRINT_NOTES
 from core.preset_identity import (
     PENDING_SERUM1_NOT_INSTALLED,
@@ -57,6 +58,10 @@ CARD_INDEX = {"link": 0, "render": 1, "match": 2}
 
 SERUM1_PRESENT = ("serum1", "VST2", "system/VST/Serum.vst")
 SERUM2_PRESENT = ("serum2", "VST3", "system/VST3/Serum2.vst3")
+
+
+def _reveal_command(path: Path) -> list[str]:
+    return ["explorer.exe", "/select,", str(path)] if ENV.branch == "windows" else ["open", "-R", str(path)]
 
 
 # ---------------------------------------------------------------------------
@@ -1621,7 +1626,7 @@ def test_active_closest_match_row_reveals_the_exact_local_source(
     assert open_location.isEnabled()
     with patch("app.ui.subprocess.run") as run:
         open_location.click()
-    run.assert_called_once_with(["open", "-R", str(source)], check=False)
+    run.assert_called_once_with(_reveal_command(source), check=False)
 
 
 def test_active_closest_match_row_hides_location_without_a_local_source(gui: Gui) -> None:

@@ -216,7 +216,9 @@ def test_raw_binary_content_is_never_recorded() -> None:
 
 def test_file_paths_are_retained_because_they_are_the_diagnosis() -> None:
     path = "/Applications/PatchLab.app/Contents/Resources/data/models/x.pt"
-    assert sanitize({"checkpoint": Path(path)})["checkpoint"] == path
+    # ``Path`` follows the native host's lexical rules; retain the exact
+    # representation supplied by the caller.
+    assert sanitize({"checkpoint": Path(path)})["checkpoint"] == str(Path(path))
 
 
 def test_sanitize_handles_hostile_values() -> None:
@@ -914,11 +916,12 @@ def test_synthetic_disk_state_is_recorded(tmp_path: Path, fresh) -> None:
 
     from core.operation_state import resource_snapshot
 
-    snapshot = resource_snapshot([tmp_path, Path("/definitely/not/here")])
+    missing = Path("/definitely/not/here")
+    snapshot = resource_snapshot([tmp_path, missing])
     entry = snapshot["disk"][str(tmp_path)]
     assert entry["total_bytes"] > 0
     assert "free_bytes" in entry
-    assert "error" in snapshot["disk"]["/definitely/not/here"]
+    assert "error" in snapshot["disk"][str(missing)]
 
 
 def test_synthetic_missing_model(tmp_path: Path, fresh) -> None:

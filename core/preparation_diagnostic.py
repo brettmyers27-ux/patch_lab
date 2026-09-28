@@ -15,6 +15,7 @@ import re
 import sqlite3
 import tempfile
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath, PureWindowsPath
@@ -61,12 +62,23 @@ def platform_data_candidates(
     return ()
 
 
-def _readonly_connection(database: Path) -> sqlite3.Connection:
+@contextmanager
+def _readonly_connection(database: Path):
+    """Yield a read-only SQLite connection and always release its file handle.
+
+    ``sqlite3.Connection``'s own context manager commits or rolls back; it does
+    not close the connection.  That distinction is observable on Windows,
+    where a lingering read handle prevents a temporary diagnostic database
+    from being removed (and can block a user moving their library).
+    """
     uri = "file:" + quote(str(database.resolve())) + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        yield connection
+    finally:
+        connection.close()
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -265,7 +277,10 @@ def write_output(path: Path, payload: Mapping[str, object]) -> Path:
     descriptor, temporary = tempfile.mkstemp(prefix=".patchlab-diagnostic-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
+            # POSIX file modes are meaningful only where fchmod exists.  On
+            # Windows the per-user application profile ACL controls access.
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), 0o600)
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
         os.replace(temporary, path)

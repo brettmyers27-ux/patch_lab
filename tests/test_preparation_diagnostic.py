@@ -32,6 +32,7 @@ def _database(path: Path, *, older_schema: bool = False, failures: list[tuple[st
                 connection.execute("INSERT INTO preparation_jobs VALUES (?,?,?,?)", (index, "failed", error, index))
                 if status == "failed_silent":
                     connection.execute("INSERT INTO renders VALUES (?,?,?,?)", (index, 36, -61.0, -72.0))
+    connection.close()
 
 
 class PreparationDiagnosticTests(unittest.TestCase):
@@ -48,6 +49,7 @@ class PreparationDiagnosticTests(unittest.TestCase):
                     "INSERT INTO preparation_jobs VALUES (?,?,?,?)",
                     (1, "failed", "RuntimeError: renderer process exited before note 48", 2),
                 )
+            connection.close()
             payload = collect_error_details(database)
         group = payload["failure_groups"][0]
         self.assertEqual(group["semantic_error"], "RuntimeError: renderer process exited before note 48")

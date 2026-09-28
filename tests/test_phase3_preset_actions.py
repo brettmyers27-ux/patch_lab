@@ -30,12 +30,17 @@ import core.bug_report as bug_report
 import core.preset_save as preset_save
 from core.db import Database
 from core.preset_output import PresetOutputPreferences, save_preset_output_preferences
+from core.platform_env import ENV
 from core.preset_save import IncidentStatus, SaveIncident
 from tests.test_gui_release_flows import Gui, gui  # noqa: F401
 from tests.test_preset_save_gui import MATCH_UID, _fail, _incident, _mkdir, _worker_failed
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _reveal_command(path: Path) -> list[str]:
+    return ["explorer.exe", "/select,", str(path)] if ENV.branch == "windows" else ["open", "-R", str(path)]
 
 
 @pytest.fixture
@@ -76,7 +81,7 @@ def test_B_reveal_uses_the_stored_path_not_a_recomputed_one(save_gui, tmp_path: 
 
     with patch("app.ui.subprocess.run") as run:
         window.open_preset_file_location(MATCH_UID)
-    run.assert_called_once_with(["open", "-R", str(final)], check=False)
+    run.assert_called_once_with(_reveal_command(final), check=False)
 
 
 def test_B_missing_saved_file_shows_clear_message_not_a_silent_no_op(save_gui, tmp_path: Path) -> None:
@@ -108,7 +113,7 @@ def test_C_folder_change_leaves_an_old_saved_result_pointing_at_its_old_path(
 
     with patch("app.ui.subprocess.run") as run:
         window.open_preset_file_location(MATCH_UID)
-    run.assert_called_once_with(["open", "-R", str(old_final)], check=False)
+    run.assert_called_once_with(_reveal_command(old_final), check=False)
 
     # A newly-generated result, by contrast, must resolve into the new root.
     assert window._patchlab_export_folder("serum2") == new_root
@@ -177,7 +182,7 @@ def test_J_closest_match_with_a_real_local_file_reveals_the_original(save_gui, t
     }
     with patch("app.ui.subprocess.run") as run:
         window.open_existing_match_location(item)
-    run.assert_called_once_with(["open", "-R", str(original)], check=False)
+    run.assert_called_once_with(_reveal_command(original), check=False)
 
 
 def test_K_closest_match_with_no_local_file_is_blocked_with_a_reason(save_gui) -> None:

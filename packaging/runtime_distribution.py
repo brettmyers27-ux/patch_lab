@@ -31,3 +31,14 @@ os.environ.setdefault(
 executable = Path(sys.executable).resolve()
 if executable.parent.name == "MacOS" and executable.parent.parent.name == "Contents":
     os.environ.setdefault("PATCHLAB_APP_BUNDLE", str(executable.parent.parent.parent))
+
+# PySide's extension modules load Qt DLLs from their package directory.  The
+# Windows loader does not reliably include that directory for a one-folder
+# frozen app, especially when another Qt installation is already on PATH.  Add
+# the bundled directory explicitly before PySide imports so a clean end-user
+# profile always resolves the shipped Qt runtime.
+if sys.platform == "win32" and getattr(sys, "frozen", False):
+    pyside_dll_dir = Path(sys._MEIPASS) / "PySide6"
+    if pyside_dll_dir.is_dir():
+        os.add_dll_directory(str(pyside_dll_dir))
+        os.environ["PATH"] = str(pyside_dll_dir) + os.pathsep + os.environ.get("PATH", "")
