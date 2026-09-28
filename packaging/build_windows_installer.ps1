@@ -42,7 +42,10 @@ $compilerCandidates = @(
 $compiler = $compilerCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $compiler) { throw "Inno Setup 6 is required to build a Windows release candidate." }
 
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("patchlab-win-build-" + [guid]::NewGuid())
+# Inno Setup still resolves source paths through legacy Win32 APIs on some
+# hosts.  A short disposable root keeps deeply nested Hugging Face snapshot
+# paths below MAX_PATH without imposing a developer path on the product.
+$tempRoot = Join-Path ([IO.Path]::GetPathRoot($projectRoot)) ("plb-" + [guid]::NewGuid().ToString("N").Substring(0, 12))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
     $freezeDist = Join-Path $tempRoot "dist"
