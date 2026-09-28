@@ -88,7 +88,11 @@ print("FIXTURE_" + command.upper().replace("-", "_") + "=PASS")
         )
         _write(
             source / "scripts" / "cache_clap.py",
-            '#!/usr/bin/env python3\nprint("FIXTURE_CLAP_CACHE=PASS")\n',
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            "Path('data/runtime/v1-legacy-stock-clap/models/huggingface').mkdir("
+            "parents=True, exist_ok=True)\n"
+            "print(\"FIXTURE_CLAP_CACHE=PASS\")\n",
             executable=True,
         )
         venv_bin = source / ".venv" / "bin"

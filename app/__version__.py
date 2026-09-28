@@ -1,3 +1,3 @@
 """Single source of truth for PatchLab's public version."""
 
-__version__ = "1.7.7"
+__version__ = "1.7.8"
