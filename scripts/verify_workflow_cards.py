@@ -18,7 +18,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def _card_snapshot(window) -> dict[str, dict[str, object]]:  # type: ignore[no-untyped-def]
-    names = ("link", "render", "analyze", "match")
+    # The product intentionally condensed rendering and learning into one
+    # visible preparation card.  Keep this release gate aligned with the
+    # actual card topology while retaining compatibility with archived
+    # four-card builds that can still be inspected from source.
+    names = (
+        ("link", "render", "match")
+        if len(window.hero_cards) == 3
+        else ("link", "render", "analyze", "match")
+    )
     return {
         name: {
             "phase": str(card.property("workflowState")),
@@ -145,11 +153,6 @@ def main() -> int:
             window.render_progress.value(),
             window.render_progress.maximum(),
         ) == (14, 21)
-        window._set_workflow_activity("analyze", 2, 3, "Learning 2 of 3 linked presets")
-        progress_checks["analyze_counts"] = (
-            window.learn_progress.value(),
-            window.learn_progress.maximum(),
-        ) == (2, 3)
         window._set_workflow_activity("match", 24, 50, "Optimizing 24 of 50 evaluations")
         progress_checks["match_counts"] = (
             window.match_progress.value(),
@@ -207,25 +210,23 @@ def main() -> int:
         "fresh": {
             "link": "needs-action",
             "render": "not-required",
-            "analyze": "complete",
             "match": "needs-action",
         },
         "linked": {
             "link": "complete",
             "render": "needs-action",
-            "analyze": "complete",
             "match": "needs-action",
         },
         "in_progress": {
             "link": "in-progress",
             "render": "in-progress",
-            "analyze": "in-progress",
             "match": "in-progress",
         },
         "complete": {
             "link": "complete",
-            "render": "complete",
-            "analyze": "complete",
+            # Match can be complete while an independently linked personal
+            # library is still awaiting its first preparation run.
+            "render": "needs-action",
             "match": "complete",
         },
     }
@@ -248,10 +249,9 @@ def main() -> int:
             scenarios["broken_cache"]["cards"]["match"]["phase"] == "needs-action"
             and "Tokenizer cache missing" in str(broken_text)
         ),
-        "analyze_incremental_limitation": (
-            "linked presets join search"
-            in str(scenarios["linked"]["cards"]["analyze"]["text"])
-        ),
+        "preparation_card_replaces_analyze_card": set(
+            scenarios["linked"]["cards"]
+        ) == {"link", "render", "match"},
         "developer_paths_used_for_card_state": False,
     }
     payload["gate_pass"] = all(
@@ -259,7 +259,7 @@ def main() -> int:
             *state_checks.values(),
             *progress_checks.values(),
             payload["broken_cache_specific"],
-            payload["analyze_incremental_limitation"],
+            payload["preparation_card_replaces_analyze_card"],
         )
     )
     report = output / "report.json"
