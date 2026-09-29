@@ -396,12 +396,25 @@ def _shortcut_probe() -> Result:
         rows = json.loads(process.stdout or "[]")
         if isinstance(rows, dict):
             rows = [rows]
+        def supported_shortcut(row: dict[str, Any]) -> bool:
+            target = str(row.get("target", "")).casefold()
+            arguments = str(row.get("args", "")).casefold()
+            icon = str(row.get("icon", "")).casefold()
+            source_launcher = (
+                target.endswith("pythonw.exe")
+                and "windows_launcher.pyw" in arguments
+                and "patchlab.ico" in icon
+            )
+            packaged_launcher = (
+                target.endswith("patchlab.exe")
+                and not arguments
+                and "patchlab.exe,0" in icon
+            )
+            return source_launcher or packaged_launcher
         passed = (
             process.returncode == 0
             and len(rows) == 2
-            and all(str(row["target"]).casefold().endswith("pythonw.exe") for row in rows)
-            and all("windows_launcher.pyw" in str(row["args"]) for row in rows)
-            and all("patchlab.ico" in str(row["icon"]).casefold() for row in rows)
+            and all(supported_shortcut(row) for row in rows)
         )
         return Result(
             "Desktop/Start shortcuts",
