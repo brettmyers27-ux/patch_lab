@@ -72,6 +72,7 @@ from app.widgets import (
 from app.workers import (
     AnalyzeProcessRunner,
     BugReportProcessRunner,
+    EngineConnection,
     ExportProcessRunner,
     FactoryVerificationProcessRunner,
     MatchProcessRunner,
@@ -1992,6 +1993,9 @@ class LegacyMainWindow(QMainWindow):
         if refresh_save_state is not None:
             refresh_save_state()
         self._refresh_workflow_cards()
+        warm = getattr(self, "_warm_engine", None)
+        if warm is not None:
+            warm()
 
     def start_match(self) -> None:
         workflow_error = getattr(self, "_workflow_match_error", "")
@@ -3116,12 +3120,17 @@ class MainWindow(LegacyMainWindow):
         self.analyze_runner.progress.connect(self._analyze_progress_changed)
         self.analyze_runner.completed.connect(self._analyze_completed)
         self.analyze_runner.failed.connect(self._analyze_failed)
-        self.match_runner = MatchProcessRunner(self)
+        # One long-lived engine keeps Match's models and Serum render workers
+        # loaded between files; the runners fall back to one-shot workers if it
+        # cannot be used.
+        self.engine = EngineConnection(self)
+        self.engine.log.connect(self.append_log)
+        self.match_runner = MatchProcessRunner(self, engine=self.engine)
         self.match_runner.log.connect(self.append_log)
         self.match_runner.progress.connect(self._match_progress_changed)
         self.match_runner.completed.connect(self._match_completed)
         self.match_runner.failed.connect(self._match_failed)
-        self.export_runner = ExportProcessRunner(self)
+        self.export_runner = ExportProcessRunner(self, engine=self.engine)
         self.export_runner.log.connect(self.append_log)
         self.export_runner.completed.connect(self._export_completed)
         self.export_runner.failed.connect(self._export_failed)
@@ -4254,6 +4263,30 @@ class MainWindow(LegacyMainWindow):
         self.refresh_match_library()
         return archived
 
+    def _warm_engine(self) -> None:
+        """Start loading Match's models and render workers before the click.
+
+        Choosing a sound is a strong signal a Match is coming, and the user
+        spends a few seconds picking a quality and target anyway. Loading then
+        hides most of the ~9 s start-up. It never competes with work already in
+        progress (a batch, a running Match, library preparation) and is a no-op
+        when the engine is disabled or Match is not available.
+        """
+
+        engine = getattr(self, "engine", None)
+        if engine is None or not engine.usable:
+            return
+        if self._batch_state is not None or self.match_runner.running:
+            return
+        if self._model_asset_error or getattr(self, "_workflow_match_error", ""):
+            return
+        if getattr(self, "_prepare_active", False) or self.runner.running:
+            return
+        target = str(self.match_synth.currentData())
+        if self.distribution_mode and not synthesis_readiness(target).available:
+            return  # the factory-fingerprint path does not use the engine
+        engine.warm(target)
+
     def start_match(self) -> None:
         if self._batch_state is not None:
             QMessageBox.information(
@@ -5237,6 +5270,9 @@ class MainWindow(LegacyMainWindow):
         if self._batch_state is not None:
             self._persist_batch_progress("cancelled")
             self.append_log("Batch marked cancelled because PatchLab is closing")
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            engine.stop()
         super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]

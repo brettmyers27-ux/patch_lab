@@ -40,6 +40,7 @@ WORKER_ENTRY_POINTS: dict[str, WorkerEntryPoint] = {
     "analyze": WorkerEntryPoint("scripts.run_milestone3"),
     "match": WorkerEntryPoint("scripts.match_sound"),
     "export": WorkerEntryPoint("scripts.export_match"),
+    "engine": WorkerEntryPoint("scripts.engine_server"),
     "factory-preview": WorkerEntryPoint("scripts.render_factory_preview"),
     "recommendation-preview": WorkerEntryPoint(
         "scripts.render_recommendation_preview"

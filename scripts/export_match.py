@@ -136,15 +136,25 @@ class _Builder:
     attempt in this process.
     """
 
-    def __init__(self, result_path: Path, result: dict, recommendation: dict) -> None:
+    def __init__(
+        self,
+        result_path: Path,
+        result: dict,
+        recommendation: dict,
+        *,
+        verifier: object | None = None,
+    ) -> None:
         self.result_path = result_path
         self.result = result
         self.recommendation = recommendation
-        self._verifier = None
+        #: A verifier supplied by a long-lived caller (the warm engine) stays
+        #: open between exports; one this builder creates is closed with it.
+        self._verifier = verifier
+        self._owns_verifier = verifier is None
         self._inputs: dict | None = None
 
     def close(self) -> None:
-        if self._verifier is not None:
+        if self._verifier is not None and self._owns_verifier:
             self._verifier.close()
 
     def _prepared(self) -> dict:
@@ -244,7 +254,9 @@ class _Builder:
         )
 
 
-def _save_incident(args, result: dict, recommendation: dict, final_output: Path) -> int:
+def _save_incident(
+    args, result: dict, recommendation: dict, final_output: Path, *, verifier: object | None = None
+) -> int:
     """The auto-save / Retry Saving Preset path: bounded, classified, recorded."""
 
     from core.preset_save import (
@@ -261,7 +273,7 @@ def _save_incident(args, result: dict, recommendation: dict, final_output: Path)
             "catalog_id": int(recommendation.get("base_preset_id") or 0),
         }
     extension = ".fxp" if recommendation["synth"] == "serum1" else ".SerumPreset"
-    builder = _Builder(args.result, result, recommendation)
+    builder = _Builder(args.result, result, recommendation, verifier=verifier)
     try:
         outcome = run_save_lifecycle(
             incident,
@@ -323,7 +335,9 @@ def _save_incident(args, result: dict, recommendation: dict, final_output: Path)
     return 1
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, verifier: object | None = None) -> int:
+    """Run one export. ``argv``/``verifier`` let the warm engine call this in-process."""
+
     parser = argparse.ArgumentParser()
     parser.add_argument("result", type=Path)
     parser.add_argument("output", type=Path)
@@ -337,7 +351,7 @@ def main() -> int:
     )
     parser.add_argument("--trigger", choices=("auto", "manual"), default="auto")
     parser.add_argument("--attempts", type=int, default=1)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     result = json.loads(args.result.read_text(encoding="utf-8"))
     if args.existing_match is not None:
         try:
@@ -353,14 +367,14 @@ def main() -> int:
         return 1
     final_output = args.output.expanduser().resolve()
     if args.incident:
-        return _save_incident(args, result, recommendation, final_output)
+        return _save_incident(args, result, recommendation, final_output, verifier=verifier)
 
     # A save the user aimed at a path they chose (Export Preset's save dialog,
     # closest-match export): one attempt, and a confirmed "Replace" replaces.
     from core.preset_save import StageTracker, validate_preset_file
 
     extension = ".fxp" if recommendation["synth"] == "serum1" else ".SerumPreset"
-    builder = _Builder(args.result, result, recommendation)
+    builder = _Builder(args.result, result, recommendation, verifier=verifier)
     try:
         with tempfile.TemporaryDirectory(prefix="patchlab-generated-preset-") as temporary_directory:
             temporary_path = Path(temporary_directory) / f"generated{extension}"
