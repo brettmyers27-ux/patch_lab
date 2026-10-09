@@ -338,3 +338,47 @@ def test_match_workflow_asks_for_the_recommended_count_when_none_is_given() -> N
 
     default = inspect.signature(run_match_file).parameters["matcher_processes"].default
     assert default is None
+
+
+# --- Match must work against the bundled catalog, which has no coverage table ----
+
+
+def _catalog(path, *, with_coverage: bool, mask: int | None = None):
+    import sqlite3
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE presets(id INTEGER PRIMARY KEY, name TEXT, synth TEXT, path TEXT, content_hash TEXT)"
+        )
+        connection.execute("INSERT INTO presets VALUES (7, 'Warm Pad', 'serum2', '/p/pad.SerumPreset', 'abc')")
+        if with_coverage:
+            connection.execute("CREATE TABLE fingerprint_note_coverage(preset_id INTEGER PRIMARY KEY, note_mask INTEGER)")
+            connection.execute("INSERT INTO fingerprint_note_coverage VALUES (7, ?)", (mask,))
+    return path
+
+
+def test_closest_match_details_work_against_the_bundled_catalog_without_coverage(tmp_path) -> None:
+    """The packaged app's catalog has only presets/params; every Match used to die here."""
+
+    from core.match_workflow import _preset_details
+    from core.prepared_state import RENDER_MIDI_NOTES
+
+    details = _preset_details([7], _catalog(tmp_path / "catalog.sqlite", with_coverage=False))
+    assert details[7]["name"] == "Warm Pad"
+    assert details[7]["audible_midi_notes"] == list(RENDER_MIDI_NOTES), "full note range, as before"
+
+
+def test_closest_match_details_use_recorded_coverage_when_the_library_has_it(tmp_path) -> None:
+    from core.match_workflow import _preset_details
+    from core.prepared_state import RENDER_MIDI_NOTES
+
+    details = _preset_details([7], _catalog(tmp_path / "library.db", with_coverage=True, mask=0b101))
+    assert details[7]["audible_midi_notes"] == [RENDER_MIDI_NOTES[0], RENDER_MIDI_NOTES[2]]
+
+
+def test_a_library_row_without_a_recorded_mask_offers_the_full_range(tmp_path) -> None:
+    from core.match_workflow import _preset_details
+    from core.prepared_state import RENDER_MIDI_NOTES
+
+    details = _preset_details([7], _catalog(tmp_path / "library.db", with_coverage=True, mask=None))
+    assert details[7]["audible_midi_notes"] == list(RENDER_MIDI_NOTES)

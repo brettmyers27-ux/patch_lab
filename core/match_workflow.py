@@ -88,12 +88,27 @@ def _preset_details(
 ) -> dict[int, dict[str, Any]]:
     placeholders = ",".join("?" for _ in preset_ids)
     with sqlite3.connect(database_path) as connection:
-        rows = connection.execute(
-            f"SELECT p.id,p.name,p.synth,p.path,p.content_hash,nc.note_mask "
-            f"FROM presets p LEFT JOIN fingerprint_note_coverage nc "
-            f"ON nc.preset_id=p.id WHERE p.id IN ({placeholders})",
-            tuple(preset_ids),
-        ).fetchall()
+        # A packaged install reads the bundled synthesis catalog here, which
+        # carries only ``presets`` and ``params``: per-note coverage is something
+        # a *prepared local library* records. Joining a table the catalog does not
+        # have failed every Match in the packaged app, so the join is used only
+        # where the table exists; without it a preset simply offers the full
+        # note range, as it always did.
+        has_coverage = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fingerprint_note_coverage'"
+        ).fetchone() is not None
+        if has_coverage:
+            query = (
+                f"SELECT p.id,p.name,p.synth,p.path,p.content_hash,nc.note_mask "
+                f"FROM presets p LEFT JOIN fingerprint_note_coverage nc "
+                f"ON nc.preset_id=p.id WHERE p.id IN ({placeholders})"
+            )
+        else:
+            query = (
+                f"SELECT p.id,p.name,p.synth,p.path,p.content_hash,NULL "
+                f"FROM presets p WHERE p.id IN ({placeholders})"
+            )
+        rows = connection.execute(query, tuple(preset_ids)).fetchall()
     return {
         int(row[0]): {
             "name": str(row[1]),
