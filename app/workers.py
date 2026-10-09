@@ -710,6 +710,249 @@ class AnalyzeProcessRunner(_ProcessRunnerBase):
 DEFAULT_MATCH_INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000
 
 
+class EngineConnection(_ProcessRunnerBase):
+    """The GUI's side of the warm engine (``scripts.engine_server``).
+
+    One long-lived worker process serves Match and export jobs one at a time,
+    keeping the CLAP model, the parameter models and the Serum render workers
+    loaded between them. Jobs are routed back to the runner that submitted them
+    (``MatchProcessRunner`` / ``ExportProcessRunner``), which parse exactly the
+    same ``MATCH_*`` / ``EXPORT_*`` lines as before.
+
+    This is an optimisation, never a dependency: if the engine cannot start,
+    dies, or is disabled (``PATCHLAB_WARM_ENGINE=0``), the runners fall back to
+    their original one-process-per-job behaviour. Two unexpected engine deaths
+    in a session turn it off for the rest of that session.
+    """
+
+    log = Signal(str)
+    failed = Signal(str)
+
+    #: Unexpected engine deaths tolerated before falling back to one-shot workers.
+    MAX_FAILURES = 2
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._init_worker_process()
+        self._queue: list[tuple[str, str, list[str], QObject | None, str]] = []
+        self._active: tuple[str, QObject | None] | None = None
+        self._next_id = 0
+        self._failures = 0
+        self._cancelled = False
+        self._starting = False
+        self._warm_requested = ""
+        self._idle_exit_seen = False
+        self._active_output_seen = False
+        self._active_job: tuple[str, list[str], str] | None = None
+        self._disabled = os.environ.get("PATCHLAB_WARM_ENGINE", "1").strip() == "0"
+
+    # -- state ----------------------------------------------------------
+
+    @property
+    def usable(self) -> bool:
+        return not self._disabled and self._failures < self.MAX_FAILURES
+
+    @property
+    def process_running(self) -> bool:
+        return self.process.state() != QProcess.ProcessState.NotRunning
+
+    @property
+    def ready(self) -> bool:
+        return self.process_running and self._worker_ready
+
+    @property
+    def busy(self) -> bool:
+        return self._active is not None or bool(self._queue)
+
+    def pid(self) -> int:
+        return int(self.process.processId())
+
+    def is_running_kind(self, kind: str) -> bool:
+        """Whether a job of ``kind`` is running or waiting in the engine."""
+
+        return (
+            self._active is not None and self._active_job is not None and self._active_job[0] == kind
+        ) or any(item[1] == kind for item in self._queue)
+
+    def has_job(self, runner: QObject) -> bool:
+        """Whether ``runner`` still has a job running or waiting in this engine."""
+
+        return (self._active is not None and self._active[1] is runner) or any(
+            item[3] is runner for item in self._queue
+        )
+
+    # -- submitting work ------------------------------------------------
+
+    def submit(self, runner: QObject | None, kind: str, argv: list[str]) -> None:
+        self._next_id += 1
+        # Each job gets its own correlation id (the engine outlives any single
+        # job), so a support bundle can still tell one Match from the next.
+        operation_id = ""
+        try:
+            from core.diagnostics import new_operation_id
+
+            operation_id = new_operation_id(kind)
+        except Exception:
+            pass
+        if runner is not None:
+            runner.operation_id = operation_id
+        self._queue.append((str(self._next_id), kind, list(argv), runner, operation_id))
+        self._pump()
+
+    def warm(self, target_synth: str) -> None:
+        """Load models and render workers ahead of the first Match."""
+
+        if not self.usable or self.busy or self._warm_requested == target_synth and self.process_running:
+            return
+        self._warm_requested = target_synth
+        self.submit(None, "warm", ["--target-synth", target_synth])
+
+    def cancel(self, runner: QObject) -> None:
+        """Cancel ``runner``'s job: drop it if queued, restart the engine if running."""
+
+        self._queue = [item for item in self._queue if item[3] is not runner]
+        if self._active is not None and self._active[1] is runner:
+            self._cancelled = True
+            self.process.terminate()
+
+    def stop(self) -> None:
+        """Ask the engine to exit (application shutdown)."""
+
+        if not self.process_running:
+            return
+        try:
+            self.process.write(b'{"id": "0", "kind": "shutdown"}\n')
+            self.process.closeWriteChannel()
+        except Exception:
+            pass
+        if not self.process.waitForFinished(3000):
+            self.process.kill()
+
+    # -- plumbing -------------------------------------------------------
+
+    def _pump(self) -> None:
+        if self._active is not None or not self._queue:
+            return
+        if not self.process_running:
+            if not self.usable:
+                self._release_queue_to_fallback()
+                return
+            self._starting = True
+            self._cancelled = False
+            self._buffer = ""
+            self.process.setWorkingDirectory(str(PROJECT_ROOT))
+            self._start_worker("engine", [])
+            return
+        if not self._worker_ready:
+            return  # sent as soon as the handshake arrives
+        job_id, kind, argv, runner, operation_id = self._queue.pop(0)
+        self._active = (job_id, runner)
+        self._active_job = (kind, argv, operation_id)
+        self._active_output_seen = False
+        payload = json.dumps(
+            {"id": job_id, "kind": kind, "argv": argv, "operation_id": operation_id}
+        )
+        self.process.write(payload.encode("utf-8") + b"\n")
+
+    def _release_queue_to_fallback(self) -> None:
+        queued, self._queue = self._queue, []
+        for _job_id, kind, argv, runner, _operation_id in queued:
+            fallback = getattr(runner, "_engine_fallback", None)
+            if fallback is not None:
+                fallback(kind, argv)
+
+    def _handle_worker_line(self, line: str) -> bool:
+        handled = super()._handle_worker_line(line)
+        if handled and self._worker_ready:
+            self._starting = False
+            self._pump()
+        return handled
+
+    def _read_output(self) -> None:
+        self._buffer += bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        while (line := self._pop_line()) is not None:
+            if self._handle_worker_line(line):
+                continue
+            if line.startswith("ENGINE_IDLE_EXIT="):
+                self._idle_exit_seen = True
+                continue
+            if self._active is not None:
+                self._active_output_seen = True
+            if line.startswith("ENGINE_JOB_DONE="):
+                try:
+                    exit_code = int(json.loads(line.split("=", 1)[1]).get("exit_code", 1))
+                except (ValueError, TypeError):
+                    exit_code = 1
+                active, self._active = self._active, None
+                if active is not None and active[1] is not None:
+                    done = getattr(active[1], "_engine_done", None)
+                    if done is not None:
+                        done(exit_code)
+                self._pump()
+                continue
+            active_runner = self._active[1] if self._active is not None else None
+            handler = getattr(active_runner, "_engine_line", None)
+            if handler is not None:
+                handler(line)
+            elif line:
+                self.log.emit(line)
+
+    def _emit_startup_failure(self, message: str) -> None:
+        # The engine never started: count it, tell the queued jobs to run the
+        # one-shot way, and keep the application working.
+        if self._startup_failure_emitted:
+            return
+        self._startup_failure_emitted = True
+        self._starting = False
+        self._failures += 1
+        self.log.emit(f"Warm engine unavailable ({message}); using one-shot workers")
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            self.process.kill()
+        self._fail_active("The PatchLab engine could not start.")
+        self._release_queue_to_fallback()
+
+    def _fail_active(self, message: str) -> None:
+        active, self._active = self._active, None
+        if active is not None and active[1] is not None:
+            died = getattr(active[1], "_engine_done", None)
+            if died is not None:
+                died(None, message)
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        self._startup_timer.stop()
+        was_cancelled, self._cancelled = self._cancelled, False
+        was_ready, self._worker_ready = self._worker_ready, False
+        idle_exit, self._idle_exit_seen = self._idle_exit_seen, False
+        if self._startup_failure_emitted:
+            self._startup_failure_emitted = False
+            return
+        if not was_ready and self._starting:
+            self._emit_startup_failure(f"engine exited with code {exit_code} before its handshake")
+            self._startup_failure_emitted = False
+            return
+        if self._active is not None:
+            if idle_exit and not self._active_output_seen and self._active[1] is not None:
+                # The engine chose to exit on its idle timeout at the instant a
+                # job arrived; nothing ran, so run the job on a fresh engine.
+                job_id, runner = self._active
+                self._active = None
+                retry = getattr(self, "_active_job", None)
+                if retry is not None:
+                    self._queue.insert(0, (job_id, retry[0], retry[1], runner, retry[2]))
+            else:
+                if not was_cancelled:
+                    self._failures += 1
+                self._fail_active(
+                    "Match stopped." if was_cancelled
+                    else "PatchLab's engine stopped unexpectedly. Your selected audio is unchanged — you can try again."
+                )
+        # Work queued while the engine was shutting down restarts it.
+        self._pump()
+
+
 class MatchProcessRunner(_ProcessRunnerBase):
     log = Signal(str)
     progress = Signal(dict)
@@ -717,9 +960,19 @@ class MatchProcessRunner(_ProcessRunnerBase):
     failed = Signal(str)
     stalled = Signal(dict)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    #: Class-level defaults: a runner that never received an engine runs one-shot.
+    _engine: "EngineConnection | None" = None
+    _engine_job = False
+
+    def __init__(
+        self, parent: QObject | None = None, engine: "EngineConnection | None" = None
+    ) -> None:
         super().__init__(parent)
         self._init_worker_process()
+        #: The shared warm engine, if any. Jobs run there when it is usable and
+        #: fall back to a one-shot worker process otherwise.
+        self._engine = engine
+        self._engine_job = False
         self._buffer = ""
         self._result: str | None = None
         self._error: str | None = None
@@ -735,7 +988,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
 
     @property
     def running(self) -> bool:
-        return self.process.state() != QProcess.ProcessState.NotRunning
+        return self._engine_job or self.process.state() != QProcess.ProcessState.NotRunning
 
     def _liveness_interval_ms(self) -> int:
         try:
@@ -774,7 +1027,7 @@ class MatchProcessRunner(_ProcessRunnerBase):
             ),
             "last_phase": self._last_phase,
             "progress_lines": self._progress_lines,
-            "pid": int(self.process.processId()),
+            "pid": self._engine.pid() if self._engine_job else int(self.process.processId()),
             "inactivity_seconds": seconds,
         }
         try:
@@ -810,7 +1063,10 @@ class MatchProcessRunner(_ProcessRunnerBase):
             pass
         self.stalled.emit(detail)
         self.log.emit(f"Match stopped: {detail['reason']}")
-        self.process.kill()
+        if self._engine_job:
+            self._engine.process.kill()
+        else:
+            self.process.kill()
         self.failed.emit(
             "PatchLab stopped waiting because the match made no progress. "
             "Your selected audio is unchanged — you can try again."
@@ -837,7 +1093,6 @@ class MatchProcessRunner(_ProcessRunnerBase):
         self._last_phase = ""
         self._progress_lines = 0
         self._stall_reported = False
-        self.process.setWorkingDirectory(str(PROJECT_ROOT))
         arguments = [
             str(audio),
             "--target-synth",
@@ -857,34 +1112,76 @@ class MatchProcessRunner(_ProcessRunnerBase):
             arguments.extend(["--local-db", str(local_db)])
         if local_audio_root is not None:
             arguments.extend(["--local-audio-root", str(local_audio_root)])
+        if self._engine is not None and self._engine.usable and not factory_only:
+            self._engine_job = True
+            self._engine.submit(self, "match", arguments)
+            self._touch_liveness()
+            return
+        self._start_one_shot(arguments)
+
+    def _start_one_shot(self, arguments: list[str]) -> None:
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
         self._start_worker("match", arguments)
         self._touch_liveness()
 
     def cancel(self) -> None:
-        if self.running:
+        if self._engine_job:
+            self._engine.cancel(self)
+            if not self._engine.has_job(self):
+                # It was only queued, so no completion will ever arrive.
+                self._engine_job = False
+                self._liveness_timer.stop()
+        elif self.running:
             self.process.terminate()
+
+    def _consume_line(self, line: str) -> None:
+        # Any output at all is evidence of life, so the inactivity budget
+        # restarts here rather than only on structured progress.
+        self._touch_liveness()
+        if line.startswith("MATCH_PROGRESS="):
+            detail = json.loads(line.split("=", 1)[1])
+            self._progress_lines += 1
+            self._last_phase = str(detail.get("phase", "")) or self._last_phase
+            self.progress.emit(detail)
+        elif line.startswith("MATCH_RESULT="):
+            self._result = line.split("=", 1)[1]
+        elif line.startswith("MATCH_ERROR="):
+            self._error = line.split("=", 1)[1]
+        if line:
+            self.log.emit(line)
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
             "utf-8", errors="replace"
         )
         while (line := self._pop_line()) is not None:
-            # Any output at all is evidence of life, so the inactivity budget
-            # restarts here rather than only on structured progress.
             self._touch_liveness()
             if self._handle_worker_line(line):
                 continue
-            if line.startswith("MATCH_PROGRESS="):
-                detail = json.loads(line.split("=", 1)[1])
-                self._progress_lines += 1
-                self._last_phase = str(detail.get("phase", "")) or self._last_phase
-                self.progress.emit(detail)
-            elif line.startswith("MATCH_RESULT="):
-                self._result = line.split("=", 1)[1]
-            elif line.startswith("MATCH_ERROR="):
-                self._error = line.split("=", 1)[1]
-            if line:
-                self.log.emit(line)
+            self._consume_line(line)
+
+    # -- warm engine callbacks (see EngineConnection) ---------------------
+
+    def _engine_line(self, line: str) -> None:
+        self._consume_line(line)
+
+    def _engine_done(self, exit_code: int | None, message: str = "") -> None:
+        self._engine_job = False
+        self._liveness_timer.stop()
+        if self._stall_reported:
+            return  # the watchdog already reported the terminal failure
+        if exit_code == 0 and self._result:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(
+                self._error or message or f"Match worker exited with code {exit_code}"
+            )
+
+    def _engine_fallback(self, kind: str, argv: list[str]) -> None:
+        """The engine is unavailable: run this job as a one-shot worker instead."""
+
+        self._engine_job = False
+        self._start_one_shot(argv)
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._liveness_timer.stop()
@@ -906,9 +1203,18 @@ class ExportProcessRunner(_ProcessRunnerBase):
     completed = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    #: Class-level defaults: a runner that never received an engine runs one-shot.
+    _engine: "EngineConnection | None" = None
+    _engine_job = False
+
+    def __init__(
+        self, parent: QObject | None = None, engine: "EngineConnection | None" = None
+    ) -> None:
         super().__init__(parent)
         self._init_worker_process()
+        #: See MatchProcessRunner: the shared warm engine, with one-shot fallback.
+        self._engine = engine
+        self._engine_job = False
         self._buffer = ""
         self._result: dict | None = None
         self._error: str | None = None
@@ -919,7 +1225,7 @@ class ExportProcessRunner(_ProcessRunnerBase):
 
     @property
     def running(self) -> bool:
-        return self.process.state() != QProcess.ProcessState.NotRunning
+        return self._engine_job or self.process.state() != QProcess.ProcessState.NotRunning
 
     def start(
         self,
@@ -938,7 +1244,6 @@ class ExportProcessRunner(_ProcessRunnerBase):
         self._error = None
         self.failure = None
         self.incident_id = incident_id
-        self.process.setWorkingDirectory(str(PROJECT_ROOT))
         arguments = [str(result_path), str(output_path)]
         if existing_match is not None:
             # One export implementation for both the generated recommendation and
@@ -952,11 +1257,42 @@ class ExportProcessRunner(_ProcessRunnerBase):
                 "--trigger", str(trigger),
                 "--attempts", str(max(1, int(attempts))),
             ]
+        # A Match can take minutes; a save must not wait behind it (as one-shot
+        # exports never did), so it only joins the engine when no Match is there.
+        if (
+            self._engine is not None
+            and self._engine.usable
+            and not self._engine.is_running_kind("match")
+        ):
+            self._engine_job = True
+            self._engine.submit(self, "export", arguments)
+            return
+        self._start_one_shot(arguments)
+
+    def _start_one_shot(self, arguments: list[str]) -> None:
+        self.process.setWorkingDirectory(str(PROJECT_ROOT))
         self._start_worker("export", arguments)
 
     def cancel(self) -> None:
-        if self.running:
+        if self._engine_job:
+            self._engine.cancel(self)
+            if not self._engine.has_job(self):
+                self._engine_job = False
+        elif self.running:
             self.process.terminate()
+
+    def _consume_line(self, line: str) -> None:
+        if line.startswith("EXPORT_RESULT="):
+            self._result = json.loads(line.split("=", 1)[1])
+        elif line.startswith("EXPORT_ERROR="):
+            self._error = line.split("=", 1)[1]
+        elif line.startswith("EXPORT_FAILURE="):
+            try:
+                self.failure = json.loads(line.split("=", 1)[1])
+            except ValueError:
+                self.failure = None
+        if line:
+            self.log.emit(line)
 
     def _read_output(self) -> None:
         self._buffer += bytes(self.process.readAllStandardOutput()).decode(
@@ -965,17 +1301,25 @@ class ExportProcessRunner(_ProcessRunnerBase):
         while (line := self._pop_line()) is not None:
             if self._handle_worker_line(line):
                 continue
-            if line.startswith("EXPORT_RESULT="):
-                self._result = json.loads(line.split("=", 1)[1])
-            elif line.startswith("EXPORT_ERROR="):
-                self._error = line.split("=", 1)[1]
-            elif line.startswith("EXPORT_FAILURE="):
-                try:
-                    self.failure = json.loads(line.split("=", 1)[1])
-                except ValueError:
-                    self.failure = None
-            if line:
-                self.log.emit(line)
+            self._consume_line(line)
+
+    # -- warm engine callbacks (see EngineConnection) ---------------------
+
+    def _engine_line(self, line: str) -> None:
+        self._consume_line(line)
+
+    def _engine_done(self, exit_code: int | None, message: str = "") -> None:
+        self._engine_job = False
+        if exit_code == 0 and self._result is not None:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(
+                self._error or message or f"Export worker exited with code {exit_code}"
+            )
+
+    def _engine_fallback(self, kind: str, argv: list[str]) -> None:
+        self._engine_job = False
+        self._start_one_shot(argv)
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._read_output()

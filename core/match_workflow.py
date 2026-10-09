@@ -261,6 +261,104 @@ def _silence_result(decoded: DecodedAudio, session: Path, target_synth: str) -> 
     return result_path
 
 
+def _retire_matcher(
+    matcher: AnalysisBySynthesisMatcher,
+    cache: "WarmMatcherCache | None",
+    *,
+    healthy: bool,
+) -> None:
+    """End of a Match: keep a healthy warm matcher, otherwise close it."""
+
+    matcher.tracker = None
+    if cache is not None:
+        cache.release(matcher, healthy=healthy)
+    else:
+        matcher.close()
+
+
+class WarmMatcherCache:
+    """One fully loaded matcher kept alive between Matches (the warm engine).
+
+    A matcher owns everything slow to build: the CLAP model, the parameter and
+    delta models, the similarity indexes and the pool of Serum render workers.
+    None of it depends on the sound being matched, so a long-lived process can
+    build it once. Anything unexpected (a failed Match, a stalled or respawning
+    pool, a different target generation or worker count) discards it, and the
+    next Match builds a fresh one -- the same state a cold start would have.
+    """
+
+    def __init__(self, embedder: Any = None) -> None:
+        self.matcher: AnalysisBySynthesisMatcher | None = None
+        self._key: tuple[Any, ...] | None = None
+        self._embedder = embedder
+        self.reuse_count = 0
+
+    @property
+    def embedder(self) -> Any:
+        """The CLAP model shared by the matcher and the export verifier.
+
+        Normally it comes from the first matcher built (so the matcher's render
+        workers start up while CLAP loads, as in a one-shot Match); an export
+        that arrives before any Match loads it itself and the matcher reuses it.
+        """
+
+        if self._embedder is None:
+            from core.features import ClapEmbedder
+            from core.platform_env import ENV
+
+            self._embedder = ClapEmbedder(ENV)
+        return self._embedder
+
+    def is_warm_for(self, required_synths: tuple[str, ...], processes: int) -> bool:
+        return self.matcher is not None and self._key == (
+            tuple(required_synths), int(processes), False
+        )
+
+    def acquire(
+        self,
+        *,
+        processes: int,
+        deterministic_render_dispatch: bool,
+        required_synths: tuple[str, ...],
+        operation_id: str,
+    ) -> AnalysisBySynthesisMatcher:
+        key = (tuple(required_synths), int(processes), bool(deterministic_render_dispatch))
+        if self.matcher is not None and self._key == key and self.matcher.is_usable():
+            self.reuse_count += 1
+            self.matcher.begin_operation(operation_id)
+            return self.matcher
+        self.discard()
+        matcher = AnalysisBySynthesisMatcher(
+            processes=processes,
+            deterministic_render_dispatch=deterministic_render_dispatch,
+            required_synths=required_synths,
+            operation_id=operation_id,
+            embedder=self._embedder,
+        )
+        if self._embedder is None:
+            self._embedder = getattr(matcher, "embedder", None)
+        self.matcher, self._key = matcher, key
+        return matcher
+
+    def release(self, matcher: AnalysisBySynthesisMatcher, *, healthy: bool) -> None:
+        if matcher is not self.matcher:
+            matcher.close()
+            return
+        if not healthy or not matcher.is_usable():
+            self.discard()
+
+    def discard(self) -> None:
+        matcher, self.matcher, self._key = self.matcher, None, None
+        if matcher is not None:
+            try:
+                matcher.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        self.discard()
+
+
 def run_match_file(
     input_path: Path,
     *,
@@ -268,11 +366,23 @@ def run_match_file(
     budget: str = "balanced",
     start_offset_s: float = 0.0,
     session_root: Path = DEFAULT_SESSION_ROOT,
-    matcher_processes: int = 4,
+    matcher_processes: int | None = None,
     deterministic_render_dispatch: bool = False,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    matcher_cache: "WarmMatcherCache | None" = None,
 ) -> Path:
-    """Decode a user file and persist the complete UI result artifact."""
+    """Decode a user file and persist the complete UI result artifact.
+
+    ``matcher_cache`` is supplied only by the warm engine: it keeps one fully
+    loaded matcher (CLAP, models, Serum render workers) alive between files so
+    a second Match or a batch's next file skips the whole start-up cost. Without
+    one, behaviour is exactly the original: build a matcher, use it, close it.
+    """
+
+    if matcher_processes is None:
+        from core.platform_env import recommended_render_workers
+
+        matcher_processes = recommended_render_workers()
 
     from core.diagnostic_env import capture_environment, write_environment
     from core.diagnostics import inherited_operation_id, new_operation_id, record
@@ -373,12 +483,20 @@ def run_match_file(
             f"resolving the renderer required for a {target_synth} match",
         )
         _phase("loading-models", "loading CLAP, parameter and delta models")
-        matcher = AnalysisBySynthesisMatcher(
-            processes=matcher_processes,
-            deterministic_render_dispatch=deterministic_render_dispatch,
-            required_synths=(target_synth,),
-            operation_id=operation_id,
-        )
+        if matcher_cache is not None:
+            matcher = matcher_cache.acquire(
+                processes=matcher_processes,
+                deterministic_render_dispatch=deterministic_render_dispatch,
+                required_synths=(target_synth,),
+                operation_id=operation_id,
+            )
+        else:
+            matcher = AnalysisBySynthesisMatcher(
+                processes=matcher_processes,
+                deterministic_render_dispatch=deterministic_render_dispatch,
+                required_synths=(target_synth,),
+                operation_id=operation_id,
+            )
         matcher.tracker = tracker
         tracker.annotate(
             renderer=matcher.renderer_preflight.selection_for(target_synth).renderer,
@@ -404,8 +522,9 @@ def run_match_file(
         write_postmortem(_postmortem("failure", exc))
         tracker.fail(exc)
         if matcher is not None:
-            matcher.close()
+            _retire_matcher(matcher, matcher_cache, healthy=False)
         raise
+    healthy = False
     try:
         _phase("candidate-preparation", "embedding the target and retrieving neighbours")
         embedding = matcher.query_embedding(decoded.mono, decoded.sample_rate)
@@ -625,6 +744,7 @@ def run_match_file(
             "match produced a result artifact",
             evaluations=int(result.evaluations),
         )
+        healthy = True
         return result_path
     except BaseException as exc:
         # Nothing is swallowed: the exception, its cause chain, the failing
@@ -635,4 +755,4 @@ def run_match_file(
     finally:
         if watchdog is not None:
             watchdog.stop()
-        matcher.close()
+        _retire_matcher(matcher, matcher_cache, healthy=healthy)

@@ -221,7 +221,7 @@ def _render_state_template(catalog_id: int) -> Path:
 class PresetExportVerifier:
     """Persistent plug-in hosts for mandatory decoded-state and audio checks."""
 
-    def __init__(self) -> None:
+    def __init__(self, embedder: ClapEmbedder | None = None) -> None:
         # Hosts are opened lazily, for the one generation actually being
         # exported. Opening both up front meant a Serum-2-only machine could not
         # export a Serum 2 preset at all: the Serum 1 lookup raised
@@ -229,7 +229,9 @@ class PresetExportVerifier:
         # as "EXPORT_ERROR=StopIteration" from Export Preset and the generated
         # result's auto-save.
         self.hosts: dict[str, tuple[Any, Any]] = {}
-        self.embedder = ClapEmbedder(ENV)
+        # A long-lived process that already holds a CLAP model (the warm engine)
+        # passes it in; loading a second copy costs seconds and ~650 MB.
+        self.embedder = embedder if embedder is not None else ClapEmbedder(ENV)
         self._temporary = tempfile.TemporaryDirectory(prefix="patchlab-export-verify-")
 
     def host(self, synth: str) -> tuple[Any, Any]:
@@ -246,6 +248,15 @@ class PresetExportVerifier:
 
     def close(self) -> None:
         self._temporary.cleanup()
+
+    def reset_scratch(self) -> None:
+        """Delete the per-export state files between jobs of a long-lived verifier."""
+
+        for leftover in Path(self._temporary.name).glob("*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
 
     def verify(
         self,

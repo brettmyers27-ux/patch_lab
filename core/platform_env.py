@@ -341,3 +341,86 @@ def detect_platform_env() -> PlatformEnv:
 
 
 ENV = detect_platform_env()
+
+
+#: Never fewer workers than PatchLab has always used.
+BASELINE_RENDER_WORKERS = 4
+MAXIMUM_RENDER_WORKERS = 8
+#: Measured resident size of one Serum render worker (it imports the full ML
+#: stack), with headroom. Workers are only added while they fit in half of RAM.
+_WORKER_MEMORY_BYTES = 750 * 1024 * 1024
+#: Extra workers are only considered on machines with at least this much RAM.
+_MEMORY_FOR_EXTRA_WORKERS = 15 * 1024 * 1024 * 1024
+
+
+def _performance_and_efficiency_cores() -> tuple[int, int] | None:
+    """Apple Silicon's performance/efficiency core split, or None if unknown."""
+
+    if platform.system() != "Darwin":
+        return None
+    try:
+        completed = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel0.physicalcpu", "hw.perflevel1.physicalcpu"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        values = [int(item) for item in completed.stdout.split()]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or len(values) != 2 or values[0] <= 0:
+        return None
+    return values[0], values[1]
+
+
+def _physical_memory_bytes() -> int | None:
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    return int(pages) * int(size) if pages > 0 and size > 0 else None
+
+
+_AUTO: Any = object()
+
+
+def recommended_render_workers(
+    *,
+    cores: Any = _AUTO,
+    logical_cpus: int | None = None,
+    memory_bytes: Any = _AUTO,
+) -> int:
+    """How many Serum render workers a Match should run on this machine.
+
+    Rendering is CPU-bound and parallelises well only across *performance*
+    cores: on a 4-performance + 6-efficiency Mac, 4 workers ran 1.6x faster
+    than one, while 6-8 workers (using some efficiency cores) were a further
+    13-15% faster. So the target is the performance cores plus half the
+    efficiency cores, kept between the long-standing default of 4 and 8, and
+    limited by memory because every worker holds ~600 MB. ``PATCHLAB_RENDER_WORKERS``
+    overrides everything (the test and support escape hatch).
+    """
+
+    override = os.environ.get("PATCHLAB_RENDER_WORKERS", "").strip()
+    if override:
+        try:
+            return max(1, min(32, int(override)))
+        except ValueError:
+            pass
+    split = _performance_and_efficiency_cores() if cores is _AUTO else cores
+    if split is not None:
+        target = split[0] + split[1] // 2
+    else:
+        logical = logical_cpus if logical_cpus is not None else (os.cpu_count() or 8)
+        target = logical // 2
+    target = max(BASELINE_RENDER_WORKERS, min(MAXIMUM_RENDER_WORKERS, target))
+    memory = _physical_memory_bytes() if memory_bytes is _AUTO else memory_bytes
+    if memory is None or memory < _MEMORY_FOR_EXTRA_WORKERS:
+        # Unknown or modest memory: stay at the proven default rather than risk
+        # swapping on a machine that is already carrying four workers.
+        return BASELINE_RENDER_WORKERS
+    affordable = int(memory * 0.5 // _WORKER_MEMORY_BYTES)
+    return max(BASELINE_RENDER_WORKERS, min(target, affordable))
+

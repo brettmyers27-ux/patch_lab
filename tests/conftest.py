@@ -25,3 +25,8 @@ import tempfile
 ISOLATED_APP_DATA = tempfile.mkdtemp(prefix="patchlab-test-appdata-")
 os.environ["PATCHLAB_APP_DATA"] = ISOLATED_APP_DATA
 atexit.register(shutil.rmtree, ISOLATED_APP_DATA, ignore_errors=True)
+
+# The warm engine is a long-lived child process holding gigabytes of models. The
+# suite builds many windows and must never start one by accident; the tests
+# that exercise the engine opt in explicitly by clearing this variable.
+os.environ.setdefault("PATCHLAB_WARM_ENGINE", "0")

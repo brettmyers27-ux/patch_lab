@@ -22,7 +22,15 @@ from core.factory_match import (
 )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, matcher_cache: object | None = None) -> int:
+    """Run one Match. ``argv``/``matcher_cache`` let the warm engine call this in-process.
+
+    A caller that supplies ``matcher_cache`` is a long-lived process, so the
+    flight recorder is flushed but left open for the next job.
+    """
+
+    long_lived = matcher_cache is not None
+
     parser = argparse.ArgumentParser()
     parser.add_argument("audio", type=Path)
     parser.add_argument("--target-synth", choices=("serum1", "serum2"), default="serum2")
@@ -33,7 +41,7 @@ def main() -> int:
     parser.add_argument("--local-db", type=Path)
     parser.add_argument("--local-audio-root", type=Path)
     parser.add_argument("--session-root", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     def progress(detail: dict) -> None:
         print("MATCH_PROGRESS=" + json.dumps(detail, separators=(",", ":")), flush=True)
@@ -60,6 +68,7 @@ def main() -> int:
                 start_offset_s=args.offset,
                 session_root=args.session_root or DEFAULT_MATCH_SESSION_ROOT,
                 progress_callback=progress,
+                matcher_cache=matcher_cache,
             )
     except Exception as exc:
         # The UI needs one concise, actionable sentence; the flight recorder and
@@ -71,7 +80,8 @@ def main() -> int:
         print(f"MATCH_ERROR_DETAIL={type(exc).__name__}: {exc}", flush=True)
         try:
             recorder().flush(timeout=2.0)
-            recorder().close()
+            if not long_lived:
+                recorder().close()
         except Exception:
             pass
         return 1
@@ -80,7 +90,8 @@ def main() -> int:
         from core.diagnostics import recorder
 
         recorder().flush(timeout=1.0)
-        recorder().close()
+        if not long_lived:
+            recorder().close()
     except Exception:
         pass
     return 0

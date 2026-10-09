@@ -263,17 +263,52 @@ def loudness_normalize(audio: np.ndarray, target_dbfs: float = -18.0) -> np.ndar
     return np.ascontiguousarray(values * gain, dtype=np.float32)
 
 
+_STFT_SIZES = (512, 1024, 2048)
+
+
 def multi_resolution_stft_loss(target: np.ndarray, candidate: np.ndarray) -> float:
     length = min(len(target), len(candidate))
     if length < 512:
         return 10.0
     left, right = target[:length], candidate[:length]
     losses = []
-    for fft_size in (512, 1024, 2048):
+    for fft_size in _STFT_SIZES:
         target_mag = np.abs(librosa.stft(left, n_fft=fft_size, hop_length=fft_size // 4))
         candidate_mag = np.abs(librosa.stft(right, n_fft=fft_size, hop_length=fft_size // 4))
         losses.append(float(np.mean(np.abs(np.log1p(target_mag) - np.log1p(candidate_mag)))))
     return float(np.mean(losses))
+
+
+class TargetSpectra:
+    """The target's log-magnitude STFTs, computed once for a whole search.
+
+    ``multi_resolution_stft_loss`` recomputes the *target's* three spectrograms
+    for every candidate it scores, although the target never changes during a
+    match. This holds them once. ``loss`` performs exactly the operations the
+    function above does, in the same order, so the result is bit-identical; a
+    candidate whose length differs from the target's falls back to the original
+    function rather than risk a different answer.
+    """
+
+    def __init__(self, target: np.ndarray) -> None:
+        self.target = target
+        self.length = len(target)
+        self._log_magnitudes: dict[int, np.ndarray] = {}
+        if self.length >= 512:
+            for fft_size in _STFT_SIZES:
+                magnitude = np.abs(librosa.stft(target, n_fft=fft_size, hop_length=fft_size // 4))
+                self._log_magnitudes[fft_size] = np.log1p(magnitude)
+
+    def loss(self, candidate: np.ndarray) -> float:
+        if len(candidate) != self.length or not self._log_magnitudes:
+            return multi_resolution_stft_loss(self.target, candidate)
+        losses = []
+        for fft_size in _STFT_SIZES:
+            candidate_mag = np.abs(librosa.stft(candidate, n_fft=fft_size, hop_length=fft_size // 4))
+            losses.append(
+                float(np.mean(np.abs(self._log_magnitudes[fft_size] - np.log1p(candidate_mag))))
+            )
+        return float(np.mean(losses))
 
 
 #: Marker prefix used to carry a worker's initialization failure back to the
@@ -718,6 +753,15 @@ class _DeterministicRenderPool:
                 results[position] = result
         return results
 
+    def imap(self, function: Callable[[Any], Any], values: Sequence[Any]) -> Any:
+        """Yield results in position order as they finish, same pinning as ``map``."""
+
+        jobs = [
+            self._pools[position % len(self._pools)].apply_async(function, (value,))
+            for position, value in enumerate(values)
+        ]
+        return (job.get() for job in jobs)
+
     def close(self) -> None:
         for pool in self._pools:
             pool.close()
@@ -797,6 +841,8 @@ class _PoolSupervisor:
         self.max_replacements = int(max_replacements)
         self._seen_pids: set[int] = set()
         self.replacements = 0
+        #: Set once ``shutdown`` ran; a warm matcher is discarded after that.
+        self.shut_down = False
         self._record_workers()
 
     def _processes(self) -> list[Any]:
@@ -871,6 +917,7 @@ class _PoolSupervisor:
     def shutdown(self) -> None:
         """Terminate the pool safely, without waiting on wedged workers."""
 
+        self.shut_down = True
         for action in ("terminate", "close"):
             method = getattr(self._pool, action, None)
             if method is None:
@@ -893,6 +940,7 @@ class AnalysisBySynthesisMatcher:
         required_synths: Sequence[str] | None = None,
         operation_id: str = "",
         env: Any = None,
+        embedder: Any = None,
     ) -> None:
         from core.diagnostics import child_environment, new_operation_id, record
         from core.renderer_selection import preflight_renderers
@@ -985,7 +1033,11 @@ class AnalysisBySynthesisMatcher:
         #: usable from the benchmark scripts with no diagnostics wiring.
         self.tracker: Any = None
         self._rendered_batches = 0
-        self.embedder = ClapEmbedder(ENV)
+        self.processes = int(processes)
+        self._closed = False
+        # A long-lived owner (the warm engine) shares one CLAP model between
+        # the matcher and the export verifier instead of loading two.
+        self.embedder = embedder if embedder is not None else ClapEmbedder(ENV)
         self.stores = {
             1: _serum1_targets(assets.library_db),
             2: _serum2_targets(assets.serum2_targets, assets.serum2_schema),
@@ -1050,6 +1102,7 @@ class AnalysisBySynthesisMatcher:
         raise RenderWorkerInitializationError(detail)
 
     def close(self) -> None:
+        self._closed = True
         try:
             self.pool.close()
             self.pool.join()
@@ -1058,6 +1111,30 @@ class AnalysisBySynthesisMatcher:
             self.supervisor.shutdown()
         finally:
             self._scratch.cleanup()
+
+    def is_usable(self) -> bool:
+        """Whether this matcher can run another Match without being rebuilt.
+
+        False once it was closed, once its supervisor shut the pool down (a
+        stall or a respawn storm), or once any worker has died: a long-lived
+        matcher must never limp along on a damaged pool.
+        """
+
+        if self._closed or getattr(self.supervisor, "shut_down", False):
+            return False
+        try:
+            states = self.supervisor.worker_states()
+        except Exception:
+            return False
+        return len(states) >= 1 and all(state.get("alive") for state in states)
+
+    def begin_operation(self, operation_id: str) -> None:
+        """Re-label a reused matcher for the next Match's diagnostics."""
+
+        self.operation_id = operation_id or self.operation_id
+        self.supervisor.operation_id = self.operation_id
+        self.tracker = None
+        self._rendered_batches = 0
 
     def _retrieve(self, embedding: np.ndarray, synth: str | None, count: int = 5) -> list[int]:
         if synth is None:
@@ -1220,6 +1297,18 @@ class AnalysisBySynthesisMatcher:
                 result.append(clamped)
         return tuple(result[:4])
 
+    #: Rendered candidates scored per CLAP batch while the rest still render.
+    STREAM_CHUNK = 8
+
+    def _target_spectra(self, target: np.ndarray) -> TargetSpectra:
+        """The target's STFTs, computed once per distinct target, not per candidate."""
+
+        cached = getattr(self, "_spectra_cache", None)
+        if cached is None or cached[0] is not target:
+            cached = (target, TargetSpectra(target))
+            self._spectra_cache = cached
+        return cached[1]
+
     def _evaluate(
         self,
         candidates: list[Candidate],
@@ -1229,9 +1318,21 @@ class AnalysisBySynthesisMatcher:
         target_embedding: np.ndarray,
         config: SearchConfig,
     ) -> None:
+        """Render and score ``candidates``, overlapping the two.
+
+        Rendering is CPU-bound in the worker processes; CLAP embedding runs on
+        the GPU in this process. They used to run strictly one after the other
+        (render the whole batch, then embed the whole batch), leaving each side
+        idle while the other worked. Results are now scored in small chunks as
+        they stream back, so the embedding of early candidates happens while
+        later ones are still rendering. Each candidate's objective is computed
+        by exactly the same steps as before, so only the scheduling changed.
+        """
+
         waveforms: list[np.ndarray | None] = [None] * len(candidates)
         live_positions = []
         live_payloads = []
+        ready: list[int] = []
         for position, candidate in enumerate(candidates):
             candidate_note = candidate.midi_note or midi_note
             cached = _audio_root() / str(candidate.base_preset_id) / f"{candidate_note}.wav"
@@ -1243,9 +1344,56 @@ class AnalysisBySynthesisMatcher:
                         mono, orig_sr=rate, target_sr=CLAP_SAMPLE_RATE, res_type="soxr_hq"
                     ).astype(np.float32)
                 waveforms[position] = mono
+                ready.append(position)
             else:
                 live_positions.append(position)
                 live_payloads.append((candidate, candidate_note, duration))
+
+        spectra = self._target_spectra(target)
+        stft_weight, clap_weight = objective_weights(duration, config)
+        chunk_size = max(1, min(self.STREAM_CHUNK, int(config.embedding_batch_size)))
+
+        def score(positions: list[int]) -> None:
+            """Normalise, embed and score one chunk of rendered candidates."""
+
+            successful = [position for position in positions if waveforms[position] is not None]
+            if not successful:
+                return
+            target_samples = len(target)
+            normalized = []
+            for position in successful:
+                waveform = loudness_normalize(np.asarray(waveforms[position]))
+                waveform = waveform[:target_samples]
+                if len(waveform) < target_samples:
+                    waveform = np.pad(waveform, (0, target_samples - len(waveform)))
+                normalized.append(np.asarray(waveform, dtype=np.float32))
+            embedding_audio = [
+                embedding_comparison_audio(
+                    waveform, duration, adaptive=config.adaptive_preprocessing
+                )
+                for waveform in normalized
+            ]
+            embedded_batches = [
+                self.embedder.embed(
+                    embedding_audio[start : start + config.embedding_batch_size]
+                )
+                for start in range(0, len(embedding_audio), config.embedding_batch_size)
+            ]
+            embeddings = np.concatenate(embedded_batches, axis=0)
+            for position, waveform, embedded in zip(
+                successful, normalized, embeddings, strict=True
+            ):
+                candidate = candidates[position]
+                candidate.waveform = waveform
+                candidate.stft_loss = spectra.loss(waveform)
+                candidate.clap_cosine = float(
+                    np.clip(np.dot(target_embedding, embedded), -1.0, 1.0)
+                )
+                candidate.objective = (
+                    stft_weight * candidate.stft_loss
+                    + clap_weight * (1.0 - candidate.clap_cosine)
+                )
+
         if live_payloads:
             # Tell the watchdog the pool is about to be busy, so a long batch is
             # judged against the extended budget rather than looking silent.
@@ -1255,22 +1403,45 @@ class AnalysisBySynthesisMatcher:
                         self.tracker.note_heartbeat(
                             f"render-{state.get('pid')}", "rendering"
                         )
-            rendered = self.pool.map(_render_candidate, live_payloads)
+            # Dispatch first: imap hands every task to the pool immediately, so
+            # the workers are already rendering while the cached candidates and
+            # each arriving chunk are scored below.
+            imap = getattr(self.pool, "imap", None)
+            stream = (
+                imap(_render_candidate, live_payloads)
+                if imap is not None
+                else iter(self.pool.map(_render_candidate, live_payloads))
+            )
+        else:
+            stream = iter(())
+
+        pending = list(ready)
+        while len(pending) >= chunk_size:
+            score(pending[:chunk_size])
+            pending = pending[chunk_size:]
+        failed = 0
+        for position, (waveform, _coverage, error) in zip(live_positions, stream, strict=True):
             # A worker that could not initialize reports it through the result
             # channel rather than dying, so the parent converts it into one
             # terminal failure here instead of silently producing zero renders
             # for the rest of the search.
-            for _waveform, _coverage, error in rendered:
-                detail = decode_worker_init_failure(error)
-                if detail is not None:
-                    self._fail_on_worker_init(detail)
+            detail = decode_worker_init_failure(error)
+            if detail is not None:
+                self._fail_on_worker_init(detail)
+            waveforms[position] = waveform
+            if waveform is None:
+                failed += 1
+                continue
+            pending.append(position)
+            if len(pending) >= chunk_size:
+                score(pending)
+                pending = []
+        score(pending)
+
+        if live_payloads:
             # Bounded replacement check: an unexpectedly dying worker must not
             # be respawned without limit.
             self.supervisor.check()
-            for position, (waveform, _coverage, _error) in zip(
-                live_positions, rendered, strict=True
-            ):
-                waveforms[position] = waveform
             self._rendered_batches += 1
             if self.tracker is not None:
                 self.tracker.bump("rendered_candidates", len(live_payloads))
@@ -1278,51 +1449,8 @@ class AnalysisBySynthesisMatcher:
                     text=f"Rendered {len(live_payloads)} candidate(s)",
                     batch_id=f"batch-{self._rendered_batches}",
                     rendered=len(live_payloads),
-                    failed=sum(1 for item in rendered if item[0] is None),
+                    failed=failed,
                 )
-        successful = [position for position, waveform in enumerate(waveforms) if waveform is not None]
-        target_samples = len(target)
-        normalized = []
-        for position in successful:
-            waveform = loudness_normalize(np.asarray(waveforms[position]))
-            waveform = waveform[:target_samples]
-            if len(waveform) < target_samples:
-                waveform = np.pad(
-                    waveform,
-                    (0, target_samples - len(waveform)),
-                )
-            normalized.append(np.asarray(waveform, dtype=np.float32))
-        embedding_audio = [
-            embedding_comparison_audio(
-                waveform,
-                duration,
-                adaptive=config.adaptive_preprocessing,
-            )
-            for waveform in normalized
-        ]
-        embedded_batches = [
-            self.embedder.embed(
-                embedding_audio[start : start + config.embedding_batch_size]
-            )
-            for start in range(0, len(embedding_audio), config.embedding_batch_size)
-        ]
-        embeddings = (
-            np.concatenate(embedded_batches, axis=0)
-            if embedded_batches
-            else np.empty((0, 512), dtype=np.float32)
-        )
-        stft_weight, clap_weight = objective_weights(duration, config)
-        for position, waveform, embedded in zip(successful, normalized, embeddings, strict=True):
-            candidate = candidates[position]
-            candidate.waveform = waveform
-            candidate.stft_loss = multi_resolution_stft_loss(target, waveform)
-            candidate.clap_cosine = float(
-                np.clip(np.dot(target_embedding, embedded), -1.0, 1.0)
-            )
-            candidate.objective = (
-                stft_weight * candidate.stft_loss
-                + clap_weight * (1.0 - candidate.clap_cosine)
-            )
 
     def match(
         self,
