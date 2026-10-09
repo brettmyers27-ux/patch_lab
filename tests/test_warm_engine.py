@@ -296,7 +296,12 @@ for raw in sys.stdin:
 
 @pytest.fixture
 def qt():
-    return QCoreApplication.instance() or QCoreApplication([])
+    # A QApplication, never a bare QCoreApplication: the GUI tests in this suite
+    # reuse whichever application already exists, and widgets abort the process
+    # if all they find is a core application.
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
 
 
 def _pump(condition, timeout: float = 30.0) -> bool:
