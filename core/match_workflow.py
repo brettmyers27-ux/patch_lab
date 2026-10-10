@@ -94,14 +94,30 @@ def _preset_details(
         # have failed every Match in the packaged app, so the join is used only
         # where the table exists; without it a preset simply offers the full
         # note range, as it always did.
-        has_coverage = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fingerprint_note_coverage'"
-        ).fetchone() is not None
-        if has_coverage:
+        #
+        # The fallback is for the bundled catalog ONLY. A database that is
+        # recognisably a PatchLab library (it has the preparation bookkeeping
+        # tables) but lacks the coverage table is damaged or half-migrated, and
+        # quietly offering every note there would audition and export silent
+        # notes -- so that case fails loudly instead.
+        tables = {
+            str(name)
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "fingerprint_note_coverage" in tables:
             query = (
                 f"SELECT p.id,p.name,p.synth,p.path,p.content_hash,nc.note_mask "
                 f"FROM presets p LEFT JOIN fingerprint_note_coverage nc "
                 f"ON nc.preset_id=p.id WHERE p.id IN ({placeholders})"
+            )
+        elif tables & {"prepared_presets", "schema_migrations", "fingerprints"}:
+            raise RuntimeError(
+                f"The preset library database {database_path} is missing its "
+                "playable-note coverage table (fingerprint_note_coverage); it "
+                "looks damaged or only partly upgraded. Reopen the library in "
+                "PatchLab to repair it, or reprepare it."
             )
         else:
             query = (

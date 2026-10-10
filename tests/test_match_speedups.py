@@ -382,3 +382,80 @@ def test_a_library_row_without_a_recorded_mask_offers_the_full_range(tmp_path) -
 
     details = _preset_details([7], _catalog(tmp_path / "library.db", with_coverage=True, mask=None))
     assert details[7]["audible_midi_notes"] == list(RENDER_MIDI_NOTES)
+
+
+def test_a_prepared_library_missing_its_coverage_table_fails_loudly(tmp_path) -> None:
+    """The catalog fallback must not paper over a damaged or half-migrated library."""
+
+    import sqlite3
+
+    import pytest
+
+    from core.match_workflow import _preset_details
+
+    path = _catalog(tmp_path / "library.db", with_coverage=False)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE prepared_presets(preset_id INTEGER PRIMARY KEY)")
+    with pytest.raises(RuntimeError, match="fingerprint_note_coverage"):
+        _preset_details([7], path)
+
+
+def test_a_corrupt_database_is_not_mistaken_for_a_catalog(tmp_path) -> None:
+    import sqlite3
+
+    import pytest
+
+    from core.match_workflow import _preset_details
+
+    path = tmp_path / "library.db"
+    path.write_bytes(b"this is not a sqlite database" * 200)
+    with pytest.raises(sqlite3.DatabaseError):
+        _preset_details([7], path)
+
+
+def test_the_real_bundled_catalog_resolves_with_the_full_note_range() -> None:
+    """The older bundled catalog (presets/params only) is what packaged apps read."""
+
+    import sqlite3
+    from pathlib import Path
+
+    import pytest
+
+    from core.match_workflow import _preset_details
+    from core.prepared_state import RENDER_MIDI_NOTES
+    from core.synthesis_assets import SYNTHESIS_CATALOG_NAME
+
+    catalog = Path(__file__).resolve().parents[1] / "data" / "models" / SYNTHESIS_CATALOG_NAME
+    if not catalog.is_file():
+        pytest.skip("bundled catalog is only present in a development checkout")
+    with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as connection:
+        preset_id = int(connection.execute("SELECT MIN(id) FROM presets").fetchone()[0])
+    details = _preset_details([preset_id], catalog)
+    assert details[preset_id]["audible_midi_notes"] == list(RENDER_MIDI_NOTES)
+
+
+def test_a_current_schema_library_honours_recorded_coverage(tmp_path) -> None:
+    """A library created by today's Database() migrations keeps valid coverage."""
+
+    import sqlite3
+
+    from core.db import Database
+    from core.match_workflow import _preset_details
+    from core.prepared_state import RENDER_MIDI_NOTES
+
+    library = tmp_path / "library.db"
+    Database(library)
+    with sqlite3.connect(library) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO presets(id,path,name,synth,content_hash) VALUES (7,'/p/a','Pad','serum2',?)",
+            ("a" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO presets(id,path,name,synth,content_hash) VALUES (8,'/p/b','Lead','serum2',?)",
+            ("b" * 64,),
+        )
+        connection.execute("INSERT INTO fingerprint_note_coverage(preset_id,note_mask) VALUES (7,?)", (0b110,))
+    details = _preset_details([7, 8], library)
+    assert details[7]["audible_midi_notes"] == [RENDER_MIDI_NOTES[1], RENDER_MIDI_NOTES[2]]
+    assert details[8]["audible_midi_notes"] == list(RENDER_MIDI_NOTES)

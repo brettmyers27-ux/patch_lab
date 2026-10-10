@@ -432,9 +432,18 @@ def _cleanup_preset(
         try:
             size = path.stat().st_size if path.is_file() else 0
             if path.is_file():
-                unlink_file(path)
-                files += 1
-                byte_count += size
+                try:
+                    unlink_file(path)
+                except FileNotFoundError:
+                    # Another preparation worker's start-up recovery pass can
+                    # clean this prepared preset between our is_file() check
+                    # and the unlink. The file is gone, which is the goal: that
+                    # worker counted it, so this is neither a failure nor ours
+                    # to count a second time.
+                    pass
+                else:
+                    files += 1
+                    byte_count += size
             removable_notes.append(note)
         except OSError as exc:
             errors.append(f"{path}: {exc}")
@@ -706,7 +715,7 @@ def _prepare_work_queue_serial(
     jobs_root = root / "jobs"
     jobs_root.mkdir(parents=True, exist_ok=True)
     revision_token = prepared_revision_token(revision)
-    recover_preparation_state(
+    recovered = recover_preparation_state(
         database,
         analysis_root=root,
         legacy_audio_root=legacy_audio_root,
@@ -718,6 +727,12 @@ def _prepare_work_queue_serial(
         wanted = set(int(item) for item in preset_ids)
         queue = [preset for preset in queue if preset.id in wanted]
     summary = PreparationSummary(queued=len(queue))
+    # Recovery cleans every already-prepared preset with leftover renders -- with
+    # two single-preset workers running at once, that includes the other
+    # worker's preset in the moment after it commits. Those files were really
+    # removed, so they belong in the totals; dropping them made the compaction
+    # count come up one short (174 != 175) whenever the two workers overlapped.
+    summary.cleaned_files += recovered.cleaned_files
     embedder: Any | None = None
 
     def report(stage: str, preset: PresetRecord, completed: int) -> None:

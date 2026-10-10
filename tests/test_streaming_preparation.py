@@ -856,3 +856,48 @@ def test_serum2_contract_and_match_survive_analysis_wav_deletion(
     assert matrix is not None and matrix.shape == (1, 512)
     assert rows[0]["preset_id"] == preset_id
     assert rows[0]["audition_path"] is None
+
+
+def test_start_up_recovery_cleanup_is_counted_in_the_run_totals(tmp_path: Path) -> None:
+    """Regression for the intermittent ``174 != 175`` compaction count.
+
+    Two preparation workers run at once and each starts by recovering every
+    already-prepared preset that still has leftover renders -- including the
+    other worker's preset, just after it commits. Those files are really
+    removed, so the totals must include them.
+    """
+
+    database, _root, (first_id, second_id) = _catalog(tmp_path, count=2)
+
+    def refuse(_path: Path) -> None:
+        raise OSError("busy")
+
+    left_behind = _run(tmp_path, database, preset_ids=[first_id], unlink_file=refuse)
+    assert left_behind.cleanup_failures == 1
+    assert list((tmp_path / "analysis").rglob("*.wav")), "first preset's renders remain"
+
+    later = _run(tmp_path, database, preset_ids=[second_id])
+
+    assert later.cleanup_failures == 0
+    assert later.cleaned_files == 2 * len(MIDI_NOTES), "own renders plus the recovered preset's"
+    assert not list((tmp_path / "analysis").rglob("*.wav"))
+
+
+def test_a_file_removed_by_a_concurrent_worker_is_not_a_cleanup_failure(tmp_path: Path) -> None:
+    database, _root, (preset_id,) = _catalog(tmp_path)
+
+    def removed_underneath_us(path: Path) -> None:
+        path.unlink()
+        raise FileNotFoundError(path)  # the other worker won the unlink race
+
+    summary = _run(tmp_path, database, unlink_file=removed_underneath_us)
+
+    assert summary.cleanup_failures == 0
+    assert summary.cleaned_files == 0, "the other worker counted these"
+    assert is_preset_prepared(database, preset_id)
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 0
+        state, needed = connection.execute(
+            "SELECT state,cleanup_needed FROM preparation_jobs WHERE preset_id=?", (preset_id,)
+        ).fetchone()
+    assert (state, needed) == ("cleanup_complete", 0)
