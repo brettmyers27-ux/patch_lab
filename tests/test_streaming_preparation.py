@@ -901,3 +901,60 @@ def test_a_file_removed_by_a_concurrent_worker_is_not_a_cleanup_failure(tmp_path
             "SELECT state,cleanup_needed FROM preparation_jobs WHERE preset_id=?", (preset_id,)
         ).fetchone()
     assert (state, needed) == ("cleanup_complete", 0)
+
+
+def test_concurrent_workers_never_delete_each_others_in_flight_render_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: ~0.4% of presets failed with a vanished ``.N.tmp.wav``.
+
+    Two single-preset workers run at once. Each used to begin with the global
+    recovery pass, which deletes every leftover ``.*.tmp.wav`` -- including the
+    one its sibling was writing at that moment, so the sibling's rename failed.
+    Recovery must run once, before any worker starts.
+    """
+
+    import threading
+
+    from core import preparation as preparation_module
+
+    database, _root, ids = _catalog(tmp_path, count=2)
+    real_recover = preparation_module.recover_preparation_state
+    calls = {"count": 0}
+    gate = threading.Lock()
+    tmp_written = threading.Event()
+
+    def staggered_recover(*args, **kwargs):
+        with gate:
+            calls["count"] += 1
+            later = calls["count"] > 1
+        if later:
+            # A second recovery pass (the old per-worker behaviour) begins only
+            # once the first worker is mid-render with its temp file on disk.
+            tmp_written.wait(timeout=10)
+        return real_recover(*args, **kwargs)
+
+    monkeypatch.setattr(preparation_module, "recover_preparation_state", staggered_recover)
+
+    inner = _renderer()
+    survived: list[bool] = []
+    first = {"done": False}
+
+    def render(**kwargs):
+        if not first["done"]:
+            first["done"] = True
+            preset_id = int(kwargs["preset_ids"][0])
+            partial = Path(kwargs["audio_root"]) / str(preset_id) / ".60.4242.tmp.wav"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial render")
+            tmp_written.set()
+            time.sleep(0.7)  # the sibling's start-up pass runs inside this window
+            survived.append(partial.is_file())
+            partial.unlink(missing_ok=True)
+        return inner(**kwargs)
+
+    summary = _run(tmp_path, database, render=render, preset_ids=ids)
+
+    assert survived == [True], "a sibling worker deleted this worker's in-flight render output"
+    assert summary.failed == 0
+    assert summary.prepared == 2

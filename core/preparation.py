@@ -596,6 +596,17 @@ def prepare_work_queue(
     shared_embedder: Any | None = None
     terminal = 0
     aggregate = PreparationSummary(queued=len(queue))
+    # Recovery is global, so it runs here once, before either child exists. Run
+    # per child it deleted the sibling's in-flight ``.*.tmp.wav`` render output
+    # (the sibling's rename then failed) and raced its cleanup.
+    recovered = recover_preparation_state(
+        database,
+        analysis_root=_ensure_analysis_root(analysis_root),
+        legacy_audio_root=legacy_audio_root,
+        revision=revision,
+        unlink_file=unlink_file,
+    )
+    aggregate.cleaned_files += recovered.cleaned_files
 
     def shared_embedder_factory(requested_env: PlatformEnv) -> Any:
         nonlocal shared_embedder
@@ -648,6 +659,7 @@ def prepare_work_queue(
             render_function=one_renderer, fingerprint_function=one_analyzer,
             embedder_factory=shared_embedder_factory, free_space_provider=free_space_provider,
             minimum_free_bytes=minimum_free_bytes, unlink_file=unlink_file, revision=revision,
+            recover=False,
         )
 
     next_index = 0
@@ -702,8 +714,15 @@ def _prepare_work_queue_serial(
     minimum_free_bytes: int = MINIMUM_WORKING_FREE_BYTES,
     unlink_file: UnlinkFile = Path.unlink,
     revision: PreparedRevision = CURRENT_PREPARED_REVISION,
+    recover: bool = True,
 ) -> PreparationSummary:
-    """Stream only Phase-2 queue entries through render, commit, and cleanup."""
+    """Stream only Phase-2 queue entries through render, commit, and cleanup.
+
+    ``recover=False`` skips the start-up recovery pass. Recovery is global (it
+    deletes every leftover ``.*.tmp.wav`` and cleans every prepared preset's
+    renders), so it is only safe while no sibling worker is mid-render; the
+    concurrent driver therefore runs it once, before starting any worker.
+    """
 
     # The lifecycle intentionally processes one preset at a time. Keep this
     # compatibility argument for existing callers while Phase 5 owns any
@@ -715,12 +734,16 @@ def _prepare_work_queue_serial(
     jobs_root = root / "jobs"
     jobs_root.mkdir(parents=True, exist_ok=True)
     revision_token = prepared_revision_token(revision)
-    recovered = recover_preparation_state(
-        database,
-        analysis_root=root,
-        legacy_audio_root=legacy_audio_root,
-        revision=revision,
-        unlink_file=unlink_file,
+    recovered = (
+        recover_preparation_state(
+            database,
+            analysis_root=root,
+            legacy_audio_root=legacy_audio_root,
+            revision=revision,
+            unlink_file=unlink_file,
+        )
+        if recover
+        else RecoverySummary()
     )
     queue = get_presets_needing_preparation(database, revision=revision)
     if preset_ids is not None:

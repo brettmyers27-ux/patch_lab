@@ -985,3 +985,59 @@ def test_missing_preset_file_stays_pending_not_failed(
     assert summary.failed_load == 0, "a missing file is not a load failure"
     # The catalog rows survive.
     assert database.library_coverage()["discovered"] == 3
+
+
+def test_an_embedded_preset_missing_its_parameter_record_is_ingested_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older releases left fingerprinted presets with no parameter record.
+
+    Preparation cannot render without one, so those presets failed with
+    "Preset ids are not renderable" on every run and never became searchable.
+    Linking the folder again must restore the record, and must not disturb a
+    sibling that already has one.
+    """
+
+    import core.local_library as library_module
+
+    env = serum1_only_env(tmp_path)
+    database, root = catalogue(tmp_path, env, monkeypatch, fxp=2)
+    with database.connect() as connection:
+        ids = [int(row[0]) for row in connection.execute("SELECT id FROM presets ORDER BY id")]
+        assert len(ids) == 2
+        lost, kept = ids
+        connection.execute("UPDATE presets SET status='embedded' WHERE id IN (?,?)", (lost, kept))
+        connection.execute("DELETE FROM params WHERE preset_id=?", (lost,))
+    with database.connect() as connection:
+        before = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT param_index,param_name,norm_value FROM params WHERE preset_id=?", (kept,)
+            )
+        ]
+
+    try:
+        library_module.process_linked_folder(
+            root,
+            db_path=database.path,
+            audio_root=tmp_path / "audio",
+            state_dir=tmp_path / "states",
+            env=env,
+            compact_mode=True,
+            log=lambda _m: None,
+        )
+    except _StopAfterIngest:
+        pass
+
+    with database.connect() as connection:
+        restored = connection.execute(
+            "SELECT COUNT(*) FROM params WHERE preset_id=?", (lost,)
+        ).fetchone()[0]
+        after = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT param_index,param_name,norm_value FROM params WHERE preset_id=?", (kept,)
+            )
+        ]
+    assert restored == 1, "the missing parameter record was re-read"
+    assert after == before, "a preset that already had one is left alone"

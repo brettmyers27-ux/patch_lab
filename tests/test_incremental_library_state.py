@@ -498,3 +498,100 @@ def test_prepare_path_reuses_prepared_snapshot_without_starting_expensive_work(
     assert summary.source_files_stat == 1
     assert summary.source_hashes == 0
     assert summary.fingerprints_created == 0
+
+
+def test_prepare_path_picks_up_an_embedded_serum2_preset_missing_coverage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Serum 2 library prepared by an older release has no note-coverage rows.
+
+    Those presets are queued ("N still need preparation") but already
+    ``embedded``. The Prepare button used to clear the pending marker it had
+    just set for them, so nothing ever processed them and the count never fell.
+    """
+
+    from core import local_library
+    from core.preparation import PreparationSummary
+    from tests.test_renderer_routing import both_env
+
+    root = tmp_path / "presets"
+    root.mkdir()
+    (root / "legacy.SerumPreset").write_bytes(b"legacy-serum2")
+    database = Database(tmp_path / "library.db")
+    preset_id = reconcile_source_tree(root, database).entries[0].preset_id
+    _prepare(database, preset_id, synth="serum2")
+    with database.connect() as connection:
+        connection.execute("DELETE FROM fingerprint_note_coverage WHERE preset_id=?", (preset_id,))
+    assert not is_preset_prepared(database, preset_id)
+    assert [item.id for item in get_presets_needing_preparation(database)] == [preset_id]
+
+    monkeypatch.setattr("core.local_library.user_presets_enabled", lambda: True)
+    handed_over: list[list[int]] = []
+
+    def record_queue(**kwargs):
+        handed_over.append(list(kwargs["preset_ids"]))
+        return PreparationSummary(queued=len(kwargs["preset_ids"]))
+
+    monkeypatch.setattr(local_library, "prepare_work_queue", record_queue)
+    monkeypatch.setattr(
+        local_library,
+        "_process_pending_for_generation",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("an ingested preset must not be re-read from Serum")
+        ),
+    )
+
+    process_linked_folder(
+        root,
+        db_path=database.path,
+        audio_root=tmp_path / "audio",
+        state_dir=tmp_path / "states",
+        preparation_ids=[preset_id],
+        env=both_env(tmp_path),
+        relay=None,
+        log=lambda _message: None,
+    )
+
+    assert handed_over == [[preset_id]], "the stale preset reached the durable queue"
+
+
+def test_prepare_path_backfills_renderer_identity_for_rows_from_older_releases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without an identity the pending query can never select the preset."""
+
+    from core import local_library
+    from core.preparation import PreparationSummary
+    from tests.test_renderer_routing import both_env
+
+    root = tmp_path / "presets"
+    root.mkdir()
+    (root / "old-row.fxp").write_bytes(b"CcnK-old-row")
+    database = Database(tmp_path / "library.db")
+    preset_id = reconcile_source_tree(root, database).entries[0].preset_id
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE presets SET status='embedded', compatible_renderers=NULL WHERE id=?", (preset_id,)
+        )
+    monkeypatch.setattr("core.local_library.user_presets_enabled", lambda: True)
+    monkeypatch.setattr(local_library, "prepare_work_queue", lambda **k: PreparationSummary())
+    seen: list[list[int]] = []
+
+    def record_processing(generation, *, db_path, **_kwargs):
+        seen.append([item.id for item in Database(db_path).presets_needing_generation(generation)])
+        return local_library.PendingProcessSummary(generation=generation)
+
+    monkeypatch.setattr(local_library, "_process_pending_for_generation", record_processing)
+
+    process_linked_folder(
+        root,
+        db_path=database.path,
+        audio_root=tmp_path / "audio",
+        state_dir=tmp_path / "states",
+        preparation_ids=[preset_id],
+        env=both_env(tmp_path),
+        relay=None,
+        log=lambda _message: None,
+    )
+
+    assert [preset_id] in seen, f"the preset was never selectable for processing: {seen}"

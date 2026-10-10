@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Protocol
 import numpy as np
 
 from core.contribution_bundle import LEDGER_NAME
-from core.db import Database
+from core.db import Database, PresetRecord
 from core.factory_bundle import DEFAULT_FACTORY_BUNDLE, FactoryBundle
 from core.features import ClapEmbedder
 from core.library_state import get_presets_needing_preparation, reconcile_source_tree
@@ -793,12 +793,28 @@ def _process_linked_folder(
         pending_updates[preset_id] = identity.pending_reason(capability.capabilities)
         id_to_path[preset_id] = path
         with database.connect() as connection:
-            status = str(
-                connection.execute(
-                    "SELECT status FROM presets WHERE id=?", (preset_id,)
-                ).fetchone()[0]
-            )
-        if status in {"scanned", "failed_load"} and pending_updates[preset_id] is None:
+            state = connection.execute(
+                "SELECT status,is_factory,"
+                " EXISTS(SELECT 1 FROM params WHERE preset_id=presets.id),"
+                " EXISTS(SELECT 1 FROM serum2_full_settings WHERE preset_id=presets.id)"
+                " FROM presets WHERE id=?",
+                (preset_id,),
+            ).fetchone()
+        status = str(state[0])
+        has_parameter_record = bool(state[3] if synth == "serum2" else state[2])
+        # A preset fingerprinted by an older release can be "embedded" yet have
+        # no parameter record. Preparation cannot render without one, so it
+        # failed with "Preset ids are not renderable" on every run, forever.
+        # Re-reading the parameters is cheap and is the only way back to a
+        # prepared preset. (``failed_silent`` has its own retry rule.)
+        lacks_required_parameters = (
+            not state[1]
+            and status not in {"scanned", "failed_load", "failed_silent"}
+            and not has_parameter_record
+        )
+        if (
+            status in {"scanned", "failed_load"} or lacks_required_parameters
+        ) and pending_updates[preset_id] is None:
             new_or_pending_set.add(preset_id)
         if progress is not None:
             progress(
@@ -1002,6 +1018,21 @@ def _process_linked_folder(
     return summary
 
 
+def _has_parameter_record(database: Database, preset: PresetRecord) -> bool:
+    """Whether the stored parameters preparation renders from exist.
+
+    Serum 1 renders from ``params``; Serum 2 from its full decoded settings.
+    A preset fingerprinted by an older release can be ``embedded`` yet lack
+    one, and the renderer refuses it ("Preset ids are not renderable").
+    """
+
+    table = "serum2_full_settings" if preset.synth == "serum2" else "params"
+    with database.connect() as connection:
+        return connection.execute(
+            f"SELECT 1 FROM {table} WHERE preset_id=? LIMIT 1", (preset.id,)
+        ).fetchone() is not None
+
+
 def _prepare_linked_library_incrementally(
     root: Path,
     *,
@@ -1078,6 +1109,22 @@ def _prepare_linked_library_incrementally(
     for preset in queue:
         database.set_factory_status(preset.id, preset.content_hash in known_factory)
 
+    # Rows written by an older release carry no renderer identity, and the
+    # pending processor selects work by it -- such a preset was marked awaiting
+    # processing yet could never be picked up. Identifying a path costs a suffix
+    # comparison, so back-fill it for queue members that lack it.
+    from core.preset_identity import identify_preset
+
+    for preset in queue:
+        if not preset.compatible_renderers:
+            identity = identify_preset(Path(preset.path), env=env)
+            database.record_identity(
+                preset.id,
+                file_format=identity.file_format,
+                provenance=identity.provenance,
+                compatible_renderers=identity.compatible_renderers,
+            )
+
     # Mark only the current durable queue as awaiting processing.  The existing
     # pending processor then uses stored source paths and never discovers or
     # hashes the library a second time.
@@ -1085,6 +1132,23 @@ def _prepare_linked_library_incrementally(
         {preset.id: PENDING_AWAITING_PROCESSING for preset in queue}
     )
     refresh_pending_reasons(db_path=database.path, env=env, operation_id=operation_id)
+    # Queue members split two ways. Never-ingested presets (and ones an older
+    # release left without a parameter record) go through ingestion, which
+    # reads their parameters and then prepares them. Everything else is already
+    # ingested -- typically an ``embedded`` preset whose stored preparation
+    # predates the current contract -- and goes straight to the durable
+    # preparation queue. ``refresh_pending_reasons`` clears the marker for the
+    # latter, which used to leave them queued but never processed.
+    ingest_ids = {
+        preset.id
+        for preset in queue
+        if preset.status in {"scanned", "failed_load"}
+        or not _has_parameter_record(database, preset)
+    }
+    direct_queue = [preset for preset in queue if preset.id not in ingest_ids]
+    database.set_pending_reasons(
+        {preset_id: PENDING_AWAITING_PROCESSING for preset_id in ingest_ids}
+    )
     capabilities = refresh_capabilities(
         env=env,
         operation_id=operation_id,
@@ -1125,6 +1189,37 @@ def _prepare_linked_library_incrementally(
         summary.fingerprints_created += result.fingerprints_created
         summary.compacted_render_files += result.compacted_render_files
         summary.compacted_render_bytes += result.compacted_render_bytes
+
+    direct_ready = [
+        preset.id
+        for preset in direct_queue
+        if capabilities.capabilities[preset.synth].available
+    ]
+    skipped_direct = len(direct_queue) - len(direct_ready)
+    if skipped_direct:
+        summary.skipped_unsupported_generation += skipped_direct
+    if direct_ready:
+        require_user_presets("preparation")
+        preparation = prepare_work_queue(
+            db_path=database.path,
+            analysis_root=analysis_temp_root(env),
+            legacy_audio_root=audio_root,
+            state_dir=state_dir,
+            env=env,
+            preset_ids=direct_ready,
+            render_processes=render_processes,
+            log=log,
+            progress=progress,
+            cancel_check=lambda: not user_presets_enabled(),
+            render_function=render_library,
+            fingerprint_function=fingerprint_render_rows,
+            embedder_factory=ClapEmbedder,
+            stage_hook=preparation_stage_hook,
+        )
+        summary.fingerprints_created += preparation.fingerprints_created
+        summary.failed_load += preparation.failed
+        summary.compacted_render_files += preparation.cleaned_files
+        summary.compacted_render_bytes += preparation.cleaned_bytes
 
     summary.searchable_local = int(database.library_coverage()["learned"])
     record(
